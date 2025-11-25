@@ -38,4 +38,5 @@ pre-commit run --all-files --show-diff-on-failure --color=always autogen-trainer
 ```
 
 ## Available Recipes
-- [retool](https://github.com/verl-project/verl-recipe/retool): Reinforcement Learning for Strategic Tool Use in LLMs
+- [retool](https://github.com/verl-project/verl-recipe/tree/main/retool): Reinforcement Learning for Strategic Tool Use in LLMs
+- [langgraph_agent](https://github.com/verl-project/verl-recipe/tree/main/langgraph_agent): A tiny example to demonstrate multi-turn rollout with [LangGraph ReactAgent](https://langchain-ai.github.io/langgraph/agents/overview/) to solve math expression.
