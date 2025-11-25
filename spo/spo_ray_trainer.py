@@ -418,16 +418,6 @@ class RayPPOTrainer(BaseRayPPOTrainer):
 
                         selected_pos = np.random.choice(M, size=target_bs, replace=replace, p=probs)
                         keep_idx = [items[j] for j in selected_pos.tolist()]
-                        keep_weights = weights_np[selected_pos]
-                        keep_probs = probs[selected_pos]
-
-                        print(f"[DEBUG] Weighted sampling: M={M}, target_bs={target_bs}, replace={replace}")
-                        print(
-                            f"[DEBUG] Sampled probs: min={keep_probs.min():.6f}, max={keep_probs.max():.6f}, mean={keep_probs.mean():.6f}"
-                        )
-                        print(
-                            f"[DEBUG] Sampled weights: min={keep_weights.min():.6f}, max={keep_weights.max():.6f}, mean={keep_weights.mean():.6f}"
-                        )
 
                         if keep_idx:
                             sampled_batch_dict = {}
@@ -438,7 +428,7 @@ class RayPPOTrainer(BaseRayPPOTrainer):
                                 except Exception:
                                     pass
 
-                                if isinstance(v, (list, tuple)):
+                                if isinstance(v, list | tuple):
                                     sampled_batch_dict[k] = type(v)(v[i] for i in keep_idx)
                                 else:
                                     sampled_batch_dict[k] = v

@@ -105,7 +105,8 @@ def merge_offline_values(
 
     if num_prompts_exceeding_max > 0:
         print(
-            f"\nSubsampling: {num_prompts_exceeding_max} prompts had more than {max_scores_per_prompt} scores and were randomly subsampled to {max_scores_per_prompt}"
+            f"\nSubsampling: {num_prompts_exceeding_max} prompts had more than {max_scores_per_prompt} "
+            "scores and were randomly subsampled to {max_scores_per_prompt}"
         )
 
     # Save merged results
@@ -150,13 +151,13 @@ def main():
         "--pattern",
         type=str,
         default="offline_value_estimation_subset_*/validation_data/0.jsonl",
-        help="Glob pattern to match subset result files (default: offline_value_estimation_subset_*/validation_data/0.jsonl)",
+        help="Glob pattern to match subset result files",
     )
     parser.add_argument(
         "--max_scores_per_prompt",
         type=int,
         default=8,
-        help="Maximum number of scores to keep per prompt. If a prompt has more scores, randomly subsample to this number (default: 8)",
+        help="Maximum number of scores to keep per prompt.",
     )
 
     args = parser.parse_args()

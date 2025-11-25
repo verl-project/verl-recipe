@@ -206,7 +206,17 @@ class SPOToolAgentLoop(AgentLoopBase):
     async def _handle_pending_state(self, agent_data: AgentData, sampling_params: dict[str, Any]) -> AgentState:
         """Handle the pending state: prepare the prompt and start generation."""
         problem = agent_data.messages[0]["content"]
-        user_prompt = "Solve the following problem step by step. You now have the ability to selectively write executable Python code to enhance your reasoning process. The Python code will be executed by an external sandbox, and the output (wrapped in `<interpreter>output_str</interpreter>`) can be returned to aid your reasoning and help you arrive at the final answer. The Python code should be complete scripts, including necessary imports. Important: The sandbox is stateless and non-interactive; thus, prior imports, definitions, and state do not persist between executions and cannot be referenced.\nEach code snippet is wrapped with `<code>\n```python\ncode snippet\n```\n</code>`.\n"
+        user_prompt = (
+            "Solve the following problem step by step. "
+            "You now have the ability to selectively write executable Python code to enhance your reasoning process. "
+            "The Python code will be executed by an external sandbox, and the output "
+            "(wrapped in `<interpreter>output_str</interpreter>`)"
+            " can be returned to aid your reasoning and help you arrive at the final answer. "
+            "The Python code should be complete scripts, including necessary imports. "
+            "Important: The sandbox is stateless and non-interactive; thus, prior imports, definitions, "
+            "and state do not persist between executions and cannot be referenced.\n"
+            "Each code snippet is wrapped with `<code>\n```python\ncode snippet\n```\n</code>`.\n"
+        )
         user_prompt += "*user question:*\n"
         user_prompt += problem
         messages = [{"role": "user", "content": user_prompt}]
