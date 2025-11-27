@@ -21,6 +21,7 @@ from typing import Any, Optional
 from uuid import uuid4
 
 from recipe.collabllm.utils import remove_think_block
+
 from verl.interactions.base import BaseInteraction
 from verl.utils.rollout_trace import rollout_trace_op
 

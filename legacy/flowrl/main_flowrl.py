@@ -95,6 +95,7 @@ class TaskRunner:
 
             # Use FlowRL custom worker instead of standard worker
             from recipe.flowrl.flowrl_fsdp_worker import FlowRLActorRolloutRefWorker
+
             from verl.workers.fsdp_workers import CriticWorker  # , ActorRolloutRefWorker
 
             ActorRolloutRefWorker = FlowRLActorRolloutRefWorker

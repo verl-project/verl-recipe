@@ -48,12 +48,11 @@ class vLLMRollout(vLLMRolloutBase):
         self.model_config = model_config
         self.device_mesh = device_mesh
         # NPU-ADAPTATION: import vLLM-Ascend patch
+        from recipe.r1_ascend import engine_core  # noqa: F401
         from vllm_ascend.patch import (
             platform,  # noqa: F401
             worker,  # noqa: F401
         )
-
-        from recipe.r1_ascend import engine_core  # noqa: F401
         # NPU-ADAPTATION END
 
         if config.layered_summon:

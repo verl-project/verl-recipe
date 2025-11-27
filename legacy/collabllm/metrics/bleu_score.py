@@ -14,7 +14,6 @@
 # limitations under the License.
 
 from nltk.translate.bleu_score import sentence_bleu
-
 from recipe.collabllm.utils import extract_json, parse_messages
 
 EXTRACT_MULTITURN_COMPLETION_PROMPT = '''You are a thorough and diligent conversation analyzer. \
