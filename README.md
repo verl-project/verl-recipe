@@ -5,7 +5,7 @@
 ## Contributing
 
 > [!NOTE]
-> Recipes from the main `verl` repository are temperarily placed in the [`legacy`](legacy) directory since they are broken or fail to meet the following requirements.
+> Recipes from the main `verl` repository are temperarily placed in [`legacy`](legacy) since they are broken or fail to meet the following requirements.
 > The original contributors are expected to fix the issues before moving them to the root directory.
 
 ### Recipe Folder Structure
