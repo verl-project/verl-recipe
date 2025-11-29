@@ -1,4 +1,4 @@
-
+**/tensorboard_log
 **/*.pt
 **/checkpoints
 **/wget-log
