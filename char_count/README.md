@@ -37,8 +37,8 @@ We create a train set and a val set. Both of them are used of SFT and RL. You ca
 
 To run the SFT
 ```bash
-backend=fsdp bash train_sft.sh  # use fsdp
-backend=megatron bash train_sft.sh  # use megatron
+BACKEND=fsdp bash train_sft.sh  # use fsdp
+BACKEND=megatron bash train_sft.sh  # use megatron
 ```
 We train SFT for 1 epoch. After 1 epoch, the validation score is around 0.435.
 
