@@ -80,7 +80,7 @@ torchrun --standalone --nnodes=1 --nproc-per-node=${NUM_TRAINERS:-1} \
     data.pad_mode=${PAD_MODE} \
     data.truncation=error \
     data.use_dynamic_bsz=True \
-    data.max_token_len_per_gpu=2048 \
+    data.max_token_len_per_gpu=1792 \
     data.messages_key=messages \
     model.path=$MODEL_ID \
     model.use_remove_padding=${USE_REMOVE_PADDING} \
