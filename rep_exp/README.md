@@ -8,7 +8,12 @@
 
 ## Installation 🔌
 
-Besides the base verl installation, which you can find [here](https://verl.readthedocs.io/en/latest/start/install.html), the only package to install is scikit-learn.
+Install the following commit of verl:
+```
+pip install verl@git+https://github.com/volcengine/verl.git@b9bd00efba253ea90072555c45692054cf703de2
+```
+
+The only other package to install is scikit-learn, which we'll use for applying a sparse projection.
 ```bash
 pip install scikit-learn
 ```
@@ -19,16 +24,16 @@ You can reproduce or extend our experiments by running the following commands:
 
 ```bash
 # General format
-sh recipe/rep_exp/train_elliptical.sh $TASK $SPARSE_DIM $BETA $SEED
+sh rep_exp/train_elliptical.sh $TASK $SPARSE_DIM $BETA $SEED
 
 # MATH
-sh recipe/rep_exp/train_elliptical.sh math 32 0.01 42
+sh rep_exp/train_elliptical.sh math 32 0.01 42
 
 # GSM8K
-sh recipe/rep_exp/train_elliptical.sh gsm8k 32 0.01 42
+sh rep_exp/train_elliptical.sh gsm8k 32 0.01 42
 
 # DAPO-WITH-AIME
-sh recipe/rep_exp/train_elliptical.sh dapo-with-aime24 128 0.01 42
+sh rep_exp/train_elliptical.sh dapo-with-aime24 128 0.01 42
 ```
 where `$TASK` is the task name, `$SPARSE_DIM` is the sparse dimension, `$BETA` is the beta parameter, and `$SEED` is the seed.
 
@@ -39,13 +44,13 @@ Once done training, you can evaluate the model on the test set by following two 
 This is necessary because the model checkpoint is saved in multiple shards (depending on the nubmer of GPUs), and we need to merge them into a single checkpoint.
 
 ```bash
-sh recipe/rep_exp/model_merge.sh /path/to/global_step_X/actor # where X is the global step of the checkpoint with the best pass@1 on dev
+sh rep_exp/model_merge.sh /path/to/global_step_X/actor # where X is the global step of the checkpoint with the best pass@1 on dev
 ```
 
 2. Evaluate the merged model.
 
 ```bash
-sh recipe/rep_exp/eval.sh $TASK /path/to/global_step_X/actor/hf #where X is the global step of the checkpoint with the best pass@1 on dev
+sh rep_exp/eval.sh $TASK /path/to/global_step_X/actor/hf #where X is the global step of the checkpoint with the best pass@1 on dev
 ```
 
 The results should be in a folder named `eval` and saved as a JSON file.
