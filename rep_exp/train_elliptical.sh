@@ -39,7 +39,7 @@ fi
 
 OFFLINE=True
 
-PYTHONUNBUFFERED=1 TRANSFORMERS_OFFLINE=${OFFLINE} python3 -u -m recipe.rep_exp.main_rep_exp \
+PYTHONUNBUFFERED=1 TRANSFORMERS_OFFLINE=${OFFLINE} python3 -u -m rep_exp.main_rep_exp \
     algorithm.adv_estimator=grpo \
     data.train_files="$train_files" \
     data.val_files="$dev_files" \
