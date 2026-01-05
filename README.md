@@ -2,6 +2,23 @@
 
 `verl-recipe` hosts recipes based on [verl](https://github.com/volcengine/verl) contributed by the community.
 
+## Usage
+
+`verl-recipe` can be used as a submodule of `verl`, keeping backward compatibility as `verl/recipe`:
+
+```bash
+git clone https://github.com/verl-project/verl.git
+cd verl
+git submodule update --init --recursive recipe
+```
+
+## Available Recipes
+
+- [retool](https://github.com/verl-project/verl-recipe/tree/main/retool): Reinforcement Learning for Strategic Tool Use in LLMs
+- [langgraph_agent](https://github.com/verl-project/verl-recipe/tree/main/langgraph_agent): A tiny example to demonstrate multi-turn rollout with [LangGraph ReactAgent](https://langchain-ai.github.io/langgraph/agents/overview/) to solve math expression.
+- [spo](https://github.com/verl-project/verl-recipe/tree/main/spo): [Single-stream Policy Optimization](https://arxiv.org/abs/2509.13232).
+- TBA...
+
 ## Contribution
 
 ### Version Specification
@@ -28,10 +45,3 @@ pre-commit run
 # for all files in the repo
 pre-commit run --all-files
 ```
-
-## Available Recipes
-
-- [retool](https://github.com/verl-project/verl-recipe/tree/main/retool): Reinforcement Learning for Strategic Tool Use in LLMs
-- [langgraph_agent](https://github.com/verl-project/verl-recipe/tree/main/langgraph_agent): A tiny example to demonstrate multi-turn rollout with [LangGraph ReactAgent](https://langchain-ai.github.io/langgraph/agents/overview/) to solve math expression.
-- [spo](https://github.com/verl-project/verl-recipe/tree/main/spo): [Single-stream Policy Optimization](https://arxiv.org/abs/2509.13232).
-- TBA...
