@@ -33,6 +33,7 @@ import vllm.envs as envs
 
 # Import specRLPatch from the correct location
 from recipe.specRL.vllm_plugin.patch_utils import specRLPatch
+from specrl.suffix_cache import SuffixCache
 from vllm.distributed.kv_transfer import has_kv_transfer_group
 from vllm.logger import init_logger
 from vllm.multimodal.inputs import MultiModalKwargs
@@ -51,8 +52,6 @@ from vllm.v1.sample.rejection_sampler import (
 )
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.worker.worker_base import WorkerBase
-
-from specrl.suffix_cache import SuffixCache
 
 SPEC_START_LEN = 4
 SPECRL_MIN_TOKEN_PROB = 0.1
