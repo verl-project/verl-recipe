@@ -10,18 +10,17 @@
 #   loss_per_token = op(vocab_parallel_logits, teacher_topk_logps, teacher_topk_indices)
 
 import math
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 import torch
-
+from megatron.core.fusions.fused_cross_entropy import calculate_logits_max
 from megatron.core.parallel_state import (
+    get_data_parallel_rank,
     get_tensor_model_parallel_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
-    get_data_parallel_rank,
 )
 from megatron.core.tensor_parallel.utils import VocabUtility
-from megatron.core.fusions.fused_cross_entropy import calculate_logits_max
 
 
 # -----------------------------
@@ -338,7 +337,9 @@ class _VocabParallelWeightedKLRKLDivergence(torch.autograd.Function):
         # Forward KL (not renorm): sum P_k (logP_k - logQ_k)
         per_token_kl_local = torch.sum(P_topk_part * (logP_topk_part - logQ_topk), dim=-1)
         per_token_kl = per_token_kl_local.clone()
-        torch.distributed.all_reduce(per_token_kl, op=torch.distributed.ReduceOp.SUM, group=get_tensor_model_parallel_group())
+        torch.distributed.all_reduce(
+            per_token_kl, op=torch.distributed.ReduceOp.SUM, group=get_tensor_model_parallel_group()
+        )
 
         # Reverse KL on topk with renorm
         P_sum_local = P_topk_part.sum(dim=-1)
@@ -356,7 +357,9 @@ class _VocabParallelWeightedKLRKLDivergence(torch.autograd.Function):
 
         per_token_rkl_local = torch.sum(Q_hat * (logQ_hat - logP_hat), dim=-1)
         per_token_rkl = per_token_rkl_local.clone()
-        torch.distributed.all_reduce(per_token_rkl, op=torch.distributed.ReduceOp.SUM, group=get_tensor_model_parallel_group())
+        torch.distributed.all_reduce(
+            per_token_rkl, op=torch.distributed.ReduceOp.SUM, group=get_tensor_model_parallel_group()
+        )
 
         per_token_loss = kl_ratio * per_token_kl + rkl_ratio * per_token_rkl
 
@@ -422,7 +425,9 @@ class _VocabParallelWeightedKLRKLDivergence(torch.autograd.Function):
         return grad_input, None, None, None
 
 
-def vocab_parallel_kl_rkl_divergence(vocab_parallel_logits, target_topk_logps, target_topk_indices, rkl_ratio: float = 0.1):
+def vocab_parallel_kl_rkl_divergence(
+    vocab_parallel_logits, target_topk_logps, target_topk_indices, rkl_ratio: float = 0.1
+):
     return _VocabParallelWeightedKLRKLDivergence.apply(
         vocab_parallel_logits, target_topk_logps, target_topk_indices, rkl_ratio
     )
@@ -503,7 +508,9 @@ class _VocabParallelJSDivergence(torch.autograd.Function):
         # KL(Q||M) rest analytic: for non-topk, M_j=(1-beta)Q_j => Q_j log(1/(1-beta))
         Q_topk_sum_local = Q_topk.sum(dim=-1)
         Q_topk_sum = Q_topk_sum_local.clone()
-        torch.distributed.all_reduce(Q_topk_sum, op=torch.distributed.ReduceOp.SUM, group=get_tensor_model_parallel_group())
+        torch.distributed.all_reduce(
+            Q_topk_sum, op=torch.distributed.ReduceOp.SUM, group=get_tensor_model_parallel_group()
+        )
 
         log_one_minus_beta = math.log(one_minus_beta)
         Q_rest_sum = 1.0 - Q_topk_sum
@@ -546,7 +553,9 @@ class _VocabParallelJSDivergence(torch.autograd.Function):
 
         Q_topk_sum_local = Q_topk.sum(dim=-1)
         Q_topk_sum = Q_topk_sum_local.clone()
-        torch.distributed.all_reduce(Q_topk_sum, op=torch.distributed.ReduceOp.SUM, group=get_tensor_model_parallel_group())
+        torch.distributed.all_reduce(
+            Q_topk_sum, op=torch.distributed.ReduceOp.SUM, group=get_tensor_model_parallel_group()
+        )
 
         log_one_minus_beta = math.log(one_minus_beta)
         Q_rest_sum = 1.0 - Q_topk_sum
@@ -598,6 +607,7 @@ class VocabParallelDistillLoss(torch.nn.Module):
       - rkl_ratio: only used when name == "kl_rkl"
       - beta:      only used when name == "jsd"
     """
+
     def __init__(self, name: str = "kl", rkl_ratio: float = 0.1, beta: float = 0.5):
         super().__init__()
         self.name = str(name).lower()
@@ -638,12 +648,13 @@ def build_vocab_parallel_distill_loss(loss_cfg: Optional[Any]) -> VocabParallelD
       - rkl_ratio: float (only for kl_rkl)
       - beta: float (only for jsd)
     """
-    cfg: Dict[str, Any] = {}
+    cfg: dict[str, Any] = {}
     if loss_cfg is None:
         cfg = {}
     else:
         try:
             from omegaconf import DictConfig, OmegaConf  # type: ignore
+
             if isinstance(loss_cfg, DictConfig):
                 cfg = OmegaConf.to_container(loss_cfg, resolve=True)  # type: ignore
             elif isinstance(loss_cfg, dict):

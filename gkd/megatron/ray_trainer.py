@@ -25,12 +25,12 @@ import numpy as np
 import ray
 import torch
 from omegaconf import OmegaConf, open_dict
+from recipe.gkd.teacher import TeacherClient
+from recipe.gkd.teacher_utils import get_teacher_knowledge
 from torch.utils.data import Dataset, Sampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 
-from recipe.gkd.teacher import TeacherClient
-from recipe.gkd.teacher_utils import get_teacher_knowledge
 from verl import DataProto
 from verl.experimental.dataset.sampler import AbstractCurriculumSampler
 from verl.single_controller.base import Worker
