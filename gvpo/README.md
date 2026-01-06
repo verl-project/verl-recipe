@@ -49,8 +49,8 @@ We follow the GRPO training setup from the official verl [example script](https:
 To download and preprocess these datasets, run:
 
 ```bash
-python examples/data_preprocess/math_dataset.py
-python examples/data_preprocess/gsm8k.py
+python -m examples.data_preprocess.math_dataset.py
+python -m examples.data_preprocess.gsm8k.py
 ```
 
 ---
