@@ -24,12 +24,13 @@ from omegaconf import OmegaConf
 
 from verl.experimental.dataset.sampler import AbstractSampler
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
-from .gvpo_ray_trainer import RayGVPOTrainer
 from verl.trainer.ppo.reward import load_reward_manager
 from verl.trainer.ppo.utils import need_critic, need_reference_policy
 from verl.utils.config import validate_config
 from verl.utils.device import is_cuda_available
 from verl.utils.import_utils import load_extern_type
+
+from .gvpo_ray_trainer import RayGVPOTrainer
 
 
 @hydra.main(config_path="config", config_name="gvpo_trainer", version_base=None)

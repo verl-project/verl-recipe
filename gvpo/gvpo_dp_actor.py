@@ -27,7 +27,6 @@ from torch.distributed.tensor import DTensor
 
 import verl.utils.torch_functional as verl_F
 from verl import DataProto
-from .gvpo_core_algos import agg_loss, kl_penalty, compute_policy_loss_gvpo
 from verl.utils.attention_utils import index_first_axis, pad_input, rearrange, unpad_input
 from verl.utils.device import get_device_id, get_device_name
 from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
@@ -37,7 +36,9 @@ from verl.utils.seqlen_balancing import prepare_dynamic_batch, restore_dynamic_b
 from verl.utils.torch_functional import logprobs_from_logits
 from verl.utils.ulysses import gather_outputs_and_unpad, ulysses_pad, ulysses_pad_and_slice_inputs
 from verl.workers.actor import BasePPOActor
+
 from .gvpo_actor_config import ActorConfig
+from .gvpo_core_algos import agg_loss, compute_policy_loss_gvpo, kl_penalty
 
 __all__ = ["DataParallelPPOActor"]
 
@@ -54,8 +55,14 @@ class DataParallelPPOActor(BasePPOActor):
         actor_optimizer (torch.optim.Optimizer, optional): Actor optimizer. Defaults to None.
     """
 
-    def __init__(self, config: ActorConfig, actor_module: nn.Module, actor_optimizer: torch.optim.Optimizer = None,
-                 device_mesh = None, config_all = None):
+    def __init__(
+        self,
+        config: ActorConfig,
+        actor_module: nn.Module,
+        actor_optimizer: torch.optim.Optimizer = None,
+        device_mesh=None,
+        config_all=None,
+    ):
         """When optimizer is None, it is Reference Policy"""
         super().__init__(config)
         self.device_mesh = device_mesh
@@ -328,7 +335,7 @@ class DataParallelPPOActor(BasePPOActor):
 
         data = data.select(batch_keys=select_keys, non_tensor_batch_keys=non_tensor_select_keys)
 
-        assert use_dynamic_bsz==False, "Dynamic batch size is not supported in GVPO"
+        assert not use_dynamic_bsz, "Dynamic batch size is not supported in GVPO"
 
         if use_dynamic_bsz:
             max_token_len = data.meta_info["max_token_len"] * self.ulysses_sequence_parallel_size
@@ -448,10 +455,10 @@ class DataParallelPPOActor(BasePPOActor):
                             log_prob=log_prob,
                             advantages=advantages,
                             response_mask=response_mask,
-                            beta = self.config.gvpo_beta,
-                            uid = uid,
-                            device_mesh = self.device_mesh,
-                            n = self.config_all.rollout.n,
+                            beta=self.config.gvpo_beta,
+                            uid=uid,
+                            device_mesh=self.device_mesh,
+                            n=self.config_all.rollout.n,
                         )
                     else:
                         raise NotImplementedError("loss_mode should be gvpo")

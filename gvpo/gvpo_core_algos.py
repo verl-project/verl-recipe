@@ -32,32 +32,32 @@ import verl.utils.torch_functional as verl_F
 from verl.trainer.config import AlgoConfig
 from verl.utils import as_torch_index, group_mean_std
 from verl.utils.import_utils import deprecated
+from verl.utils.torch_functional import allgather_dict_tensors
 from verl.workers.config import ActorConfig
 
-from verl.utils.torch_functional import allgather_dict_tensors
 
 def compute_policy_loss_gvpo(old_log_prob, log_prob, advantages, response_mask, beta, uid, device_mesh, n):
-
     rtheta = ((log_prob * response_mask).sum(dim=-1) - (old_log_prob * response_mask).sum(dim=-1)) * beta
     r_minus_avg = (advantages * response_mask).sum(dim=-1) / response_mask.sum(dim=-1)
 
     process_group = device_mesh._flatten().get_group()
     group_size = torch.distributed.get_world_size(group=process_group)
     data = {"rtheta": rtheta.clone().detach(), "uid": uid}
-    data = allgather_dict_tensors(data,group_size,process_group)
+    data = allgather_dict_tensors(data, group_size, process_group)
 
-    unique_uids = torch.unique(data['uid'])
+    unique_uids = torch.unique(data["uid"])
     means = {}
     for u in unique_uids:
-        mask = (data['uid'] == u)
-        mean_val = data['rtheta'][mask].mean()
-        assert data['rtheta'][mask].shape[0] == n
+        mask = data["uid"] == u
+        mean_val = data["rtheta"][mask].mean()
+        assert data["rtheta"][mask].shape[0] == n
         means[u.item()] = mean_val
     pg_loss = 0
     for i in range(len(rtheta)):
-        pg_loss += 0.5 * ((rtheta[i] - means[uid[i].item()]) - r_minus_avg[i])**2
-    pg_loss = pg_loss / (n-1)
+        pg_loss += 0.5 * ((rtheta[i] - means[uid[i].item()]) - r_minus_avg[i]) ** 2
+    pg_loss = pg_loss / (n - 1)
     return pg_loss
+
 
 PolicyLossFn = Callable[
     [
