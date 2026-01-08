@@ -128,13 +128,66 @@ class ChipStatus:
 class NodeWorker:
     def __init__(self, actor_pids, device_name):
         self.actor_pids = actor_pids
-        self.get_usage_fn = get_npu_usage if device_name == "npu" else get_gpu_usage
+        self.get_usage_fn = self._get_npu_usage if device_name=="npu" else self._get_gpu_usage
+        self.get_chip_info_cmd = ["npu-smi", "info"] if device_name=="npu" else ["nvidia-smi"]
 
     def is_chip_free(self):
+        devices_info = set()
+        chip_info = self._exec_shell(self.get_chip_info_cmd)
+        for pid in self.actor_pids:
+            device_info = self._get_middle_str("\n", chip_info, str(pid))
+            if device_info:
+                devices_info.add(device_info)
+
         from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            usages = list(executor.map(self.get_usage_fn, self.actor_pids))
+        with ThreadPoolExecutor(max_workers=len(devices_info)) as executor:
+            usages = list(executor.map(self.get_usage_fn, devices_info))
         return all([usage == 0 for usage in usages])
+
+    def _get_npu_usage(self, device_info):
+        try:
+            _, npu_id, chip_id, _ = device_info
+            chip_info = self._exec_shell(["npu-smi", "info", "-i", npu_id, "-c", chip_id, "-t", "usages"])
+            if not chip_info:
+                return 0
+            *_, usage = self._get_middle_str("Aicore", chip_info, "\n").split()
+            return int(usage)
+        except Exception as e:
+            print(f"[fault_manager][{datetime.datetime.now()}] get npu usage error: {str(e)}")
+            return 0
+
+    def _get_gpu_usage(self, device_info):
+        try:
+            gpu_id, _, _ = device_info
+            chip_info = self._exec_shell(["nvidia-smi", "dmon", "-c", "1", "-i", gpu_id, "-s", "u", "--format", "noheader,nounit"])
+            if not chip_info:
+                return 0
+            _, usage, *_ = chip_info.split()
+            return int(usage)
+        except Exception as e:
+            print(f"[fault_manager][{datetime.datetime.now()}] get gpu usage error: {str(e)}")
+            return 0
+
+    @staticmethod
+    def _exec_shell(cmd: list):
+        try:
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                check=True
+            )
+            return result.stdout
+        except subprocess.CalledProcessError:
+            return False
+
+    def _get_middle_str(self, left, text, right):
+        middle = "(.*?)" if left and right else "(.*)"
+        match = re.search(rf"{left}{middle}{right}", text)
+        if match:
+            return match.group(1)
+        return ""
 
 
 class FaultMgr:
@@ -151,6 +204,7 @@ class FaultMgr:
     def init_tokens_queue(cls):
         cls.tokens_queue = Queue(actor_options={
             "name": "fault_manager_queue",
+            "scheduling_strategy": cls._get_head_node_strategy()
             # "max_concurrency": 4, # better be the num of vllm servers
         })
 
@@ -159,7 +213,7 @@ class FaultMgr:
         from verl.experimental.agent_loop.agent_loop import AgentLoopManager
         print(f"[fault_manager][{datetime.datetime.now()}] start bind trainer")
         cls.trainer = trainer
-        cls.tokens_dict = TokensDict.remote(
+        cls.tokens_dict = TokensDict.options(scheduling_strategy=cls._get_head_node_strategy()).remote(
             auto_save_path=cls.trainer.config.fault_manager.tokens_save_file,
             save_interval=cls.trainer.config.fault_manager.tokens_save_interval
         )
@@ -358,13 +412,13 @@ class FaultMgr:
         ray.get(cls.tokens_dict.update_iter.remote(cls.trainer.global_steps))
         loaded = ray.get(cls.tokens_dict.try_load.remote())
         gen_batch_output.non_tensor_batch['global_id'] = np.array(
-            [str(i) for i in range(len(gen_batch_output.batch))], dtype=object
+            [str(i) for i in range(len(gen_batch_output.non_tensor_batch['prompt']))], dtype=object
         )
         if not loaded:
-            prompts = gen_batch_output.non_tensor_batch['raw_prompt_ids']
+            prompts = gen_batch_output.non_tensor_batch['raw_prompt']
             global_ids = gen_batch_output.non_tensor_batch['global_id']
             for i, global_id in enumerate(global_ids):
-                ray.get(cls.tokens_dict.set.remote(global_id, "raw_prompt_ids", prompts[i]))
+                ray.get(cls.tokens_dict.set.remote(global_id, "raw_prompt", prompts[i]))
         ray.get(cls.tokens_dict.start_save.remote())
 
     @classmethod
@@ -415,17 +469,14 @@ class FaultMgr:
     def _update_gen_batch(cls, gen_batch_output, tokens_dict):
         all_tokens = tokens_dict
         global_ids = gen_batch_output.non_tensor_batch['global_id']
-        all_raw_prompt_ids = []
         all_new_token_ids = []
         all_new_token_length = []
         all_token_finished = []
 
         for global_id in global_ids:
-            token_info = all_tokens.get(global_id, {"raw_prompt_ids": [], "new_token_ids": [], "finished": False})
-            raw_prompt_ids = token_info.get('raw_prompt_ids', [])
+            token_info = all_tokens.get(global_id, {"new_token_ids": [], "finished": False})
             new_token_ids = token_info.get('new_token_ids', [])
             finished = token_info.get('finished', False)
-            all_raw_prompt_ids.append(raw_prompt_ids)
             all_new_token_ids.append(new_token_ids)
             all_new_token_length.append(len(new_token_ids))
             all_token_finished.append(finished)
@@ -509,67 +560,9 @@ class FaultMgr:
         return Exception(
             f"[fault_manager][{datetime.datetime.now()}] timeout waiting for resource to be ready for {timeout_rebuild}s")
 
-
-
-def exec_shell(cmd: list):
-    try:
-        result = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            check=True
+    @classmethod
+    def _get_head_node_strategy(cls):
+        return NodeAffinitySchedulingStrategy(
+            node_id=ray.get_runtime_context().get_node_id(),
+            soft=False,
         )
-        return result.stdout
-    except subprocess.CalledProcessError:
-        return False
-
-
-def get_gpu_usage(pid=None):
-    try:
-        import pynvml
-        if pid is None:
-            pid = os.getpid()
-        pynvml.nvmlInit()
-        device_count = pynvml.nvmlDeviceGetCount()
-        target_gpu = None
-        for i in range(device_count):
-            handle = pynvml.nvmlDeviceGetHandleByIndex(i)
-            try:
-                procs = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
-            except:
-                continue
-            if any(p.pid == pid for p in procs):
-                target_gpu = i
-                break
-
-        if target_gpu is None:
-            print(f"[fault_manager][{datetime.datetime.now()}] get gpu usage failed, timeout detect invalidate")
-            return 0
-
-        handle = pynvml.nvmlDeviceGetHandleByIndex(target_gpu)
-        util = pynvml.nvmlDeviceGetUtilizationRates(handle)
-        return util.gpu
-    except Exception as e:
-        print(f"[fault_manager][{datetime.datetime.now()}] get gpu usage error: {str(e)}")
-        return 0
-    finally:
-        pynvml.nvmlShutdown()
-
-
-def get_npu_usage(pid: int = None):
-    try:
-        if pid is None:
-            pid = os.getpid()
-        npu_info = exec_shell(["npu-smi", "info"])
-        if not npu_info:
-            return 0
-        _, npu_id, chip_id, _ = npu_info.split(str(pid))[0].split("\n")[-1].split()
-        chip_info = exec_shell(["npu-smi", "info", "-i", npu_id, "-c", chip_id, "-t", "usages"])
-        if not chip_info:
-            return 0
-        usage = int(chip_info.split("Aicore")[1].split("\n")[0].split()[-1])
-        return usage
-    except Exception as e:
-        print(f"[fault_manager][{datetime.datetime.now()}] get npu usage error: {str(e)}")
-        return 0
