@@ -13,10 +13,11 @@
 # limitations under the License.
 
 """
-Atropos-VeRL Integration
-
-This package provides integration between VeRL and Atropos RL environments,
-enabling training with environment feedback and token-level advantage overrides.
+Atropos Recipe for VERL
+Integration with Atropos RL environments for online RL training.
 """
 
-__version__ = "0.1.0" 
+from .atropos_trainer import AtroposTrainer
+from .main_atropos import AtroposRLTrainer
+
+__all__ = ["AtroposTrainer", "AtroposRLTrainer"] 
