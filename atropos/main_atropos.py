@@ -180,6 +180,7 @@ class AtroposRLTrainer:
         self.config = config
         self.device_mesh = device_mesh
         self.step = 0
+        self.last_mean_env_score: Optional[float] = None
 
         # Atropos API configuration
         self.atropos_url = config.get("atropos", {}).get("api_url", "http://localhost:9001")
@@ -358,6 +359,9 @@ class AtroposRLTrainer:
             # Compute environment scores
             token_scores = self._compute_environment_scores(response_tokens)
             scores.append(token_scores)
+
+        if scores:
+            rollout_data["mean_env_score"] = float(np.mean([np.mean(s) if s else 0.0 for s in scores]))
 
         # Try to get advantages from Atropos API
         try:
@@ -555,7 +559,20 @@ class AtroposRLTrainer:
 
         self.step += 1
 
-        return {"loss": training_loss, "advantages": advantages, "step": self.step - 1, "rollout_data": rollout_data}
+        mean_env_score = rollout_data.get("mean_env_score")
+        score_delta = None
+        if mean_env_score is not None and self.last_mean_env_score is not None:
+            score_delta = mean_env_score - self.last_mean_env_score
+        self.last_mean_env_score = mean_env_score
+
+        return {
+            "loss": training_loss,
+            "advantages": advantages,
+            "mean_env_score": mean_env_score,
+            "mean_env_score_delta": score_delta,
+            "step": self.step - 1,
+            "rollout_data": rollout_data,
+        }
 
 
 def main():
@@ -617,6 +634,13 @@ def main():
             print(f"\n✅ Step {result['step']} completed successfully!")
             print(f"   Loss: {result['loss']:.4f}")
             print(f"   Advantages shape: {result['advantages'].shape}")
+            if result.get("mean_env_score") is not None:
+                print(f"   Mean env score: {result['mean_env_score']:.4f}")
+                if result.get("mean_env_score_delta") is not None:
+                    trend = "up" if result["mean_env_score_delta"] > 0 else "down"
+                    if result["mean_env_score_delta"] == 0:
+                        trend = "flat"
+                    print(f"   Score delta: {result['mean_env_score_delta']:+.4f} ({trend})")
 
         except Exception as e:
             print(f"❌ Error in training step {step}: {e}")
