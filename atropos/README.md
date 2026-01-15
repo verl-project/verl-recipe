@@ -1,18 +1,21 @@
 # Atropos-VERL Integration
 
-> **Production Implementation**: GPRO Advantage-weighted SFT with VERL Infrastructure
+> **Production Implementation**: GRPO with token-level advantage overrides + GPRO Advantage-weighted SFT
 > [Atropos Repository](https://github.com/NousResearch/atropos)
 
-This recipe provides a **production-ready integration** for using Atropos RL environments with VERL, implementing **GPRO (Group Relative Policy Optimization)** for automatic policy weight synchronization during RL training using VERL infrastructure.
+This recipe provides a **production-ready integration** for using Atropos RL environments with VERL, including:
+- **GRPO training** with optional token-level advantage overrides from Atropos environments.
+- **GPRO (Group Relative Policy Optimization)** advantage-weighted SFT for production training and weight sync.
 
 ## Implementation Overview
 
 This integration implements the following **production components**:
 
 1. **VERL Inference Engines**: vLLM/SGLang with weight synchronization
-2. **Production AtroposTrainer**: **GPRO advantage-weighted SFT** with FSDP/Ulysses support
-3. **Complete RL Training Loop**: Rollout → **GPRO advantage computation** → Training → Weight sync
-4. **Distributed Training**: Multi-GPU support with automatic weight synchronization
+2. **GRPO Trainer + Atropos API Client**: Token-level advantage overrides when provided
+3. **Production AtroposTrainer**: **GPRO advantage-weighted SFT** with FSDP/Ulysses support
+4. **Complete RL Training Loop**: Rollout → **GRPO/GPRO advantage computation** → Training → Weight sync
+5. **Distributed Training**: Multi-GPU support with automatic weight synchronization
 
 The weight synchronization is handled automatically through VERL's **Sharding Manager system**, and **GPRO** provides the core advantage computation algorithm.
 
@@ -24,6 +27,12 @@ The weight synchronization is handled automatically through VERL's **Sharding Ma
 - **Distributed training** with FSDP and Ulysses
 - **Complete Atropos API integration** with error handling
 - **GPRO advantage-weighted SFT loss** computation
+
+### ✅ **GRPO Integration (Atropos Token-Level Overrides)**
+- **Atropos API client** for environment rollouts and advantages (`atropos_integration.py`)
+- **Ray GRPO trainer** that plugs into VERL's GRPO advantage estimator (`grpo_atropos_trainer.py`)
+- **Optional token-level overrides** from Atropos environments
+- **Service orchestration** that launches Atropos + vLLM and registers endpoints (`launch_atropos_verl_services.py`)
 
 ### ✅ **GPRO Integration**
 - **VERL's GPRO implementation** for advantage computation
@@ -71,6 +80,21 @@ python recipe/atropos/main_atropos.py
 
 **Output**: Complete RL training with **GPRO advantage computation**, automatic weight synchronization, and Atropos API integration.
 
+### GRPO Training with Atropos Token-Level Advantages
+
+```bash
+cd verl
+python recipe/atropos/example_gsm8k_grpo.py --config-path recipe/atropos/config --config-name gsm8k_grpo_example
+```
+
+### Service Orchestration (Atropos + vLLM + GRPO)
+
+```bash
+cd verl
+python recipe/atropos/launch_atropos_verl_services.py \
+    --config recipe/atropos/config/gsm8k_grpo_example.yaml
+```
+
 ### Production Training (Multi-GPU)
 
 ```bash
@@ -103,9 +127,11 @@ python recipe/atropos/launch_atropos_verl.py \
 ```bash
 cd verl
 python recipe/atropos/test_atropos_integration.py
+python recipe/atropos/tests/test_integration.py
 ```
 
 **Test Coverage**:
+- **GRPO integration** with Atropos token-level overrides
 - **GPRO integration** and advantage computation
 - Model loading and inference
 - VERL infrastructure integration
