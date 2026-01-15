@@ -51,6 +51,7 @@ def compute_advantage(data: DataProto, adv_estimator, config):
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
+        data.batch["response_mask"] = response_mask
     else:
         raise NotImplementedError
     return data
