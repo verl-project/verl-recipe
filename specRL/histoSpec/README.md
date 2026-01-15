@@ -1,4 +1,4 @@
-# SpecRL: Accelerating RL Rollout with Speculative Decoding
+# Accelerating RL Rollout with Model-free Speculative Decoding
 
 ## Introduction
 
@@ -7,7 +7,7 @@ Between adjacent epochs, responses to the same prompts often exhibit high simila
 SpecRL exploits this observation by leveraging speculative decoding to accelerate RL rollout.
 It uses token segments from historical responses as draft sequences, achieving up to **2.1× speedup**.
 
-SpecRL is the first effort to integrate speculative decoding into RL. 
+SpecRL is (one of) the first effort to integrate speculative decoding into RL. 
 As a model-free drafting approach, it offers distinct advantages over methods relying on smaller models (e.g., small LLMs or Eagle models):
 
 1. **Low Drafting Cost**: No GPU inference is required for drafting, making it effective even with large rollout batch sizes.
@@ -43,14 +43,16 @@ pip install git+https://github.com/He-Jingkai/specRL.git --no-build-isolation -v
 
 ## Usage
 
-Replace `verl.trainer.main_ppo` with `recipe.specRL.main_ppo` in your training scripts. Speculative decoding is enabled by default. To disable it, use `+actor_rollout_ref.rollout.enable_spec_decoding=False`.
+Replace `verl.trainer.main_ppo` with `recipe.specRL.histoSpec.main_ppo` in your training scripts. Speculative decoding is enabled by default. To disable it, use `+actor_rollout_ref.rollout.enable_spec_decoding=False`.
 
 ## Contact
 
 SpecRL is migrated from the internal environment. 
 If you encounter any issues or have suggestions, please contact:
-- Jingkai He: `jingkai.he@bytedance.com`
+- Jingkai He: `hjk020101@sjtu.edu.cn`
 - Tianjian Li: `litianjian@bytedance.com`
+
+Paper: https://arxiv.org/abs/2508.18588
 
 ## Acknowledgments
 

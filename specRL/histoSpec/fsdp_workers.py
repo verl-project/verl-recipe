@@ -16,7 +16,7 @@
 from typing import Any, Optional
 
 from omegaconf import DictConfig
-from recipe.specRL.vllm_plugin.patch import specRL_plugin
+from recipe.specRL.histoSpec.vllm_plugin.patch import specRL_plugin
 
 from verl.single_controller.base.decorator import Dispatch, register
 from verl.workers.fsdp_workers import ActorRolloutRefWorker
