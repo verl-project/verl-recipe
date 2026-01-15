@@ -27,7 +27,7 @@ Key Features:
 import logging
 import os
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Optional
 
 import numpy as np
 import requests
@@ -88,7 +88,7 @@ class AtroposInferenceEngine:
             except ImportError as err:
                 raise ImportError("Neither vLLM nor SGLang is available. Please install one of them.") from err
 
-    def update_weights_from_tensor(self, named_tensors: List[Tuple[str, torch.Tensor]]):
+    def update_weights_from_tensor(self, named_tensors: list[tuple[str, torch.Tensor]]):
         """Update inference engine weights from training model."""
         # In production, this would update the actual model weights
         # For now, we'll reload the model to get updated weights
@@ -100,7 +100,7 @@ class AtroposInferenceEngine:
             # SGLang might support weight updates
             print("✓ Inference engine weights would be updated via VERL sharding managers")
 
-    def generate(self, prompts: List[str], max_length: int = 32) -> List[str]:
+    def generate(self, prompts: list[str], max_length: int = 32) -> list[str]:
         """Generate responses using current policy weights."""
         if self.engine_type == "vllm":
             # Use vLLM for generation
@@ -151,12 +151,16 @@ class AtroposShardingManager:
             # Use VERL's sharding manager for weight synchronization
             with self.sharding_manager:
                 state_dict = self.training_model.state_dict()
-                self.inference_engine.update_weights_from_tensor(named_tensors=[(name, tensor) for name, tensor in state_dict.items()])
+                self.inference_engine.update_weights_from_tensor(
+                    named_tensors=[(name, tensor) for name, tensor in state_dict.items()]
+                )
                 self.inference_engine.resume_memory_occupation()
         else:
             # Fallback for non-distributed case
             state_dict = self.training_model.state_dict()
-            self.inference_engine.update_weights_from_tensor(named_tensors=[(name, tensor) for name, tensor in state_dict.items()])
+            self.inference_engine.update_weights_from_tensor(
+                named_tensors=[(name, tensor) for name, tensor in state_dict.items()]
+            )
             self.inference_engine.resume_memory_occupation()
         return self
 
@@ -176,7 +180,7 @@ class AtroposRLTrainer:
     4. Weight sync: Update inference engine with new weights automatically
     """
 
-    def __init__(self, config: Dict[str, Any], device_mesh=None):
+    def __init__(self, config: dict[str, Any], device_mesh=None):
         self.config = config
         self.device_mesh = device_mesh
         self.step = 0
@@ -244,7 +248,11 @@ class AtroposRLTrainer:
 
     def _init_sharding_manager(self):
         """Initialize the sharding manager for weight synchronization."""
-        self.sharding_manager = AtroposShardingManager(training_model=self.training_model, inference_engine=self.inference_engine, device_mesh=self.device_mesh)
+        self.sharding_manager = AtroposShardingManager(
+            training_model=self.training_model,
+            inference_engine=self.inference_engine,
+            device_mesh=self.device_mesh,
+        )
 
     def _test_api_connectivity(self, atropos_url: str, timeout: int = 10) -> None:
         """Test API connectivity and raise error if unreachable."""
@@ -260,7 +268,12 @@ class AtroposRLTrainer:
 
     def _register_with_atropos_api(self) -> bool:
         """Register this trainer with the Atropos API."""
-        registration_data = {"wandb_group": "verl_atropos_integration", "batch_size": self.batch_size, "max_token_len": 512, "starting_step": self.step}
+        registration_data = {
+            "wandb_group": "verl_atropos_integration",
+            "batch_size": self.batch_size,
+            "max_token_len": 512,
+            "starting_step": self.step,
+        }
 
         try:
             response = requests.post(f"{self.atropos_url}/register", json=registration_data, timeout=self.timeout)
@@ -271,7 +284,13 @@ class AtroposRLTrainer:
         except requests.exceptions.RequestException as e:
             raise AtroposAPIError(f"Failed to register with Atropos API: {e}") from e
 
-    def _submit_scored_data(self, token_data: List[List[int]], mask_data: List[List[bool]], scores: List[List[float]], ref_logprobs: Optional[List[List[float]]] = None) -> bool:
+    def _submit_scored_data(
+        self,
+        token_data: list[list[int]],
+        mask_data: list[list[bool]],
+        scores: list[list[float]],
+        ref_logprobs: Optional[list[list[float]]] = None,
+    ) -> bool:
         """Submit scored data to Atropos API."""
         scored_data = {
             "tokens": token_data,
@@ -290,7 +309,7 @@ class AtroposRLTrainer:
             logger.warning(f"Failed to submit scored data: {e}")
             return False
 
-    def _retrieve_batch_with_retry(self) -> Optional[List[Dict[str, Any]]]:
+    def _retrieve_batch_with_retry(self) -> Optional[list[dict[str, Any]]]:
         """Retrieve batch from Atropos API with retry logic."""
         start_time = time.time()
 
@@ -322,7 +341,7 @@ class AtroposRLTrainer:
         print(f"⚠ Failed to retrieve batch after {self.batch_retry_attempts} attempts")
         return None
 
-    def rollout_phase(self, prompts: List[str]) -> Dict[str, Any]:
+    def rollout_phase(self, prompts: list[str]) -> dict[str, Any]:
         """Phase 1: Generate rollouts using current policy weights."""
         print(f"\n🔄 ROLLOUT PHASE (Step {self.step})")
 
@@ -336,7 +355,7 @@ class AtroposRLTrainer:
         print(f"✓ Generated {len(responses)} responses")
         return rollout_data
 
-    def compute_advantages_from_atropos(self, rollout_data: Dict[str, Any]) -> torch.Tensor:
+    def compute_advantages_from_atropos(self, rollout_data: dict[str, Any]) -> torch.Tensor:
         """Phase 2: Compute advantages using Atropos API with GPRO fallback."""
         print(f"🔄 ADVANTAGE COMPUTATION PHASE (Step {self.step})")
 
@@ -348,7 +367,7 @@ class AtroposRLTrainer:
         mask_data = []
         scores = []
 
-        for prompt, response in zip(prompts, responses):
+        for prompt, response in zip(prompts, responses, strict=False):
             # Tokenize response
             response_tokens = self.inference_engine.tokenizer.encode(response)
             token_data.append(response_tokens)
@@ -361,7 +380,9 @@ class AtroposRLTrainer:
             scores.append(token_scores)
 
         if scores:
-            rollout_data["mean_env_score"] = float(np.mean([np.mean(s) if s else 0.0 for s in scores]))
+            rollout_data["mean_env_score"] = float(
+                np.mean([np.mean(s) if s else 0.0 for s in scores])
+            )
 
         # Try to get advantages from Atropos API
         try:
@@ -401,7 +422,7 @@ class AtroposRLTrainer:
 
         return advantages
 
-    def _compute_environment_scores(self, tokens: List[int]) -> List[float]:
+    def _compute_environment_scores(self, tokens: list[int]) -> list[float]:
         """Compute environment scores for tokens."""
         # In production, this would call actual Atropos environments
         # For now, we'll use a simple heuristic based on token diversity
@@ -413,14 +434,14 @@ class AtroposRLTrainer:
         scores = [diversity_score * 0.5 + 0.5] * len(tokens)  # Base score with diversity bonus
         return scores
 
-    def _compute_fallback_advantages(self, token_data: List[List[int]], scores: List[List[float]]) -> torch.Tensor:
+    def _compute_fallback_advantages(self, token_data: list[list[int]], scores: list[list[float]]) -> torch.Tensor:
         """Compute advantages using GPRO when Atropos API is unavailable."""
         # Convert to GPRO format
         token_level_rewards = []
         response_mask = []
         index = []
 
-        for i, (tokens, token_scores) in enumerate(zip(token_data, scores)):
+        for i, (tokens, token_scores) in enumerate(zip(token_data, scores, strict=False)):
             # Create token-level rewards (sum to get response-level reward)
             response_reward = sum(token_scores) if token_scores else 0.0
             token_rewards = [response_reward / len(tokens)] * len(tokens) if tokens else [0.0]
@@ -438,7 +459,7 @@ class AtroposRLTrainer:
         padded_rewards = []
         padded_masks = []
 
-        for rewards, mask in zip(token_level_rewards, response_mask):
+        for rewards, mask in zip(token_level_rewards, response_mask, strict=False):
             padded_rewards.append(rewards + [0.0] * (max_len - len(rewards)))
             padded_masks.append(mask + [0.0] * (max_len - len(mask)))
 
@@ -448,11 +469,17 @@ class AtroposRLTrainer:
         index_array = np.array(index)
 
         # Use VERL's GPRO implementation
-        advantages, _ = compute_grpo_outcome_advantage(token_level_rewards=token_level_rewards_tensor, response_mask=response_mask_tensor, index=index_array, epsilon=1e-6, norm_adv_by_std_in_grpo=True)
+        advantages, _ = compute_grpo_outcome_advantage(
+            token_level_rewards=token_level_rewards_tensor,
+            response_mask=response_mask_tensor,
+            index=index_array,
+            epsilon=1e-6,
+            norm_adv_by_std_in_grpo=True,
+        )
 
         return advantages
 
-    def training_phase(self, rollout_data: Dict[str, Any], advantages: torch.Tensor) -> float:
+    def training_phase(self, rollout_data: dict[str, Any], advantages: torch.Tensor) -> float:
         """Phase 3: Train with advantage-weighted loss using AtroposTrainer."""
         print(f"🔄 TRAINING PHASE (Step {self.step})")
 
@@ -464,7 +491,7 @@ class AtroposRLTrainer:
         input_ids = []
         loss_masks = []
 
-        for prompt, response in zip(prompts, responses):
+        for prompt, response in zip(prompts, responses, strict=False):
             # Tokenize prompt and response
             prompt_tokens = self.inference_engine.tokenizer.encode(prompt)
             response_tokens = self.inference_engine.tokenizer.encode(response)
@@ -483,7 +510,7 @@ class AtroposRLTrainer:
         padded_input_ids = []
         padded_loss_masks = []
 
-        for tokens, mask in zip(input_ids, loss_masks):
+        for tokens, mask in zip(input_ids, loss_masks, strict=False):
             # Pad tokens
             padded_tokens = tokens + [self.inference_engine.tokenizer.eos_token_id] * (max_len - len(tokens))
             padded_input_ids.append(padded_tokens)
@@ -499,7 +526,15 @@ class AtroposRLTrainer:
         # Ensure advantages match the input shape
         if advantages.shape != input_ids_tensor.shape:
             # Resize advantages to match input shape
-            advantages = torch.nn.functional.interpolate(advantages.unsqueeze(0).unsqueeze(0), size=input_ids_tensor.shape, mode="bilinear").squeeze(0).squeeze(0)
+            advantages = (
+                torch.nn.functional.interpolate(
+                    advantages.unsqueeze(0).unsqueeze(0),
+                    size=input_ids_tensor.shape,
+                    mode="bilinear",
+                )
+                .squeeze(0)
+                .squeeze(0)
+            )
 
         # Use AtroposTrainer for loss computation
         # In production, this would be integrated with the full training loop
@@ -509,7 +544,12 @@ class AtroposRLTrainer:
 
         return loss.item()
 
-    def _compute_advantage_weighted_loss(self, input_ids: torch.Tensor, advantages: torch.Tensor, loss_mask: torch.Tensor) -> torch.Tensor:
+    def _compute_advantage_weighted_loss(
+        self,
+        input_ids: torch.Tensor,
+        advantages: torch.Tensor,
+        loss_mask: torch.Tensor,
+    ) -> torch.Tensor:
         """Compute advantage-weighted loss using the model with GPRO advantages."""
         # Move to device
         device = next(self.training_model.parameters()).device
@@ -533,7 +573,7 @@ class AtroposRLTrainer:
         # Reduce to scalar
         return weighted_loss.sum() / (loss_mask.sum() + 1e-8)
 
-    def rl_training_step(self, prompts: List[str]) -> Dict[str, Any]:
+    def rl_training_step(self, prompts: list[str]) -> dict[str, Any]:
         """
         Complete RL training step with Atropos API integration.
 

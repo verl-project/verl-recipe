@@ -53,14 +53,24 @@ def test_gpro_integration():
         index = np.array([0, 0, 1, 1])  # 2 groups with 2 samples each
 
         # Test GPRO computation
-        advantages, returns = compute_grpo_outcome_advantage(token_level_rewards=token_level_rewards, response_mask=response_mask, index=index, epsilon=1e-6, norm_adv_by_std_in_grpo=True)
+        advantages, returns = compute_grpo_outcome_advantage(
+            token_level_rewards=token_level_rewards,
+            response_mask=response_mask,
+            index=index,
+            epsilon=1e-6,
+            norm_adv_by_std_in_grpo=True,
+        )
 
         print(f"✓ GPRO advantages shape: {advantages.shape}")
         print(f"✓ GPRO returns shape: {returns.shape}")
 
         # Verify that advantages are computed correctly
-        assert advantages.shape == (batch_size, seq_len), f"Expected shape {(batch_size, seq_len)}, got {advantages.shape}"
-        assert returns.shape == (batch_size, seq_len), f"Expected shape {(batch_size, seq_len)}, got {returns.shape}"
+        assert advantages.shape == (batch_size, seq_len), (
+            f"Expected shape {(batch_size, seq_len)}, got {advantages.shape}"
+        )
+        assert returns.shape == (batch_size, seq_len), (
+            f"Expected shape {(batch_size, seq_len)}, got {returns.shape}"
+        )
 
         # Verify that advantages within the same group are properly normalized
         group_0_advantages = advantages[0:2, 0]  # First token of group 0
@@ -186,9 +196,8 @@ def test_weight_synchronization():
     print("🧪 Testing weight synchronization...")
 
     try:
-        from transformers import AutoConfig, AutoModelForCausalLM
-
         from recipe.atropos.main_atropos import AtroposShardingManager
+        from transformers import AutoConfig, AutoModelForCausalLM
 
         # Load a small model for testing
         model_path = "microsoft/DialoGPT-small"
@@ -196,7 +205,15 @@ def test_weight_synchronization():
         training_model = AutoModelForCausalLM.from_pretrained(model_path, config=config)
 
         # Create mock inference engine (we'll skip the engine for this test)
-        inference_engine = type("MockInferenceEngine", (), {"update_weights_from_tensor": lambda named_tensors: print("✓ Weights updated"), "resume_memory_occupation": lambda: print("✓ Memory resumed"), "release_memory_occupation": lambda: print("✓ Memory released")})()
+        inference_engine = type(
+            "MockInferenceEngine",
+            (),
+            {
+                "update_weights_from_tensor": lambda named_tensors: print("✓ Weights updated"),
+                "resume_memory_occupation": lambda: print("✓ Memory resumed"),
+                "release_memory_occupation": lambda: print("✓ Memory released"),
+            },
+        )()
 
         # Test sharding manager with model
         sharding_manager = AtroposShardingManager(training_model, inference_engine)
@@ -215,7 +232,12 @@ def test_api_connectivity():
     """Test Atropos API connectivity."""
     print("🧪 Testing Atropos API connectivity...")
 
-    config = {"atropos": {"api_url": "http://localhost:9001", "timeout": 5}, "batch_size": 4, "max_response_length": 32, "model_path": "microsoft/DialoGPT-small"}
+    config = {
+        "atropos": {"api_url": "http://localhost:9001", "timeout": 5},
+        "batch_size": 4,
+        "max_response_length": 32,
+        "model_path": "microsoft/DialoGPT-small",
+    }
 
     try:
         AtroposRLTrainer(config)
@@ -276,7 +298,7 @@ def test_advantage_computation():
         responses = ["I'm doing well", "Great to hear"]
 
         token_data = []
-        for prompt, response in zip(prompts, responses):
+        for prompt, response in zip(prompts, responses, strict=False):
             prompt_tokens = tokenizer.encode(prompt)
             response_tokens = tokenizer.encode(response)
             combined_tokens = prompt_tokens + response_tokens
@@ -293,7 +315,7 @@ def test_advantage_computation():
 
         # Compute advantages
         advantages = []
-        for tokens, token_scores in zip(token_data, scores):
+        for tokens, token_scores in zip(token_data, scores, strict=False):
             if len(token_scores) > 1:
                 mean_score = sum(token_scores) / len(token_scores)
                 token_advantages = [score - mean_score for score in token_scores]
@@ -321,7 +343,15 @@ def test_training_loop():
     """Test the complete training loop setup with components."""
     print("🧪 Testing complete training loop...")
 
-    config = {"atropos": {"api_url": "http://localhost:9001", "timeout": 5}, "batch_size": 2, "max_response_length": 16, "batch_retry_attempts": 1, "batch_retry_delay": 0.1, "batch_max_wait_time": 1.0, "model_path": "microsoft/DialoGPT-small"}
+    config = {
+        "atropos": {"api_url": "http://localhost:9001", "timeout": 5},
+        "batch_size": 2,
+        "max_response_length": 16,
+        "batch_retry_attempts": 1,
+        "batch_retry_delay": 0.1,
+        "batch_max_wait_time": 1.0,
+        "model_path": "microsoft/DialoGPT-small",
+    }
 
     try:
         # This will fail due to API not being available, but we can test the setup

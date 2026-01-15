@@ -24,7 +24,7 @@ Supports:
 """
 
 import os
-from typing import Any, Dict, List
+from typing import Any
 
 import pandas as pd
 from datasets import load_dataset
@@ -42,13 +42,13 @@ class AtroposDataLoader:
     3. Custom data sources
     """
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: dict[str, Any]):
         self.config = config
         self.data_source = config.get("data_source", "gsm8k")
         self.max_prompts = config.get("max_prompts", 100)
         self.prompt_format = config.get("prompt_format", "chat")
 
-    def load_from_parquet(self, file_path: str) -> List[str]:
+    def load_from_parquet(self, file_path: str) -> list[str]:
         """
         Load prompts from VERL-formatted parquet file.
 
@@ -83,7 +83,7 @@ class AtroposDataLoader:
             print(f"❌ Error loading from parquet {file_path}: {e}")
             return []
 
-    def load_from_huggingface(self, dataset_name: str, split: str = "train") -> List[str]:
+    def load_from_huggingface(self, dataset_name: str, split: str = "train") -> list[str]:
         """
         Load prompts from HuggingFace dataset.
 
@@ -99,11 +99,22 @@ class AtroposDataLoader:
 
                 # Format based on dataset type
                 if dataset_name == "gsm8k":
-                    prompt = f"Solve this math problem step by step:\n\n{example['question']}\n\nLet's work through this step by step:"
+                    prompt = (
+                        "Solve this math problem step by step:\n\n"
+                        f"{example['question']}\n\n"
+                        "Let's work through this step by step:"
+                    )
                 elif dataset_name == "math":
-                    prompt = f"Solve this mathematics problem:\n\n{example['problem']}\n\nProvide a step-by-step solution:"
+                    prompt = (
+                        "Solve this mathematics problem:\n\n"
+                        f"{example['problem']}\n\n"
+                        "Provide a step-by-step solution:"
+                    )
                 elif dataset_name == "hellaswag":
-                    prompt = f"Complete the following sentence:\n\n{example['ctx_a']} {example['ctx_b'].capitalize()}"
+                    prompt = (
+                        "Complete the following sentence:\n\n"
+                        f"{example['ctx_a']} {example['ctx_b'].capitalize()}"
+                    )
                 else:
                     # Generic format
                     if "question" in example:
@@ -127,7 +138,7 @@ class AtroposDataLoader:
             print(f"❌ Error loading from HuggingFace {dataset_name}: {e}")
             return []
 
-    def load_production_prompts(self) -> List[str]:
+    def load_production_prompts(self) -> list[str]:
         """
         Load production prompts using the best available method.
 
@@ -157,7 +168,7 @@ class AtroposDataLoader:
         print("⚠ No production datasets available, using realistic examples...")
         return self._get_realistic_examples()
 
-    def _get_realistic_examples(self) -> List[str]:
+    def _get_realistic_examples(self) -> list[str]:
         """
         Generate realistic production-style prompts.
 
@@ -165,39 +176,87 @@ class AtroposDataLoader:
         """
         production_prompts = [
             # Math reasoning (GSM8K style)
-            "Janet's dogs eat 2 pounds of food each day. How many pounds of food do her dogs eat in a week? Let's solve this step by step.",
-            "A store sells shirts for $25 each and pants for $40 each. If a customer buys 3 shirts and 2 pairs of pants, what is the total cost? Show your work.",
+            (
+                "Janet's dogs eat 2 pounds of food each day. "
+                "How many pounds of food do her dogs eat in a week? "
+                "Let's solve this step by step."
+            ),
+            (
+                "A store sells shirts for $25 each and pants for $40 each. "
+                "If a customer buys 3 shirts and 2 pairs of pants, "
+                "what is the total cost? Show your work."
+            ),
             # Code generation
-            "Write a Python function that takes a list of integers and returns the sum of all even numbers. Include proper error handling and docstring.",
-            "Implement a binary search algorithm in Python. The function should return the index of the target element or -1 if not found.",
+            (
+                "Write a Python function that takes a list of integers and returns the sum "
+                "of all even numbers. Include proper error handling and docstring."
+            ),
+            (
+                "Implement a binary search algorithm in Python. The function should return "
+                "the index of the target element or -1 if not found."
+            ),
             # Factual QA
-            "What are the main differences between supervised and unsupervised learning in machine learning? Provide specific examples for each.",
-            "Explain the concept of overfitting in machine learning. What are some techniques to prevent it?",
+            (
+                "What are the main differences between supervised and unsupervised learning "
+                "in machine learning? Provide specific examples for each."
+            ),
+            (
+                "Explain the concept of overfitting in machine learning. "
+                "What are some techniques to prevent it?"
+            ),
             # Creative writing
-            "Write a short story (2-3 paragraphs) about a robot learning to understand human emotions. Focus on character development and emotional growth.",
+            (
+                "Write a short story (2-3 paragraphs) about a robot learning to understand "
+                "human emotions. Focus on character development and emotional growth."
+            ),
             # Analysis task
-            "Analyze the pros and cons of using renewable energy sources versus fossil fuels. Consider economic, environmental, and social factors.",
+            (
+                "Analyze the pros and cons of using renewable energy sources versus fossil fuels. "
+                "Consider economic, environmental, and social factors."
+            ),
             # Instruction following
-            "Given a list of numbers [3, 7, 2, 9, 1, 8], sort them in descending order and explain your sorting method step by step.",
+            (
+                "Given a list of numbers [3, 7, 2, 9, 1, 8], sort them in descending order "
+                "and explain your sorting method step by step."
+            ),
             # Problem solving
-            "A company wants to reduce its carbon footprint by 30% in the next 5 years. What are three specific strategies they could implement? Explain the expected impact of each.",
+            (
+                "A company wants to reduce its carbon footprint by 30% in the next 5 years. "
+                "What are three specific strategies they could implement? Explain the expected "
+                "impact of each."
+            ),
             # Technical explanation
-            "Explain how a transformer model processes sequential data, including the role of attention mechanisms and positional encoding.",
+            (
+                "Explain how a transformer model processes sequential data, including the role "
+                "of attention mechanisms and positional encoding."
+            ),
             # Logical reasoning
-            "If all roses are flowers and some flowers are red, can we conclude that some roses are red? Explain your reasoning.",
+            (
+                "If all roses are flowers and some flowers are red, can we conclude that some "
+                "roses are red? Explain your reasoning."
+            ),
             # Data analysis
-            "Given a dataset of student test scores, explain how you would identify outliers and what methods you would use to handle them.",
+            (
+                "Given a dataset of student test scores, explain how you would identify outliers "
+                "and what methods you would use to handle them."
+            ),
             # System design
-            "Design a simple recommendation system for an e-commerce website. Explain the key components and how they would work together.",
+            (
+                "Design a simple recommendation system for an e-commerce website. "
+                "Explain the key components and how they would work together."
+            ),
             # Ethics and safety
-            "What are the potential risks and benefits of deploying large language models in healthcare applications? Consider privacy, accuracy, and accessibility.",
+            (
+                "What are the potential risks and benefits of deploying large language models in "
+                "healthcare applications? Consider privacy, accuracy, and accessibility."
+            ),
         ]
 
         # Return subset based on max_prompts
         return production_prompts[: self.max_prompts]
 
 
-def create_verl_rl_dataset(prompts: List[str], config: Dict[str, Any]) -> RLHFDataset:
+def create_verl_rl_dataset(prompts: list[str], config: dict[str, Any]) -> RLHFDataset:
     """
     Create a VERL RL dataset from prompts.
 

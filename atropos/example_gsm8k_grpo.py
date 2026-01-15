@@ -21,12 +21,12 @@ This script trains a language model with GRPO using feedback from the Atropos GS
 
 import logging
 import sys
+
+from recipe.atropos.grpo_atropos_trainer import RayGRPOAtroposTrainer
 from transformers import AutoTokenizer
 
 from verl.trainer.main_ppo import get_args_parser, process_args
 from verl.utils.import_utils import import_external_libs
-
-from recipe.atropos.grpo_atropos_trainer import RayGRPOAtroposTrainer
 
 logger = logging.getLogger(__name__)
 

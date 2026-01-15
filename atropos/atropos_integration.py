@@ -253,7 +253,7 @@ class AtroposGRPOComputer:
             for p in prompts
         ]
         response_texts = []
-        for resp, mask in zip(responses, response_mask):
+        for resp, mask in zip(responses, response_mask, strict=False):
             valid_length = int(mask.sum().item())
             tokens = resp[:valid_length] if valid_length > 0 else resp
             response_texts.append(

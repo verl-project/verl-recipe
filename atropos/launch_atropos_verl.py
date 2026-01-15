@@ -26,7 +26,7 @@ Features:
 import argparse
 import logging
 import os
-from typing import Any, Dict
+from typing import Any
 
 from omegaconf import OmegaConf
 
@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_ATROPOS_LOGGING_LEVEL", "INFO"))
 
 
-def run_atropos_demo(config: Dict[str, Any]):
+def run_atropos_demo(config: dict[str, Any]):
     """Run Atropos demo with RL training loop using production datasets."""
     print("🚀 Starting Atropos-VERL Demo")
     print("=" * 60)
@@ -97,7 +97,12 @@ def main():
     """Main entry point for Atropos-VERL integration."""
     parser = argparse.ArgumentParser(description="Atropos-VERL Integration Launcher")
     parser.add_argument("--mode", choices=["demo", "training"], default="demo", help="Mode to run: demo or training")
-    parser.add_argument("--config", type=str, default="recipe/atropos/config/atropos_trainer.yaml", help="Path to configuration file")
+    parser.add_argument(
+        "--config",
+        type=str,
+        default="recipe/atropos/config/atropos_trainer.yaml",
+        help="Path to configuration file",
+    )
     parser.add_argument("--model_path", type=str, default="microsoft/DialoGPT-medium", help="Model path for training")
     parser.add_argument("--atropos_url", type=str, default="http://localhost:9001", help="Atropos API URL")
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size for training")
@@ -106,7 +111,12 @@ def main():
     # GPRO-specific arguments
     parser.add_argument("--use_gpro", action="store_true", default=True, help="Use GPRO for advantage computation")
     parser.add_argument("--gpro_epsilon", type=float, default=1e-6, help="GPRO epsilon for numerical stability")
-    parser.add_argument("--gpro_norm_by_std", action="store_true", default=True, help="Normalize GPRO advantages by standard deviation")
+    parser.add_argument(
+        "--gpro_norm_by_std",
+        action="store_true",
+        default=True,
+        help="Normalize GPRO advantages by standard deviation",
+    )
 
     args = parser.parse_args()
 
