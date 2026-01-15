@@ -19,6 +19,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 from omegaconf import OmegaConf
@@ -57,14 +58,20 @@ class ServiceLauncher:
                     logger.warning(f"Force killing process {proc.pid}")
                     proc.kill()
 
-    def wait_for_service(self, url: str, service_name: str, timeout: int = 60) -> bool:
+    def wait_for_service(
+        self,
+        url: str,
+        service_name: str,
+        timeout: int = 60,
+        health_path: str = "/health",
+    ) -> bool:
         """Wait for a service to become available."""
         logger.info(f"Waiting for {service_name} at {url}")
         start_time = time.time()
 
         while time.time() - start_time < timeout:
             try:
-                response = requests.get(f"{url}/health", timeout=5)
+                response = requests.get(f"{url}{health_path}", timeout=5)
                 if response.status_code == 200:
                     logger.info(f"{service_name} is ready!")
                     return True
@@ -75,20 +82,67 @@ class ServiceLauncher:
         logger.error(f"{service_name} failed to start within {timeout} seconds")
         return False
 
-    def launch_atropos_server(self) -> bool:
+    def _parse_host_port(self, url: str, default_port: int) -> tuple[str, int]:
+        parsed = urlparse(url)
+        host = parsed.hostname or "localhost"
+        port = parsed.port or default_port
+        return host, port
+
+    def launch_atropos_api_server(self) -> bool:
+        """Launch the Atropos API server (trajectory handler)."""
+        atropos_config = self.config.get("trainer", {}).get("atropos", {})
+        api_url = atropos_config.get("api_url", "http://localhost:9001")
+        api_host, api_port = self._parse_host_port(api_url, 9001)
+
+        try:
+            response = requests.get(f"{api_url}/status", timeout=2)
+            if response.status_code == 200:
+                logger.info("Atropos API server already running")
+                return True
+        except requests.exceptions.RequestException:
+            pass
+
+        atropos_path = os.environ.get("ATROPOS_PATH")
+        if not atropos_path:
+            possible_paths = [
+                Path.home() / "atropos",
+                Path.home() / "projects" / "atropos",
+                Path("/opt/atropos"),
+            ]
+            for path in possible_paths:
+                if (path / "atroposlib" / "cli" / "run_api.py").exists():
+                    atropos_path = str(path)
+                    break
+
+        if not atropos_path:
+            logger.error("Could not find Atropos installation. Set ATROPOS_PATH environment variable.")
+            return False
+
+        api_script = Path(atropos_path) / "atroposlib" / "cli" / "run_api.py"
+        if not api_script.exists():
+            logger.error(f"Atropos API script not found: {api_script}")
+            return False
+
+        cmd = [
+            sys.executable,
+            str(api_script),
+            "--host",
+            api_host,
+            "--port",
+            str(api_port),
+        ]
+
+        logger.info(f"Launching Atropos API server: {' '.join(cmd)}")
+        proc = subprocess.Popen(cmd, cwd=atropos_path, text=True)
+        self.processes.append(proc)
+
+        return self.wait_for_service(api_url, "Atropos API server", timeout=60, health_path="/status")
+
+    def launch_atropos_server(self, vllm_url: str | None = None) -> bool:
         """Launch the Atropos environment server."""
         atropos_config = self.config.get("trainer", {}).get("atropos", {})
         api_url = atropos_config.get("api_url", "http://localhost:9001")
         environment = atropos_config.get("environment", "gsm8k")
-
-        # Check if Atropos is already running
-        try:
-            response = requests.get(f"{api_url}/health", timeout=2)
-            if response.status_code == 200:
-                logger.info("Atropos server already running")
-                return True
-        except requests.exceptions.RequestException:
-            pass
 
         # Find Atropos installation
         atropos_path = os.environ.get("ATROPOS_PATH")
@@ -114,26 +168,29 @@ class ServiceLauncher:
             logger.error(f"Atropos server script not found: {server_script}")
             return False
 
-        cmd = [
-            sys.executable,
-            str(server_script),
-            "serve",
-            "--slurm",
-            "false",
-            "--port",
-            api_url.split(":")[-1],
-        ]
+        cmd = [sys.executable, str(server_script), "serve", "--slurm", "false"]
+
+        rollout_server_url = atropos_config.get("rollout_server_url", api_url)
+        cmd.extend(["--env.rollout_server_url", rollout_server_url])
+
+        if vllm_url:
+            cmd.extend(["--openai.base_url", f"{vllm_url}/v1"])
+            cmd.extend(["--openai.server_type", "openai"])
+            cmd.extend(["--openai.api_key", "x"])
 
         logger.info(f"Launching Atropos server: {' '.join(cmd)}")
         proc = subprocess.Popen(cmd, cwd=atropos_path, text=True)
         self.processes.append(proc)
 
-        # Wait for Atropos to start
-        return self.wait_for_service(api_url, "Atropos server")
+        # Env server connects back to the API, so no direct health check here
+        time.sleep(5)
+        return True
 
     def launch_vllm_workers(self) -> bool:
         """Launch vLLM inference workers if configured."""
         inference_config = self.config.get("inference", {})
+        if not inference_config and self.config.get("rollout", {}).get("name") == "vllm":
+            inference_config = {"type": "vllm"}
 
         if not inference_config or inference_config.get("type") != "vllm":
             logger.info("vLLM not configured, skipping")
@@ -177,7 +234,7 @@ class ServiceLauncher:
         self.processes.append(proc)
 
         # Wait for vLLM to start
-        if not self.wait_for_service(vllm_url, "vLLM server", timeout=120):
+        if not self.wait_for_service(vllm_url, "vLLM server", timeout=120, health_path="/health"):
             return False
             
         # Register inference endpoint with Atropos if supported
@@ -237,13 +294,24 @@ class ServiceLauncher:
         logger.info("Starting Atropos-VeRL integrated training")
 
         # Launch services in order
-        if not self.launch_atropos_server():
-            logger.error("Failed to launch Atropos server")
+        if not self.launch_atropos_api_server():
+            logger.error("Failed to launch Atropos API server")
             self.cleanup()
             return 1
 
         if not self.launch_vllm_workers():
             logger.error("Failed to launch vLLM workers")
+            self.cleanup()
+            return 1
+
+        inference_config = self.config.get("inference", {})
+        if not inference_config and self.config.get("rollout", {}).get("name") == "vllm":
+            inference_config = {"type": "vllm"}
+        vllm_port = inference_config.get("port", 8000) if inference_config else 8000
+        vllm_url = f"http://localhost:{vllm_port}" if inference_config else None
+
+        if not self.launch_atropos_server(vllm_url=vllm_url):
+            logger.error("Failed to launch Atropos environment server")
             self.cleanup()
             return 1
 
@@ -272,7 +340,14 @@ def main():
         "--atropos-path", type=str, help="Path to Atropos installation (overrides ATROPOS_PATH env var)"
     )
     parser.add_argument(
-        "--skip-atropos", action="store_true", help="Skip launching Atropos server (assume it's already running)"
+        "--skip-atropos-api",
+        action="store_true",
+        help="Skip launching Atropos API server (assume it's already running)",
+    )
+    parser.add_argument(
+        "--skip-atropos",
+        action="store_true",
+        help="Skip launching Atropos environment server (assume it's already running)",
     )
     parser.add_argument(
         "--skip-vllm", action="store_true", help="Skip launching vLLM server (assume it's already running)"
@@ -286,6 +361,8 @@ def main():
     launcher = ServiceLauncher(args.config)
 
     # Override launch methods if skip flags are set
+    if args.skip_atropos_api:
+        launcher.launch_atropos_api_server = lambda: True
     if args.skip_atropos:
         launcher.launch_atropos_server = lambda: True
     if args.skip_vllm:
