@@ -21,6 +21,7 @@ actor_rollout_ref:
   model:
     use_remove_padding: True
   rollout:
+    mode: sync
     # number of responses (i.e. num sample times)
     n: 4
   actor:
