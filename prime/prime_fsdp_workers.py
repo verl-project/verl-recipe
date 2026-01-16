@@ -276,6 +276,7 @@ class PRIMERewardModelWorker(Worker):
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.reward_module)
             load_fsdp_model_to_gpu(self.ref_module)
+            torch.distributed.barrier()
         micro_batch_size = self.config.micro_batch_size_per_gpu
         data.meta_info["micro_batch_size"] = micro_batch_size
         data.meta_info["max_token_len"] = self.config.forward_max_token_len_per_gpu
@@ -302,6 +303,8 @@ class PRIMERewardModelWorker(Worker):
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.reward_module)
             offload_fsdp_model_to_cpu(self.ref_module)
+            torch.distributed.barrier()
+            torch.cuda.empty_cache()
         return output
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
@@ -310,6 +313,7 @@ class PRIMERewardModelWorker(Worker):
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.ref_module)
             load_fsdp_model_to_gpu(self.reward_module)
+            torch.distributed.barrier()
         if self._is_offload_optimizer:
             load_fsdp_optimizer(optimizer=self.reward_optimizer, device_id=get_device_id())
 
@@ -341,6 +345,8 @@ class PRIMERewardModelWorker(Worker):
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.reward_module)
             offload_fsdp_model_to_cpu(self.ref_module)
+            torch.distributed.barrier()
+            torch.cuda.empty_cache() 
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(optimizer=self.reward_optimizer)
         output = output.to("cpu")
