@@ -346,7 +346,7 @@ class PRIMERewardModelWorker(Worker):
             offload_fsdp_model_to_cpu(self.reward_module)
             offload_fsdp_model_to_cpu(self.ref_module)
             torch.distributed.barrier()
-            torch.cuda.empty_cache() 
+            torch.cuda.empty_cache()
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(optimizer=self.reward_optimizer)
         output = output.to("cpu")
