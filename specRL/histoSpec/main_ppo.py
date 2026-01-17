@@ -150,7 +150,10 @@ class SpecRLTaskRunner:
             )
 
         if config.actor_rollout_ref.actor.strategy in {"fsdp", "fsdp2"}:
-            from recipe.specRL.histoSpec.fsdp_workers import SpecRLActorRolloutRefWorker, SpecRLAsyncActorRolloutRefWorker
+            from recipe.specRL.histoSpec.fsdp_workers import (
+                SpecRLActorRolloutRefWorker,
+                SpecRLAsyncActorRolloutRefWorker,
+            )
 
             actor_rollout_cls = (
                 SpecRLAsyncActorRolloutRefWorker
