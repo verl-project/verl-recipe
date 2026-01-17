@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 import vllm.envs as envs
 
 # Import specRLPatch from the correct location
-from recipe.specRL.vllm_plugin.patch_utils import specRLPatch
+from recipe.specRL.histoSpec.vllm_plugin.patch_utils import specRLPatch
 from specrl.suffix_cache import SuffixCache
 from vllm.distributed.kv_transfer import has_kv_transfer_group
 from vllm.logger import init_logger

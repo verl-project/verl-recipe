@@ -22,10 +22,10 @@ import socket
 import hydra
 import ray
 from omegaconf import OmegaConf
-from recipe.specRL.ray_trainer import SpecRLRayPPOTrainer
+from recipe.specRL.histoSpec.ray_trainer import SpecRLRayPPOTrainer
 
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
-from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler
+from verl.trainer.histoSpec.main_ppo import create_rl_dataset, create_rl_sampler
 from verl.trainer.ppo.reward import load_reward_manager
 from verl.trainer.ppo.utils import need_critic, need_reference_policy
 from verl.utils.config import validate_config
@@ -150,7 +150,10 @@ class SpecRLTaskRunner:
             )
 
         if config.actor_rollout_ref.actor.strategy in {"fsdp", "fsdp2"}:
-            from recipe.specRL.fsdp_workers import SpecRLActorRolloutRefWorker, SpecRLAsyncActorRolloutRefWorker
+            from recipe.specRL.histoSpec.fsdp_workers import (
+                SpecRLActorRolloutRefWorker,
+                SpecRLAsyncActorRolloutRefWorker,
+            )
 
             actor_rollout_cls = (
                 SpecRLAsyncActorRolloutRefWorker
