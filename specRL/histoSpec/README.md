@@ -52,7 +52,7 @@ If you encounter any issues or have suggestions, please contact:
 
 ```
 @inproceedings{histoRL,
-      title={History Doesn’t Repeat Itself but Rollouts Rhyme: Accelerating  Reinforcement Learning with HistoRL}, 
+      title={History Doesn’t Repeat Itself but Rollouts Rhyme: Accelerating Reinforcement Learning with HistoRL}, 
       author={Jingkai He and Tianjian Li and Erhu Feng and Dong Du and Qian Liu and Tao Liu and Yubin Xia and Haibo Chen},
       booktitle={Proceedings of the 31th ACM International Conference on Architectural Support for Programming Languages and Operating Systems},
       year={2026},
