@@ -28,7 +28,7 @@ import numpy as np
 import ray
 import torch
 from omegaconf import OmegaConf
-from recipe.specRL.cache_manager import CacheManager
+from recipe.specRL.histoSpec.cache_manager import CacheManager
 from torch.utils.data import Dataset, Sampler
 from tqdm import tqdm
 

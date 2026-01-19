@@ -41,7 +41,9 @@ gen_prompt_bsz=96
 
 WORKING_DIR=${WORKING_DIR:-"${PWD}"}
 echo "WORKING_DIR: ${WORKING_DIR}"
-RUNTIME_ENV=${RUNTIME_ENV:-"${WORKING_DIR}/verl/trainer/runtime_env_fp8.yaml"}
+# For vllm 0.11.x, DEEP_GEMM is enabled by default.
+# For vllm 0.10.x, please set VLLM_USE_DEEP_GEMM=1 in runtime_env.yaml
+RUNTIME_ENV=${RUNTIME_ENV:-"${WORKING_DIR}/verl/trainer/runtime_env.yaml"}
 echo "RUNTIME_ENV: ${RUNTIME_ENV}"
 NNODES=${NNODES:-2}
 echo "NNODES: ${NNODES}"
@@ -166,6 +168,4 @@ RAY_ADDRESS='http://127.0.0.1:8265' ray job submit --runtime-env=${RUNTIME_ENV} 
     trainer.log_val_generations=1 \
     trainer.total_training_steps=500 \
     trainer.max_actor_ckpt_to_keep=5 \
-    +trainer.dump_high_diff_tokens=False \
-    +trainer.dump_high_diff_dir="${CKPTS_DIR}/30B_logprob_diff_dumps" \
     actor_rollout_ref.rollout.enforce_eager=False
