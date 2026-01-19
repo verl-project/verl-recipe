@@ -27,7 +27,7 @@ from megatron.core import parallel_state as mpu
 from megatron.core.distributed import finalize_model_grads
 from megatron.core.optimizer import DistributedOptimizer
 from megatron.core.pipeline_parallel import get_forward_backward_func
-from megatron_kl_loss import vocab_parallel_kl_divergence
+from megatron_distill_losses import build_vocab_parallel_distill_loss
 from omegaconf import DictConfig, OmegaConf
 from torch import nn
 
@@ -60,10 +60,11 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 class TensorBuffer:
     def __init__(self, memory_alloc, dtype):
-        device = get_device_id()
+        self.device = get_device_id()
         dtype_size = torch.tensor([], dtype=dtype).element_size()
         self.capacity = memory_alloc // dtype_size
-        self.tensor = torch.empty(self.capacity, dtype=dtype, device=device)
+        self.dtype = dtype
+        self.tensor = torch.empty(self.capacity, dtype=self.dtype, device=self.device)
         self.keys = []
         self.shapes = []
 
@@ -74,6 +75,7 @@ class TensorBuffer:
     def clear(self):
         self.keys.clear()
         self.shapes.clear()
+        self.tensor = torch.empty(self.capacity, dtype=self.dtype, device=self.device)
 
     def append(self, key, shape, weight=None):
         if weight is not None:
@@ -183,6 +185,9 @@ class OnPolicyDistillActor:
         config = get_model_config(self.actor_module[0])
         print(config)
         config.finalize_model_grads_func = finalize_model_grads
+
+        # Build distill loss operator (selectable by config)
+        self.distill_loss_op = build_vocab_parallel_distill_loss(self.config.get("distill_loss", None)).cuda()
 
     def _validate_config(self, config) -> None:
         """Validate config options not implemented for Megatron backend"""
@@ -318,7 +323,7 @@ class OnPolicyDistillActor:
                 masked_teacher_topk_logps = teacher_topk_logps[calc_kl_mask]
                 masked_teacher_topk_indices = teacher_topk_indices[calc_kl_mask]
 
-                kl_losses[calc_kl_mask] = vocab_parallel_kl_divergence(
+                kl_losses[calc_kl_mask] = self.distill_loss_op(
                     masked_logits, masked_teacher_topk_logps, masked_teacher_topk_indices
                 )
                 return {"kl_losses": kl_losses, "calc_kl_mask": calc_kl_mask}

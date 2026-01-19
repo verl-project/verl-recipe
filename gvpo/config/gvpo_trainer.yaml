@@ -1,0 +1,15 @@
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - _self_
+  
+actor_rollout_ref:
+  actor:
+    _target_: recipe.gvpo.gvpo_actor_config.FSDPActorConfig
+    gvpo_beta: 0.1
+  
+trainer:
+  project_name: gvpo
