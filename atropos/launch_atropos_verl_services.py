@@ -32,9 +32,10 @@ class ServiceLauncher:
     """Manages the lifecycle of Atropos and VeRL services."""
 
     def __init__(self, config_path: str):
-        self.config = OmegaConf.load(config_path)
+        resolved_config_path = Path(config_path).expanduser().resolve()
+        self.config = OmegaConf.load(resolved_config_path)
         self.processes: list[subprocess.Popen] = []
-        self.config_path = config_path
+        self.config_path = str(resolved_config_path)
 
         # Register signal handlers for cleanup
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -229,6 +230,16 @@ class ServiceLauncher:
         if inference_config.get("dtype"):
             cmd.extend(["--dtype", inference_config["dtype"]])
 
+        gpu_mem_util = inference_config.get("gpu_memory_utilization")
+        if gpu_mem_util is None:
+            gpu_mem_util = (
+                self.config.get("actor_rollout_ref", {})
+                .get("rollout", {})
+                .get("gpu_memory_utilization")
+            )
+        if gpu_mem_util is not None:
+            cmd.extend(["--gpu-memory-utilization", str(gpu_mem_util)])
+
         logger.info(f"Launching vLLM server: {' '.join(cmd)}")
         proc = subprocess.Popen(cmd, text=True)
         self.processes.append(proc)
@@ -282,7 +293,7 @@ class ServiceLauncher:
                 str(Path(self.config_path).parent),
                 "--config-name",
                 Path(self.config_path).stem,
-                "trainer_cls=recipe.atropos.grpo_atropos_trainer.RayGRPOAtroposTrainer",
+                "+trainer_cls=recipe.atropos.grpo_atropos_trainer.RayGRPOAtroposTrainer",
             ]
 
         logger.info(f"Launching training: {' '.join(cmd)}")
