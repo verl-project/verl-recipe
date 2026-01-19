@@ -260,10 +260,11 @@ class ServiceLauncher:
 
     def launch_training(self) -> subprocess.Popen:
         """Launch the VeRL training process."""
-        # Use the example script if available, otherwise use main_ppo
+        # Use main_ppo by default; enable example script via VERL_ATROPOS_USE_EXAMPLE=1
         example_script = Path(__file__).parent / "example_gsm8k_grpo.py"
+        use_example = os.getenv("VERL_ATROPOS_USE_EXAMPLE", "0") == "1"
 
-        if example_script.exists():
+        if use_example and example_script.exists():
             cmd = [
                 sys.executable,
                 str(example_script),
