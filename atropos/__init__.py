@@ -13,11 +13,16 @@
 # limitations under the License.
 
 """
-Atropos Recipe for VERL
-Integration with Atropos RL environments for online RL training.
+Atropos Recipe for VERL.
+GRPO integration with optional token-level advantage overrides from Atropos.
 """
 
-from .atropos_trainer import AtroposTrainer
-from .main_atropos import AtroposRLTrainer
+from .atropos_integration import AtroposConfig, AtroposEnvironmentClient, AtroposGRPOComputer
+from .grpo_atropos_trainer import RayGRPOAtroposTrainer
 
-__all__ = ["AtroposTrainer", "AtroposRLTrainer"]
+__all__ = [
+    "AtroposConfig",
+    "AtroposEnvironmentClient",
+    "AtroposGRPOComputer",
+    "RayGRPOAtroposTrainer",
+]
