@@ -1,5 +1,12 @@
 # Atropos-VERL Integration (GRPO)
 
+![GRPO + Atropos training metrics](recipe/atropos/wandb_grpo_step301.png)
+
+- `val-aux/openai/gsm8k/reward/mean@1` and `val-core/openai/gsm8k/acc/mean@1`
+  show a steady rise across training steps.
+- `critic/rewards/mean` trends upward with expected noise for GSM8K.
+- Stability metrics (KL, entropy, grad norm) remain bounded.
+
 Focused **GRPO integration** between Atropos environments and VERL:
 - **GRPO training** with optional **token-level advantage overrides** from Atropos.
 - **VERL-managed inference servers** (vLLM) with endpoint registration.
@@ -18,12 +25,12 @@ Note: GRPO here is implemented via VERL’s PPO trainer scaffold with
 
 ## Run Commands
 
-### 1) Launch services + training (recommended)
+### Launch services + training (recommended)
 
 ```bash
 cd verl
-python recipe/atropos/launch_atropos_verl_services.py \
-  --config verl/trainer/config/atropos_grpo_small.yaml
+uv run recipe/atropos/launch_atropos_verl_services.py \
+  --config recipe/config/atropos_grpo_small.yaml
 ```
 
 This starts:
@@ -31,27 +38,7 @@ This starts:
 - vLLM inference server
 - GRPO training via `RayGRPOAtroposTrainer`
 
-### 2) Run the GSM8K GRPO example directly
 
-```bash
-cd verl
-python recipe/atropos/example_gsm8k_grpo.py \
-  --config-path recipe/atropos/config \
-  --config-name gsm8k_grpo_example
-```
 
-### 3) Shell entrypoint
 
-```bash
-cd verl
-bash recipe/atropos/run_qwen2_5-3b_atropos_grpo.sh
-```
 
-## Local Plot Notes (add screenshots here)
-
-- `val-aux/openai/gsm8k/reward/mean@1` and `val-core/openai/gsm8k/acc/mean@1`
-  show a steady rise across training steps.
-- `critic/rewards/mean` trends upward with expected noise for GSM8K.
-- Stability metrics (KL, entropy, grad norm) remain bounded.
-
-Use `scripts/live_wandb_plot.py` to generate a live PNG for the plot.
