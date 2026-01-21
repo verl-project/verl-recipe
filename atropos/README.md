@@ -1,6 +1,6 @@
 # Atropos-VERL Integration (GRPO)
 
-![GRPO + Atropos training metrics](recipe/atropos/wandb_grpo_step301.png)
+![GRPO + Atropos training metrics](wandb_grpo_step301.png)
 
 - `val-aux/openai/gsm8k/reward/mean@1` and `val-core/openai/gsm8k/acc/mean@1`
   show a steady rise across training steps.
