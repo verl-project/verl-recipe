@@ -30,7 +30,12 @@ import requests
 sys.path.append(str(Path(__file__).parent.parent.parent))
 sys.path.append(str(Path(__file__).parent.parent.parent.parent))
 
-from recipe.atropos.atropos_integration import AtroposConfig, AtroposEnvironmentClient, AtroposGRPOComputer
+from recipe.atropos.atropos_integration import (
+    AtroposConfig,
+    AtroposTrainerClient,
+    AtroposAPIError,
+    convert_scalar_or_token_advantages,
+)
 
 # Try to import VeRL components, but handle gracefully if missing
 try:
@@ -48,7 +53,7 @@ logger = logging.getLogger(__name__)
 
 def _atropos_available(api_url: str) -> bool:
     try:
-        resp = requests.get(f"{api_url}/health", timeout=3)
+        resp = requests.get(f"{api_url}/status", timeout=3)
         return resp.status_code == 200
     except requests.exceptions.RequestException:
         return False
@@ -68,82 +73,24 @@ def test_atropos_client():
         return True
 
     try:
-        client = AtroposEnvironmentClient(config)
+        client = AtroposTrainerClient(config)
         print("✓ Client initialized successfully")
-        
-        # Test with sample data
-        prompts = ["What is 2+2?", "What is 5*3?"]
-        responses = ["4", "15"]
-        
-        advantages, metrics = client.submit_responses_and_get_advantages(
-            prompts, responses
-        )
-        
-        if advantages is not None:
-            print("✓ Successfully received advantages from Atropos")
-            print(f"  Metrics: {metrics}")
-        else:
-            print("✗ No advantages received (API might be returning None)")
-            
+
+        registration = {
+            "wandb_group": "verl_atropos_tests",
+            "wandb_project": "atropos",
+            "batch_size": 2,
+            "max_token_len": 128,
+            "checkpoint_dir": "/tmp/atropos_test",
+            "save_checkpoint_interval": 0,
+            "starting_step": 0,
+            "num_steps": 1,
+        }
+        trainer_uuid = client.register_trainer(registration)
+        print(f"✓ Registered trainer: {trainer_uuid}")
+
     except Exception as e:
         print(f"✗ Client test failed: {e}")
-        return False
-    
-    return True
-
-
-def test_grpo_computer():
-    """Test GRPO computer with Atropos integration."""
-    print("\nTesting GRPO computer...")
-    
-    config = AtroposConfig(
-        api_url="http://localhost:9001",
-        use_advantages=True,
-        fallback_to_standard=True
-    )
-    
-    if not _atropos_available(config.api_url):
-        print("⚠ Atropos API not available; skipping GRPO computer test.")
-        return True
-
-    try:
-        computer = AtroposGRPOComputer(config)
-        print("✓ GRPO computer initialized")
-        
-        # Create sample tensors
-        batch_size = 2
-        seq_length = 10
-        
-        prompts = torch.randint(0, 1000, (batch_size, seq_length))
-        responses = torch.randint(0, 1000, (batch_size, seq_length))
-        scores = torch.randn(batch_size)
-        response_mask = torch.ones(batch_size, seq_length)
-        
-        # Mock tokenizer
-        class MockTokenizer:
-            def decode(self, tokens, skip_special_tokens=True):
-                return " ".join(str(t.item()) if hasattr(t, 'item') else str(t) for t in tokens)
-        
-        tokenizer = MockTokenizer()
-        
-        # Compute advantages
-        advantages, metrics = computer.compute_advantages_with_overrides(
-            prompts=prompts,
-            responses=responses,
-            scores=scores,
-            tokenizer=tokenizer,
-            response_mask=response_mask
-        )
-        
-        if advantages is not None:
-            print("✓ Advantages computed successfully")
-            print(f"  Shape: {advantages.shape}")
-        else:
-            print("✓ Fallback triggered, standard GRPO will be used")
-        print(f"  Metrics: {metrics}")
-        
-    except Exception as e:
-        print(f"✗ GRPO computer test failed: {e}")
         return False
     
     return True
@@ -155,19 +102,6 @@ def test_advantage_broadcast_logic():
     
     try:
         # Test the broadcast logic directly without requiring API connectivity
-        from recipe.atropos.atropos_integration import AtroposConfig, AtroposEnvironmentClient
-        
-        # Create a config but don't initialize the client (to avoid connectivity test)
-        config = AtroposConfig(
-            api_url="http://localhost:9001",
-            use_advantages=True,
-            fallback_to_standard=True
-        )
-        
-        # Create client instance but bypass connectivity test by mocking
-        client = object.__new__(AtroposEnvironmentClient)
-        client.config = config
-        
         # Test 1: Scalar advantages should be broadcasted
         batch_size = 2
         seq_length = 5
@@ -176,7 +110,7 @@ def test_advantage_broadcast_logic():
         # Mock scalar advantages (one per sample)
         scalar_advantages = [0.5, -0.3]
         
-        tensor_advantages = client._convert_to_token_level_advantages(
+        tensor_advantages = convert_scalar_or_token_advantages(
             scalar_advantages, response_mask
         )
         
@@ -193,7 +127,7 @@ def test_advantage_broadcast_logic():
         partial_mask = torch.tensor([[1, 1, 0, 0, 0],
                                    [1, 1, 1, 0, 0]], dtype=torch.float32)
         
-        tensor_advantages_masked = client._convert_to_token_level_advantages(
+        tensor_advantages_masked = convert_scalar_or_token_advantages(
             scalar_advantages, partial_mask
         )
         
@@ -280,53 +214,34 @@ def test_advantage_estimator():
 
 
 def test_fallback_on_api_failure():
-    """Test that fallback works when Atropos API is unavailable."""
+    """Test that API failure is handled gracefully."""
     print("\nTesting fallback on API failure...")
-    
-    # Use a non-existent URL to simulate API failure
-    config = AtroposConfig(
-        api_url="http://localhost:9999",  # Non-existent port
-        timeout=2,
-        retry_attempts=2,  # Reduce for faster test
-        fallback_to_standard=True
-    )
-    
-    try:
-        AtroposGRPOComputer(config)
-        print("✗ Expected connection failure but got success")
-        return False
-    except Exception:
-        # Expected - connection should fail
-        pass
-    
-    # Test that fallback estimator works
-    if not VERL_AVAILABLE:
-        print("Skipping fallback estimator test as VeRL is not available.")
-        return True # Indicate success if VeRL is not available
 
+    config = AtroposConfig(
+        api_url="http://localhost:9999",
+        timeout=2,
+        retry_attempts=2,
+    )
+
+    client = AtroposTrainerClient(config)
     try:
-        batch_size = 2
-        response_length = 10
-        
-        token_level_rewards = torch.randn(batch_size, response_length)
-        response_mask = torch.ones(batch_size, response_length)
-        index = torch.arange(batch_size).numpy()
-        
-        # This should work without Atropos (no token_level_advantages provided)
-        advantages, returns = compute_grpo_outcome_advantage(
-            token_level_rewards=token_level_rewards,
-            response_mask=response_mask,
-            index=index,
-            norm_adv_by_std_in_grpo=True
+        client.register_trainer(
+            {
+                "wandb_group": "verl_atropos_tests",
+                "wandb_project": "atropos",
+                "batch_size": 2,
+                "max_token_len": 128,
+                "checkpoint_dir": "/tmp/atropos_test",
+                "save_checkpoint_interval": 0,
+                "starting_step": 0,
+                "num_steps": 1,
+            }
         )
-        
-        print("✓ Fallback computation successful")
-        print(f"  Advantages shape: {advantages.shape}")
-        return True
-        
-    except Exception as e:
-        print(f"✗ Fallback test failed: {e}")
+        print("✗ Expected registration failure but got success")
         return False
+    except AtroposAPIError:
+        print("✓ Registration failure handled as expected")
+        return True
 
 
 def main():
@@ -341,7 +256,6 @@ def main():
     # Run tests
     tests = [
         ("Atropos Client", test_atropos_client),
-        ("GRPO Computer", test_grpo_computer),
         ("Advantage Broadcast Logic", test_advantage_broadcast_logic),
         ("Advantage Estimator", test_advantage_estimator),
         ("Fallback on API Failure", test_fallback_on_api_failure)

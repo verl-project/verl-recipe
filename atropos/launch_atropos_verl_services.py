@@ -31,11 +31,12 @@ logger = logging.getLogger(__name__)
 class ServiceLauncher:
     """Manages the lifecycle of Atropos and VeRL services."""
 
-    def __init__(self, config_path: str):
+    def __init__(self, config_path: str, overrides: list[str] | None = None):
         resolved_config_path = Path(config_path).expanduser().resolve()
         self.config = OmegaConf.load(resolved_config_path)
         self.processes: list[subprocess.Popen] = []
         self.config_path = str(resolved_config_path)
+        self.overrides = overrides or []
 
         # Register signal handlers for cleanup
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -296,6 +297,9 @@ class ServiceLauncher:
                 "+trainer_cls=recipe.atropos.grpo_atropos_trainer.RayGRPOAtroposTrainer",
             ]
 
+        if self.overrides:
+            cmd.extend(self.overrides)
+
         logger.info(f"Launching training: {' '.join(cmd)}")
         proc = subprocess.Popen(cmd, text=True)
         self.processes.append(proc)
@@ -349,6 +353,11 @@ def main():
     parser = argparse.ArgumentParser(description="Launch Atropos-VeRL integrated services")
     parser.add_argument("--config", type=str, required=True, help="Path to configuration file")
     parser.add_argument(
+        "overrides",
+        nargs=argparse.REMAINDER,
+        help="Optional Hydra overrides (pass after `--`)",
+    )
+    parser.add_argument(
         "--atropos-path", type=str, help="Path to Atropos installation (overrides ATROPOS_PATH env var)"
     )
     parser.add_argument(
@@ -370,7 +379,10 @@ def main():
     if args.atropos_path:
         os.environ["ATROPOS_PATH"] = args.atropos_path
 
-    launcher = ServiceLauncher(args.config)
+    overrides = args.overrides or []
+    if overrides and overrides[0] == "--":
+        overrides = overrides[1:]
+    launcher = ServiceLauncher(args.config, overrides=overrides)
 
     # Override launch methods if skip flags are set
     if args.skip_atropos_api:

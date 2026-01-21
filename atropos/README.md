@@ -20,8 +20,7 @@ Note: GRPO here is implemented via VERL’s PPO trainer scaffold with
 - `atropos_integration.py`: Atropos API client + advantage override logic
 - `grpo_atropos_trainer.py`: GRPO trainer with Atropos token-level advantages
 - `launch_atropos_verl_services.py`: Orchestrates Atropos API, vLLM, and training
-- `example_gsm8k_grpo.py`: Minimal GRPO example with Atropos
-- `run_qwen2_5-3b_atropos_grpo.sh`: Shell entrypoint for GSM8K GRPO
+- `config/atropos_grpo_small.yaml`: Minimal GRPO config used by the launcher
 
 ## Run Commands
 
@@ -29,16 +28,18 @@ Note: GRPO here is implemented via VERL’s PPO trainer scaffold with
 
 ```bash
 cd verl
-uv run recipe/atropos/launch_atropos_verl_services.py \
-  --config recipe/config/atropos_grpo_small.yaml
+python recipe/atropos/launch_atropos_verl_services.py \
+  --config recipe/atropos/config/atropos_grpo_small.yaml
+
+# You can pass standard VeRL overrides after `--`:
+python recipe/atropos/launch_atropos_verl_services.py \
+  --config recipe/atropos/config/atropos_grpo_small.yaml -- \
+  trainer.total_epochs=1 data.train_batch_size=2 actor_rollout_ref.rollout.n=2
 ```
 
 This starts:
 - Atropos API server
 - vLLM inference server
 - GRPO training via `RayGRPOAtroposTrainer`
-
-
-
 
 

@@ -17,12 +17,11 @@ Atropos Recipe for VERL.
 GRPO integration with optional token-level advantage overrides from Atropos.
 """
 
-from .atropos_integration import AtroposConfig, AtroposEnvironmentClient, AtroposGRPOComputer
+from .atropos_integration import AtroposConfig, AtroposTrainerClient
 from .grpo_atropos_trainer import RayGRPOAtroposTrainer
 
 __all__ = [
     "AtroposConfig",
-    "AtroposEnvironmentClient",
-    "AtroposGRPOComputer",
+    "AtroposTrainerClient",
     "RayGRPOAtroposTrainer",
 ]
