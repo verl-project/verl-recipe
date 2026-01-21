@@ -20,11 +20,16 @@ This script validates the integration between VeRL and Atropos.
 """
 
 import logging
+import os
 import sys
+import time
+import atexit
+import subprocess
 from pathlib import Path
 
 import torch
 import requests
+from urllib.parse import urlparse
 
 # Add parent directories to path
 sys.path.append(str(Path(__file__).parent.parent.parent))
@@ -57,6 +62,48 @@ def _atropos_available(api_url: str) -> bool:
         return resp.status_code == 200
     except requests.exceptions.RequestException:
         return False
+
+
+def _ensure_atropos_api(api_url: str) -> None:
+    if _atropos_available(api_url):
+        return
+
+    atropos_path = os.environ.get("ATROPOS_PATH")
+    if not atropos_path:
+        print("⚠ ATROPOS_PATH not set; skipping auto-start of Atropos API.")
+        return
+
+    api_script = Path(atropos_path) / "atroposlib" / "cli" / "run_api.py"
+    if not api_script.exists():
+        print(f"⚠ Atropos API script not found: {api_script}")
+        return
+
+    parsed = urlparse(api_url)
+    host = parsed.hostname or "localhost"
+    port = parsed.port or 9001
+
+    cmd = [sys.executable, str(api_script), "--host", host, "--port", str(port)]
+    print(f"Starting Atropos API: {' '.join(cmd)}")
+    proc = subprocess.Popen(cmd, cwd=str(atropos_path), text=True)
+
+    def _cleanup():
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                proc.kill()
+
+    atexit.register(_cleanup)
+
+    # Wait for /status to become available
+    start = time.time()
+    while time.time() - start < 30:
+        if _atropos_available(api_url):
+            return
+        time.sleep(1)
+
+    print("⚠ Atropos API did not become ready in time; tests may fail.")
 
 
 def test_atropos_client():
@@ -252,6 +299,8 @@ def main():
     
     # Configure logging
     logging.basicConfig(level=logging.INFO)
+
+    _ensure_atropos_api("http://localhost:9001")
     
     # Run tests
     tests = [
