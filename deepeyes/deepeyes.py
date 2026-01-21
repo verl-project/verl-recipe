@@ -70,22 +70,15 @@ class CustomRLHFDataset(RLHFDataset):
                 "content": row_dict[self.prompt_key][1]["content"],
             },
         ]
+
+        images = []
+        row_dict_images = row_dict.get(self.image_key, None)
+        if row_dict_images:
+            images = [Image.open(io.BytesIO(image["bytes"])) for image in row_dict_images]
         messages = self._build_messages(row_dict)
-        model_inputs = {}
 
         if self.processor is not None:
             raw_prompt = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-            multi_modal_data = {}
-
-            images = None
-            row_dict_images = row_dict.pop(self.image_key, None)
-            if row_dict_images:
-                images = [Image.open(io.BytesIO(image["bytes"])) for image in row_dict_images]
-
-                # due to the image key is "image" instead of "images" in vllm, we need to use "image" here
-                # link: https://github.com/vllm-project/vllm/blob/3c545c0c3b98ee642373a308197d750d0e449403/vllm/multimodal/parse.py#L205  # noqa: E501
-                multi_modal_data["image"] = images
-
             model_inputs = self.processor(text=[raw_prompt], images=images, return_tensors="pt")
 
             input_ids = model_inputs.pop("input_ids")
@@ -93,17 +86,6 @@ class CustomRLHFDataset(RLHFDataset):
 
             if "second_per_grid_ts" in model_inputs:
                 model_inputs.pop("second_per_grid_ts")
-
-            # There's a trap here, multi_modal_inputs has to be a dict, not BatchFeature
-            row_dict["multi_modal_data"] = multi_modal_data
-
-            # We will do batch.union() in the trainer,
-            # so we cannot have "multi_modal_inputs" in row_dict if rollout generates new multi_modal_inputs
-            if self.return_multi_modal_inputs:
-                row_dict["multi_modal_inputs"] = dict(model_inputs)
-
-                # second_per_grid_ts isn't used for training, just for mrope
-                row_dict["multi_modal_inputs"].pop("second_per_grid_ts", None)
 
         else:
             raw_prompt = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
