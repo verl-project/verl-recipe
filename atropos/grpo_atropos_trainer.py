@@ -96,8 +96,16 @@ class RayGRPOAtroposTrainer(RayPPOTrainer):
 
     def _register_with_atropos(self) -> None:
         trainer_cfg = getattr(self.config, "trainer", None)
-        project_name = getattr(trainer_cfg, "project_name", "verl_atropos") if trainer_cfg is not None else "verl_atropos"
-        experiment_name = getattr(trainer_cfg, "experiment_name", "grpo") if trainer_cfg is not None else "grpo"
+        project_name = (
+            getattr(trainer_cfg, "project_name", "verl_atropos")
+            if trainer_cfg is not None
+            else "verl_atropos"
+        )
+        experiment_name = (
+            getattr(trainer_cfg, "experiment_name", "grpo")
+            if trainer_cfg is not None
+            else "grpo"
+        )
 
         rollout_n = int(self.config.actor_rollout_ref.rollout.n)
         batch_size = int(self.config.data.train_batch_size) * max(1, rollout_n)
@@ -108,7 +116,11 @@ class RayGRPOAtroposTrainer(RayPPOTrainer):
             "wandb_project": experiment_name,
             "batch_size": batch_size,
             "max_token_len": max_token_len,
-            "checkpoint_dir": getattr(trainer_cfg, "default_local_dir", "./checkpoints") if trainer_cfg else "./checkpoints",
+            "checkpoint_dir": (
+                getattr(trainer_cfg, "default_local_dir", "./checkpoints")
+                if trainer_cfg
+                else "./checkpoints"
+            ),
             "save_checkpoint_interval": getattr(trainer_cfg, "save_freq", 0) if trainer_cfg else 0,
             "starting_step": 0,
             "num_steps": int(getattr(trainer_cfg, "total_training_steps", 0) or 0),
