@@ -4,26 +4,26 @@ Test script for Atropos-VeRL integration.
 This script validates the integration between VeRL and Atropos.
 """
 
+import atexit
 import logging
 import os
+import subprocess
 import sys
 import time
-import atexit
-import subprocess
 from pathlib import Path
-
-import torch
-import requests
 from urllib.parse import urlparse
+
+import requests
+import torch
 
 # Add parent directories to path
 sys.path.append(str(Path(__file__).parent.parent.parent))
 sys.path.append(str(Path(__file__).parent.parent.parent.parent))
 
 from recipe.atropos.atropos_integration import (
+    AtroposAPIError,
     AtroposConfig,
     AtroposTrainerClient,
-    AtroposAPIError,
     convert_scalar_or_token_advantages,
 )
 
@@ -40,6 +40,7 @@ except ImportError as e:
     VERL_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
+
 
 def _atropos_available(api_url: str) -> bool:
     try:
@@ -94,12 +95,9 @@ def _ensure_atropos_api(api_url: str) -> None:
 def test_atropos_client():
     """Test Atropos client connectivity and basic operations."""
     print("Testing Atropos client...")
-    
-    config = AtroposConfig(
-        api_url="http://localhost:9001",
-        timeout=10
-    )
-    
+
+    config = AtroposConfig(api_url="http://localhost:9001", timeout=10)
+
     if not _atropos_available(config.api_url):
         print("⚠ Atropos API not available; skipping client test.")
         return True
@@ -124,57 +122,52 @@ def test_atropos_client():
     except Exception as e:
         print(f"✗ Client test failed: {e}")
         return False
-    
+
     return True
 
 
 def test_advantage_broadcast_logic():
     """Test the broadcast logic for scalar vs token-level advantages."""
     print("\nTesting advantage broadcast logic...")
-    
+
     try:
         # Test the broadcast logic directly without requiring API connectivity
         # Test 1: Scalar advantages should be broadcasted
         batch_size = 2
         seq_length = 5
         response_mask = torch.ones(batch_size, seq_length)
-        
+
         # Mock scalar advantages (one per sample)
         scalar_advantages = [0.5, -0.3]
-        
-        tensor_advantages = convert_scalar_or_token_advantages(
-            scalar_advantages, response_mask
-        )
-        
+
+        tensor_advantages = convert_scalar_or_token_advantages(scalar_advantages, response_mask)
+
         # Check that scalar advantages were broadcasted correctly
-        expected = torch.tensor([[0.5, 0.5, 0.5, 0.5, 0.5],
-                               [-0.3, -0.3, -0.3, -0.3, -0.3]])
-        
-        assert torch.allclose(tensor_advantages, expected), \
+        expected = torch.tensor([[0.5, 0.5, 0.5, 0.5, 0.5], [-0.3, -0.3, -0.3, -0.3, -0.3]])
+
+        assert torch.allclose(tensor_advantages, expected), (
             f"Scalar broadcast failed: got {tensor_advantages}, expected {expected}"
-        
-        print("✓ Scalar advantage broadcasting works correctly")
-        
-        # Test 2: With partial response mask
-        partial_mask = torch.tensor([[1, 1, 0, 0, 0],
-                                   [1, 1, 1, 0, 0]], dtype=torch.float32)
-        
-        tensor_advantages_masked = convert_scalar_or_token_advantages(
-            scalar_advantages, partial_mask
         )
-        
-        expected_masked = torch.tensor([[0.5, 0.5, 0.0, 0.0, 0.0],
-                                       [-0.3, -0.3, -0.3, 0.0, 0.0]])
-        
-        assert torch.allclose(tensor_advantages_masked, expected_masked), \
+
+        print("✓ Scalar advantage broadcasting works correctly")
+
+        # Test 2: With partial response mask
+        partial_mask = torch.tensor([[1, 1, 0, 0, 0], [1, 1, 1, 0, 0]], dtype=torch.float32)
+
+        tensor_advantages_masked = convert_scalar_or_token_advantages(scalar_advantages, partial_mask)
+
+        expected_masked = torch.tensor([[0.5, 0.5, 0.0, 0.0, 0.0], [-0.3, -0.3, -0.3, 0.0, 0.0]])
+
+        assert torch.allclose(tensor_advantages_masked, expected_masked), (
             f"Masked broadcast failed: got {tensor_advantages_masked}, expected {expected_masked}"
-        
+        )
+
         print("✓ Masked advantage broadcasting works correctly")
-        
+
         # Test 3: Token-level advantages should pass through unchanged
         # This would require mocking the API response, so we'll test the shape validation
         token_level_advantages = torch.randn(batch_size, seq_length)
-        
+
         # This should work without errors (shape matches)
         try:
             result = token_level_advantages * response_mask
@@ -183,9 +176,9 @@ def test_advantage_broadcast_logic():
         except Exception as e:
             print(f"✗ Token-level advantage test failed: {e}")
             return False
-        
+
         return True
-        
+
     except Exception as e:
         print(f"✗ Broadcast logic test failed: {e}")
         return False
@@ -232,9 +225,9 @@ def test_advantage_estimator():
             token_level_advantages=token_level_advantages,
         )
 
-        assert torch.allclose(
-            advantages_override, token_level_advantages * response_mask
-        ), "token-level overrides should be respected"
+        assert torch.allclose(advantages_override, token_level_advantages * response_mask), (
+            "token-level overrides should be respected"
+        )
         assert torch.allclose(advantages_override, returns_override), "returns should match overrides"
         print("✓ Advantage override successful")
 
@@ -281,20 +274,20 @@ def main():
     print("=" * 60)
     print("Atropos-VeRL Integration Tests")
     print("=" * 60)
-    
+
     # Configure logging
     logging.basicConfig(level=logging.INFO)
 
     _ensure_atropos_api("http://localhost:9001")
-    
+
     # Run tests
     tests = [
         ("Atropos Client", test_atropos_client),
         ("Advantage Broadcast Logic", test_advantage_broadcast_logic),
         ("Advantage Estimator", test_advantage_estimator),
-        ("Fallback on API Failure", test_fallback_on_api_failure)
+        ("Fallback on API Failure", test_fallback_on_api_failure),
     ]
-    
+
     results = []
     for test_name, test_func in tests:
         try:
@@ -303,16 +296,16 @@ def main():
         except Exception as e:
             print(f"\n✗ {test_name} failed with exception: {e}")
             results.append((test_name, False))
-    
+
     # Summary
     print("\n" + "=" * 60)
     print("Test Summary")
     print("=" * 60)
-    
+
     for test_name, success in results:
         status = "✓ PASSED" if success else "✗ FAILED"
         print(f"{test_name}: {status}")
-    
+
     # Overall result
     all_passed = all(success for _, success in results)
     print("\n" + "=" * 60)
@@ -322,7 +315,7 @@ def main():
         print("Some tests failed. ✗")
         print("\nNote: If Atropos server is not running, start it with:")
         print("  python environments/gsm8k_server.py serve --slurm false")
-    
+
     return 0 if all_passed else 1
 
 

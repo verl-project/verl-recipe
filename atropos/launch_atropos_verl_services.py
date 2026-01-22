@@ -233,11 +233,7 @@ class ServiceLauncher:
 
         gpu_mem_util = inference_config.get("gpu_memory_utilization")
         if gpu_mem_util is None:
-            gpu_mem_util = (
-                self.config.get("actor_rollout_ref", {})
-                .get("rollout", {})
-                .get("gpu_memory_utilization")
-            )
+            gpu_mem_util = self.config.get("actor_rollout_ref", {}).get("rollout", {}).get("gpu_memory_utilization")
         if gpu_mem_util is not None:
             cmd.extend(["--gpu-memory-utilization", str(gpu_mem_util)])
 
@@ -248,18 +244,14 @@ class ServiceLauncher:
         # Wait for vLLM to start
         if not self.wait_for_service(vllm_url, "vLLM server", timeout=120, health_path="/health"):
             return False
-            
+
         # Register inference endpoint with Atropos if supported
         try:
             atropos_config = self.config.get("trainer", {}).get("atropos", {})
             api_url = atropos_config.get("api_url", "http://localhost:9001")
-            
+
             # Try to register the endpoint (optional, for future Atropos versions)
-            response = requests.post(
-                f"{api_url}/register_inference_endpoint",
-                json={"url": vllm_url},
-                timeout=5
-            )
+            response = requests.post(f"{api_url}/register_inference_endpoint", json={"url": vllm_url}, timeout=5)
             if response.status_code == 200:
                 logger.info(f"Successfully registered vLLM endpoint {vllm_url} with Atropos")
             else:
@@ -267,7 +259,7 @@ class ServiceLauncher:
         except requests.exceptions.RequestException:
             # Endpoint registration is optional - don't fail if not supported
             logger.debug("Endpoint registration not supported by this Atropos version")
-            
+
         return True
 
     def launch_training(self) -> subprocess.Popen:

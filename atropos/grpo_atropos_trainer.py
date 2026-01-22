@@ -8,8 +8,8 @@ for computing advantages with token-level overrides.
 import logging
 from typing import Any, Optional
 
-import torch
 import numpy as np
+import torch
 
 from verl import DataProto
 from verl.single_controller.ray import RayWorkerGroup
@@ -23,11 +23,11 @@ logger = logging.getLogger(__name__)
 class RayGRPOAtroposTrainer(RayPPOTrainer):
     """
     Ray-based GRPO trainer with Atropos integration.
-    
+
     This trainer extends the standard PPO trainer to use GRPO with
     Atropos environment feedback for advantage computation.
     """
-    
+
     def __init__(
         self,
         config,
@@ -59,7 +59,7 @@ class RayGRPOAtroposTrainer(RayPPOTrainer):
             train_sampler=train_sampler,
             device_name=device_name,
         )
-        
+
         # Initialize Atropos integration
         trainer_cfg = getattr(config, "trainer", None)
         atropos_cfg = {}
@@ -78,34 +78,28 @@ class RayGRPOAtroposTrainer(RayPPOTrainer):
             use_advantages=atropos_cfg.get("use_advantages", True),
             fallback_to_standard=atropos_cfg.get("fallback_to_grpo", True),
         )
-        
+
         self.atropos_client = AtroposTrainerClient(atropos_config)
         self._register_with_atropos()
         self._patch_rollout_to_use_atropos()
-        
+
         # Ensure we're using GRPO
         if config.algorithm.adv_estimator != "grpo":
             logger.warning(f"Overriding adv_estimator from {config.algorithm.adv_estimator} to grpo")
             config.algorithm.adv_estimator = "grpo"
-        
+
         # GRPO doesn't use critic
         self.use_critic = False
         config.algorithm.use_critic = False
-        
+
         logger.info("Initialized RayGRPOAtroposTrainer with Atropos integration")
 
     def _register_with_atropos(self) -> None:
         trainer_cfg = getattr(self.config, "trainer", None)
         project_name = (
-            getattr(trainer_cfg, "project_name", "verl_atropos")
-            if trainer_cfg is not None
-            else "verl_atropos"
+            getattr(trainer_cfg, "project_name", "verl_atropos") if trainer_cfg is not None else "verl_atropos"
         )
-        experiment_name = (
-            getattr(trainer_cfg, "experiment_name", "grpo")
-            if trainer_cfg is not None
-            else "grpo"
-        )
+        experiment_name = getattr(trainer_cfg, "experiment_name", "grpo") if trainer_cfg is not None else "grpo"
 
         rollout_n = int(self.config.actor_rollout_ref.rollout.n)
         batch_size = int(self.config.data.train_batch_size) * max(1, rollout_n)
@@ -117,9 +111,7 @@ class RayGRPOAtroposTrainer(RayPPOTrainer):
             "batch_size": batch_size,
             "max_token_len": max_token_len,
             "checkpoint_dir": (
-                getattr(trainer_cfg, "default_local_dir", "./checkpoints")
-                if trainer_cfg
-                else "./checkpoints"
+                getattr(trainer_cfg, "default_local_dir", "./checkpoints") if trainer_cfg else "./checkpoints"
             ),
             "save_checkpoint_interval": getattr(trainer_cfg, "save_freq", 0) if trainer_cfg else 0,
             "starting_step": 0,
@@ -209,11 +201,11 @@ class RayGRPOAtroposTrainer(RayPPOTrainer):
                     score_vec[:seq_len] = list(score)
                 elif len(score) == resp_len:
                     start = seq_len - resp_len
-                    score_vec[start:start + resp_len] = list(score)
+                    score_vec[start : start + resp_len] = list(score)
             elif score is not None and resp_len > 0:
                 per_token = float(score) / resp_len
                 start = seq_len - resp_len
-                score_vec[start:start + resp_len] = [per_token] * resp_len
+                score_vec[start : start + resp_len] = [per_token] * resp_len
             token_level_scores.append(score_vec)
 
             # Build token-level advantages if provided
@@ -227,7 +219,7 @@ class RayGRPOAtroposTrainer(RayPPOTrainer):
                 elif len(adv) == resp_len:
                     start = seq_len - resp_len
                     adv_vec = [0.0] * max_len
-                    adv_vec[start:start + resp_len] = list(adv)
+                    adv_vec[start : start + resp_len] = list(adv)
                     token_level_advantages.append(adv_vec)
                 else:
                     adv_vec = list(adv)
@@ -239,7 +231,7 @@ class RayGRPOAtroposTrainer(RayPPOTrainer):
                     per_token = float(adv)
                     start = seq_len - resp_len
                     adv_vec = [0.0] * max_len
-                    adv_vec[start:start + resp_len] = [per_token] * resp_len
+                    adv_vec[start : start + resp_len] = [per_token] * resp_len
                     token_level_advantages.append(adv_vec)
                 else:
                     token_level_advantages.append([0.0] * max_len)
@@ -277,7 +269,7 @@ class RayGRPOAtroposTrainer(RayPPOTrainer):
             batch_proto.batch["token_level_advantages"] = adv_tensor
 
         return batch_proto
-    
+
     def _compute_advantages_grpo(
         self,
         batch: DataProto,
@@ -285,7 +277,7 @@ class RayGRPOAtroposTrainer(RayPPOTrainer):
     ) -> tuple[Optional[torch.Tensor], dict[str, Any]]:
         """
         Compute GRPO advantages with Atropos environment overrides.
-        
+
         This method overrides the standard advantage computation to integrate
         with Atropos environments for token-level advantages.
         """
@@ -300,7 +292,7 @@ class RayGRPOAtroposTrainer(RayPPOTrainer):
 
         advantages = convert_scalar_or_token_advantages(advantages, response_mask)
         return advantages, {"source": "atropos_batch"}
-    
+
     def _compute_or_extract_reward(
         self,
         batch: DataProto,

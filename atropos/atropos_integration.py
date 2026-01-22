@@ -18,12 +18,14 @@ logger = logging.getLogger(__name__)
 
 class AtroposAPIError(Exception):
     """Raised when Atropos API operations fail"""
+
     pass
 
 
 @dataclass
 class AtroposConfig:
     """Configuration for Atropos integration"""
+
     api_url: str = "http://localhost:9001"
     timeout: int = 30
     retry_attempts: int = 10
@@ -66,9 +68,7 @@ class AtroposTrainerClient:
             raise AtroposAPIError(f"Failed to register with Atropos: {e}") from e
 
         if response.status_code != 200:
-            raise AtroposAPIError(
-                f"Atropos /register failed: {response.status_code} - {response.text}"
-            )
+            raise AtroposAPIError(f"Atropos /register failed: {response.status_code} - {response.text}")
 
         result = response.json()
         trainer_uuid = result.get("uuid") or result.get("trainer_uuid") or result.get("trainer_id")
