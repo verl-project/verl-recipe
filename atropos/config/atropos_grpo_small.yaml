@@ -2,6 +2,10 @@ defaults:
   - ppo_trainer
   - _self_
 
+hydra:
+  searchpath:
+    - file://${oc.env:PWD}/verl/trainer/config
+
 trainer:
   atropos:
     api_url: http://localhost:9001
@@ -28,8 +32,8 @@ algorithm:
   use_kl_in_reward: false
 
 data:
-  train_files: /root/data/gsm8k/train_chat.parquet
-  val_files: /root/data/gsm8k/test_chat.parquet
+  train_files: ${oc.env:HOME}/data/gsm8k_chat/train.parquet
+  val_files: ${oc.env:HOME}/data/gsm8k_chat/test.parquet
   train_batch_size: 2
   max_prompt_length: 256
   max_response_length: 256
@@ -64,7 +68,11 @@ actor_rollout_ref:
     n: 2
     log_prob_micro_batch_size_per_gpu: 2
     tensor_model_parallel_size: 1
-    gpu_memory_utilization: 0.4
+    gpu_memory_utilization: 0.25
+    max_num_seqs: 128
+    max_num_batched_tokens: 2048
+    max_model_len: 512
+    enforce_eager: true
     load_format: safetensors
     layered_summon: true
     agent:
@@ -85,3 +93,4 @@ inference:
   type: vllm
   port: 8000
   tensor_parallel_size: 1
+  gpu_memory_utilization: 0.2

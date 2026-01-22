@@ -42,4 +42,34 @@ This starts:
 - vLLM inference server
 - GRPO training via `RayGRPOAtroposTrainer`
 
+## Example shell entrypoint
 
+Use the included script to expose common VeRL configurables in one place:
+
+```bash
+bash recipe/atropos/run_qwen2_5-3b_gsm8k_grpo_lora_atropos.sh
+```
+
+## Config parity quick map
+
+Overrides in the shell script map directly to Hydra keys:
+
+| Script override | Hydra key |
+| --- | --- |
+| `data.train_files=...` | `data.train_files` |
+| `data.val_files=...` | `data.val_files` |
+| `data.train_batch_size=...` | `data.train_batch_size` |
+| `data.max_prompt_length=...` | `data.max_prompt_length` |
+| `data.max_response_length=...` | `data.max_response_length` |
+| `actor_rollout_ref.model.path=...` | `actor_rollout_ref.model.path` |
+| `actor_rollout_ref.model.lora_rank=...` | `actor_rollout_ref.model.lora_rank` |
+| `actor_rollout_ref.model.lora_alpha=...` | `actor_rollout_ref.model.lora_alpha` |
+| `actor_rollout_ref.actor.optim.lr=...` | `actor_rollout_ref.actor.optim.lr` |
+| `actor_rollout_ref.rollout.n=...` | `actor_rollout_ref.rollout.n` |
+| `actor_rollout_ref.rollout.gpu_memory_utilization=...` | `actor_rollout_ref.rollout.gpu_memory_utilization` |
+| `trainer.project_name=...` | `trainer.project_name` |
+| `trainer.experiment_name=...` | `trainer.experiment_name` |
+| `trainer.atropos.api_url=...` | `trainer.atropos.api_url` |
+| `trainer.atropos.environment=...` | `trainer.atropos.environment` |
+| `inference.port=...` | `inference.port` |
+| `inference.gpu_memory_utilization=...` | `inference.gpu_memory_utilization` |

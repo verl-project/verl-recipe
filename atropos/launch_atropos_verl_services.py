@@ -8,7 +8,7 @@ This script orchestrates the startup of all required services:
 3. VeRL training process
 
 Usage:
-    python launch_atropos_verl_services.py --config recipe/atropos/config/gsm8k_grpo_example.yaml
+    python launch_atropos_verl_services.py --config recipe/atropos/config/atropos_grpo_small.yaml
 """
 
 import argparse
@@ -272,30 +272,16 @@ class ServiceLauncher:
 
     def launch_training(self) -> subprocess.Popen:
         """Launch the VeRL training process."""
-        # Use main_ppo by default; enable example script via VERL_ATROPOS_USE_EXAMPLE=1
-        example_script = Path(__file__).parent / "example_gsm8k_grpo.py"
-        use_example = os.getenv("VERL_ATROPOS_USE_EXAMPLE", "0") == "1"
-
-        if use_example and example_script.exists():
-            cmd = [
-                sys.executable,
-                str(example_script),
-                "--config-path",
-                str(Path(self.config_path).parent),
-                "--config-name",
-                Path(self.config_path).stem,
-            ]
-        else:
-            cmd = [
-                sys.executable,
-                "-m",
-                "verl.trainer.main_ppo",
-                "--config-path",
-                str(Path(self.config_path).parent),
-                "--config-name",
-                Path(self.config_path).stem,
-                "+trainer_cls=recipe.atropos.grpo_atropos_trainer.RayGRPOAtroposTrainer",
-            ]
+        cmd = [
+            sys.executable,
+            "-m",
+            "verl.trainer.main_ppo",
+            "--config-path",
+            str(Path(self.config_path).parent),
+            "--config-name",
+            Path(self.config_path).stem,
+            "+trainer_cls=recipe.atropos.grpo_atropos_trainer.RayGRPOAtroposTrainer",
+        ]
 
         if self.overrides:
             cmd.extend(self.overrides)
