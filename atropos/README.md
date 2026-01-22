@@ -1,6 +1,6 @@
 # Atropos-VERL Integration (GRPO)
 
-![GRPO + Atropos training metrics](wandb_grpo_step301.png)
+![GRPO + Atropos training metrics](qwen2.5_3b_grpo_atropos_verl_small.png)
 
 - `val-aux/openai/gsm8k/reward/mean@1` and `val-core/openai/gsm8k/acc/mean@1`
   show a steady rise across training steps.
@@ -14,6 +14,30 @@ Focused **GRPO integration** between Atropos environments and VERL:
 
 Note: GRPO here is implemented via VERL’s PPO trainer scaffold with
 `adv_estimator: grpo` and critic disabled. This is the canonical VERL GRPO path.
+
+## Dataset used
+
+Training and validation for the example run use GSM8K parquet files:
+
+- Train: `/root/data/gsm8k/train_chat.parquet`
+- Val: `/root/data/gsm8k/test_chat.parquet`
+
+Adjust paths in `recipe/atropos/config/atropos_grpo_small.yaml` if your data lives elsewhere.
+Source dataset: Hugging Face `openai/gsm8k` (config `main`), converted to parquet. You can reproduce
+the standard parquet files with:
+
+```bash
+python examples/data_preprocess/gsm8k.py --local_save_dir ~/data/gsm8k
+```
+
+Dataset link: https://huggingface.co/datasets/openai/gsm8k
+
+The run shown here uses a chat-formatted parquet variant derived from the same source.
+
+## Example run (W&B)
+
+Run link (shows steady reward and accuracy improvements on GSM8K):
+`https://wandb.ai/vyomakesh018-prime-intellect/verl_grpo_example_gsm8k/runs/bp9qk39x?nw=nwuservyomakesh018`
 
 ## Key Components
 
