@@ -5,6 +5,7 @@ This script validates the integration between VeRL and Atropos.
 """
 
 import atexit
+import importlib.util
 import logging
 import os
 import subprocess
@@ -27,27 +28,45 @@ from recipe.atropos.atropos_integration import (
     convert_scalar_or_token_advantages,
 )
 
-# Try to import VeRL components, but handle gracefully if missing
-try:
+VERL_AVAILABLE = importlib.util.find_spec("verl") is not None
+if VERL_AVAILABLE:
+    VERL_AVAILABLE = importlib.util.find_spec("verl.trainer.ppo.core_algos") is not None
+
+if VERL_AVAILABLE:
     from verl.trainer.ppo.core_algos import (
         ADV_ESTIMATOR_REGISTRY,
         compute_grpo_outcome_advantage,
     )
-
-    VERL_AVAILABLE = True
-except ImportError as e:
-    print(f"Warning: VeRL components not available ({e}). Some tests will be skipped.")
-    VERL_AVAILABLE = False
+else:
+    print("Warning: VeRL components not available. Some tests will be skipped.")
 
 logger = logging.getLogger(__name__)
 
 
+class _CaptureException:
+    def __init__(self, exc_type):
+        self.exc_type = exc_type
+        self.caught = False
+        self.exception = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, _tb):
+        if exc_type is None:
+            return False
+        if issubclass(exc_type, self.exc_type):
+            self.caught = True
+            self.exception = exc
+            return True
+        return False
+
+
 def _atropos_available(api_url: str) -> bool:
-    try:
+    with _CaptureException(requests.exceptions.RequestException):
         resp = requests.get(f"{api_url}/status", timeout=3)
         return resp.status_code == 200
-    except requests.exceptions.RequestException:
-        return False
+    return False
 
 
 def _ensure_atropos_api(api_url: str) -> None:
@@ -75,9 +94,10 @@ def _ensure_atropos_api(api_url: str) -> None:
     def _cleanup():
         if proc.poll() is None:
             proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except Exception:
+            deadline = time.time() + 5
+            while time.time() < deadline and proc.poll() is None:
+                time.sleep(0.1)
+            if proc.poll() is None:
                 proc.kill()
 
     atexit.register(_cleanup)
@@ -102,26 +122,21 @@ def test_atropos_client():
         print("⚠ Atropos API not available; skipping client test.")
         return True
 
-    try:
-        client = AtroposTrainerClient(config)
-        print("✓ Client initialized successfully")
+    client = AtroposTrainerClient(config)
+    print("✓ Client initialized successfully")
 
-        registration = {
-            "wandb_group": "verl_atropos_tests",
-            "wandb_project": "atropos",
-            "batch_size": 2,
-            "max_token_len": 128,
-            "checkpoint_dir": "/tmp/atropos_test",
-            "save_checkpoint_interval": 0,
-            "starting_step": 0,
-            "num_steps": 1,
-        }
-        trainer_uuid = client.register_trainer(registration)
-        print(f"✓ Registered trainer: {trainer_uuid}")
-
-    except Exception as e:
-        print(f"✗ Client test failed: {e}")
-        return False
+    registration = {
+        "wandb_group": "verl_atropos_tests",
+        "wandb_project": "atropos",
+        "batch_size": 2,
+        "max_token_len": 128,
+        "checkpoint_dir": "/tmp/atropos_test",
+        "save_checkpoint_interval": 0,
+        "starting_step": 0,
+        "num_steps": 1,
+    }
+    trainer_uuid = client.register_trainer(registration)
+    print(f"✓ Registered trainer: {trainer_uuid}")
 
     return True
 
@@ -130,58 +145,48 @@ def test_advantage_broadcast_logic():
     """Test the broadcast logic for scalar vs token-level advantages."""
     print("\nTesting advantage broadcast logic...")
 
-    try:
-        # Test the broadcast logic directly without requiring API connectivity
-        # Test 1: Scalar advantages should be broadcasted
-        batch_size = 2
-        seq_length = 5
-        response_mask = torch.ones(batch_size, seq_length)
+    # Test the broadcast logic directly without requiring API connectivity
+    # Test 1: Scalar advantages should be broadcasted
+    batch_size = 2
+    seq_length = 5
+    response_mask = torch.ones(batch_size, seq_length)
 
-        # Mock scalar advantages (one per sample)
-        scalar_advantages = [0.5, -0.3]
+    # Mock scalar advantages (one per sample)
+    scalar_advantages = [0.5, -0.3]
 
-        tensor_advantages = convert_scalar_or_token_advantages(scalar_advantages, response_mask)
+    tensor_advantages = convert_scalar_or_token_advantages(scalar_advantages, response_mask)
 
-        # Check that scalar advantages were broadcasted correctly
-        expected = torch.tensor([[0.5, 0.5, 0.5, 0.5, 0.5], [-0.3, -0.3, -0.3, -0.3, -0.3]])
+    # Check that scalar advantages were broadcasted correctly
+    expected = torch.tensor([[0.5, 0.5, 0.5, 0.5, 0.5], [-0.3, -0.3, -0.3, -0.3, -0.3]])
 
-        assert torch.allclose(tensor_advantages, expected), (
-            f"Scalar broadcast failed: got {tensor_advantages}, expected {expected}"
-        )
+    assert torch.allclose(tensor_advantages, expected), (
+        f"Scalar broadcast failed: got {tensor_advantages}, expected {expected}"
+    )
 
-        print("✓ Scalar advantage broadcasting works correctly")
+    print("✓ Scalar advantage broadcasting works correctly")
 
-        # Test 2: With partial response mask
-        partial_mask = torch.tensor([[1, 1, 0, 0, 0], [1, 1, 1, 0, 0]], dtype=torch.float32)
+    # Test 2: With partial response mask
+    partial_mask = torch.tensor([[1, 1, 0, 0, 0], [1, 1, 1, 0, 0]], dtype=torch.float32)
 
-        tensor_advantages_masked = convert_scalar_or_token_advantages(scalar_advantages, partial_mask)
+    tensor_advantages_masked = convert_scalar_or_token_advantages(scalar_advantages, partial_mask)
 
-        expected_masked = torch.tensor([[0.5, 0.5, 0.0, 0.0, 0.0], [-0.3, -0.3, -0.3, 0.0, 0.0]])
+    expected_masked = torch.tensor([[0.5, 0.5, 0.0, 0.0, 0.0], [-0.3, -0.3, -0.3, 0.0, 0.0]])
 
-        assert torch.allclose(tensor_advantages_masked, expected_masked), (
-            f"Masked broadcast failed: got {tensor_advantages_masked}, expected {expected_masked}"
-        )
+    assert torch.allclose(tensor_advantages_masked, expected_masked), (
+        f"Masked broadcast failed: got {tensor_advantages_masked}, expected {expected_masked}"
+    )
 
-        print("✓ Masked advantage broadcasting works correctly")
+    print("✓ Masked advantage broadcasting works correctly")
 
-        # Test 3: Token-level advantages should pass through unchanged
-        # This would require mocking the API response, so we'll test the shape validation
-        token_level_advantages = torch.randn(batch_size, seq_length)
+    # Test 3: Token-level advantages should pass through unchanged
+    # This would require mocking the API response, so we'll test the shape validation
+    token_level_advantages = torch.randn(batch_size, seq_length)
 
-        # This should work without errors (shape matches)
-        try:
-            result = token_level_advantages * response_mask
-            assert result.shape == (batch_size, seq_length)
-            print("✓ Token-level advantage shape validation works")
-        except Exception as e:
-            print(f"✗ Token-level advantage test failed: {e}")
-            return False
+    result = token_level_advantages * response_mask
+    assert result.shape == (batch_size, seq_length)
+    print("✓ Token-level advantage shape validation works")
 
-        return True
-
-    except Exception as e:
-        print(f"✗ Broadcast logic test failed: {e}")
-        return False
+    return True
 
 
 def test_advantage_estimator():
@@ -192,48 +197,43 @@ def test_advantage_estimator():
         print("Skipping GRPO estimator test as VeRL is not available.")
         return True  # Indicate success if VeRL is not available
 
-    try:
-        if "grpo" in ADV_ESTIMATOR_REGISTRY:
-            print("✓ grpo estimator is registered")
-        else:
-            print("✗ grpo estimator not found in registry")
-            return False
-
-        batch_size = 4
-        response_length = 20
-
-        token_level_rewards = torch.randn(batch_size, response_length)
-        response_mask = torch.ones(batch_size, response_length)
-        index = torch.arange(batch_size).numpy()
-
-        advantages, returns = compute_grpo_outcome_advantage(
-            token_level_rewards=token_level_rewards,
-            response_mask=response_mask,
-            index=index,
-            norm_adv_by_std_in_grpo=True,
-        )
-
-        print("✓ Advantage computation successful")
-        print(f"  Advantages shape: {advantages.shape}")
-        print(f"  Returns shape: {returns.shape}")
-
-        token_level_advantages = torch.randn(batch_size, response_length)
-        advantages_override, returns_override = compute_grpo_outcome_advantage(
-            token_level_rewards=token_level_rewards,
-            response_mask=response_mask,
-            index=index,
-            token_level_advantages=token_level_advantages,
-        )
-
-        assert torch.allclose(advantages_override, token_level_advantages * response_mask), (
-            "token-level overrides should be respected"
-        )
-        assert torch.allclose(advantages_override, returns_override), "returns should match overrides"
-        print("✓ Advantage override successful")
-
-    except Exception as e:
-        print(f"✗ Advantage estimator test failed: {e}")
+    if "grpo" in ADV_ESTIMATOR_REGISTRY:
+        print("✓ grpo estimator is registered")
+    else:
+        print("✗ grpo estimator not found in registry")
         return False
+
+    batch_size = 4
+    response_length = 20
+
+    token_level_rewards = torch.randn(batch_size, response_length)
+    response_mask = torch.ones(batch_size, response_length)
+    index = torch.arange(batch_size).numpy()
+
+    advantages, returns = compute_grpo_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        norm_adv_by_std_in_grpo=True,
+    )
+
+    print("✓ Advantage computation successful")
+    print(f"  Advantages shape: {advantages.shape}")
+    print(f"  Returns shape: {returns.shape}")
+
+    token_level_advantages = torch.randn(batch_size, response_length)
+    advantages_override, returns_override = compute_grpo_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        token_level_advantages=token_level_advantages,
+    )
+
+    assert torch.allclose(advantages_override, token_level_advantages * response_mask), (
+        "token-level overrides should be respected"
+    )
+    assert torch.allclose(advantages_override, returns_override), "returns should match overrides"
+    print("✓ Advantage override successful")
 
     return True
 
@@ -249,7 +249,8 @@ def test_fallback_on_api_failure():
     )
 
     client = AtroposTrainerClient(config)
-    try:
+    catcher = _CaptureException(AtroposAPIError)
+    with catcher:
         client.register_trainer(
             {
                 "wandb_group": "verl_atropos_tests",
@@ -262,11 +263,21 @@ def test_fallback_on_api_failure():
                 "num_steps": 1,
             }
         )
-        print("✗ Expected registration failure but got success")
-        return False
-    except AtroposAPIError:
+
+    if catcher.caught:
         print("✓ Registration failure handled as expected")
         return True
+    print("✗ Expected registration failure but got success")
+    return False
+
+
+def _run_test(test_func):
+    catcher = _CaptureException(Exception)
+    with catcher:
+        success = bool(test_func())
+    if catcher.caught:
+        return False, catcher.exception
+    return success, None
 
 
 def main():
@@ -290,12 +301,10 @@ def main():
 
     results = []
     for test_name, test_func in tests:
-        try:
-            success = test_func()
-            results.append((test_name, success))
-        except Exception as e:
-            print(f"\n✗ {test_name} failed with exception: {e}")
-            results.append((test_name, False))
+        success, error = _run_test(test_func)
+        results.append((test_name, success))
+        if error is not None:
+            print(f"\n✗ {test_name} failed with exception: {error}")
 
     # Summary
     print("\n" + "=" * 60)
