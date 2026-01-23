@@ -51,6 +51,7 @@ def compute_advantage(data: DataProto, adv_estimator, config):
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
+        data.batch["response_mask"] = response_mask
     else:
         raise NotImplementedError
     return data
@@ -275,8 +276,10 @@ class RayPRIMETrainer(RayPPOTrainer):
         local_latest_checkpointed_iteration = os.path.join(
             self.config.trainer.default_local_dir, "latest_checkpointed_iteration.txt"
         )
-        with open(local_latest_checkpointed_iteration, "w") as f:
+        temp_tracker = local_latest_checkpointed_iteration + ".tmp"
+        with open(temp_tracker, "w") as f:
             f.write(str(self.global_steps))
+        os.replace(temp_tracker, local_latest_checkpointed_iteration)
 
     def _load_checkpoint(self):
         if self.config.trainer.resume_mode == "disable":
