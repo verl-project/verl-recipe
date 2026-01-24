@@ -49,7 +49,20 @@ class TokensDict:
             self.index_prompt_tokens[global_id]["finished"] = new_token_info["finished"]
             self.index_prompt_tokens[global_id]["new_token_ids"].extend(new_token_info["new_token_ids"])
 
-    def set(self, global_id, key, value):
+    def update_datas(self, global_id_map, req_info):
+        with self._lock:
+            for req_id, new_token_info in req_info.items():
+                if req_id in global_id_map:
+                    global_id = global_id_map[req_id]
+                    if global_id not in self.index_prompt_tokens:
+                        self.index_prompt_tokens[global_id] = {}
+                    for k, v in new_token_info.items():
+                        if k not in self.index_prompt_tokens[global_id]:
+                            self.index_prompt_tokens[global_id][k] = type(v)()
+                    self.index_prompt_tokens[global_id]["finished"] = new_token_info["finished"]
+                    self.index_prompt_tokens[global_id]["new_token_ids"].extend(new_token_info["new_token_ids"])
+
+    def set_data(self, global_id, key, value):
         with self._lock:
             if global_id not in self.index_prompt_tokens:
                 self.index_prompt_tokens[global_id] = {}
@@ -307,12 +320,12 @@ class FaultMgr:
         def run(q, td):
             while True:
                 req_info = q.get()
-                # print(f"[fault manager] catch tokens {req_info}")
+                # print(f"[fault manager] qsize {q.qsize()}")
                 if isinstance(req_info, tuple):
                     request_id, global_id = req_info
                     cls.request_global_id_map[request_id] = global_id
                 elif isinstance(req_info, dict):
-                    cls._parse_req_tokens(req_info, td)
+                    ray.get(td.update_datas.remote(cls.request_global_id_map, req_info))
 
         run.remote(cls.tokens_queue, cls.tokens_dict)
 
@@ -422,16 +435,12 @@ class FaultMgr:
     def init_index_prompt_tokens(cls, gen_batch_output):
         ray.get(cls.tokens_dict.clear.remote(latest_model_ckpt_step=cls._get_latest_global_steps()))
         ray.get(cls.tokens_dict.update_iter.remote(cls.trainer.global_steps))
-        loaded = ray.get(cls.tokens_dict.try_load.remote())
+        ray.get(cls.tokens_dict.try_load.remote())
         gen_batch_output.non_tensor_batch["global_id"] = np.array(
             [str(i) for i in range(len(gen_batch_output.non_tensor_batch["prompt"]))], dtype=object
         )
-        if not loaded:
-            prompts = gen_batch_output.non_tensor_batch["raw_prompt"]
-            global_ids = gen_batch_output.non_tensor_batch["global_id"]
-            for i, global_id in enumerate(global_ids):
-                ray.get(cls.tokens_dict.set.remote(global_id, "raw_prompt", prompts[i]))
         ray.get(cls.tokens_dict.start_save.remote())
+        cls.request_global_id_map.clear()
 
     @classmethod
     def _get_wg_name(cls, role):

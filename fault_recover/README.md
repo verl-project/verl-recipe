@@ -30,7 +30,10 @@ train
 # refer to this example: recipe/fault_recover/run_qwen2_5_0.5b_megatron.sh
 python3 -m recipe.fault_recover.main_ppo --config-path=config \
     --config-name='fault_recover_ppo_megatron_trainer.yaml' \
-    fault_manager.enable=True
+    fault_manager.enable=True \
+    actor_rollout_ref.rollout.agent.default_agent_loop=fault_recover_single_turn_agent \
+    # refer to other detail config in the fault_manager part of
+    # recipe/fault_recover/config/fault_recover_ppo_megatron_trainer.yaml
 ```
 
 ## Configuration

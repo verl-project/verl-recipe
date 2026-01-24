@@ -46,6 +46,7 @@ def main(config):
 
 
 # Define a function to run the PPO-like training process
+@FaultMgr.reschedule
 def run_ppo(config, task_runner_class=None) -> None:
     """Initialize Ray cluster and run distributed PPO training process.
 
