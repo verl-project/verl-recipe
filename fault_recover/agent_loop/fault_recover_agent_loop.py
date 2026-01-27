@@ -94,7 +94,11 @@ class FaultRecoverAgentLoopManager(AgentLoopManager):
     """Agent loop manager that manages a group of agent loop workers."""
 
     def __init__(
-        self, config: DictConfig, worker_group: RayWorkerGroup = None, rm_resource_pool: RayResourcePool = None
+        self,
+        config: DictConfig,
+        worker_group: RayWorkerGroup = None,
+        rollout_resource_pool: RayResourcePool = None,
+        rm_resource_pool: RayResourcePool = None,
     ):
         """Initialize agent loop manager.
 
@@ -121,7 +125,7 @@ class FaultRecoverAgentLoopManager(AgentLoopManager):
         if not hasattr(self, "agent_loop_workers_class"):
             self.agent_loop_workers_class = ray.remote(FaultRecoverAgentLoopWorker)
 
-        self._initialize_llm_servers()
+        self._initialize_llm_servers(rollout_resource_pool)
         self._init_agent_loop_workers()
 
         # Initially we're in sleep mode.

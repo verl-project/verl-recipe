@@ -288,8 +288,11 @@ class FaultMgr:
         from verl.single_controller.ray import RayClassWithInitArgs
         from verl.single_controller.ray.base import create_colocated_worker_cls
 
+        actor_rollout_resource_pool = None
         for role in roles:
             resource_pool = cls.trainer.resource_pool_manager.get_resource_pool(role)
+            if role == Role.ActorRollout:
+                actor_rollout_resource_pool = resource_pool
             role_cls = RayClassWithInitArgs(
                 cls=cls.trainer.role_worker_mapping[role],
                 config=cls._get_role_config(role),
@@ -311,6 +314,7 @@ class FaultMgr:
                 getattr(cls.trainer, cls._get_wg_name(role)).init_model()
         if cls.timeout_chip_check:
             cls._init_node_workers()
+        return actor_rollout_resource_pool
 
     @classmethod
     def catch_rollout_tokens(cls):
@@ -352,8 +356,8 @@ class FaultMgr:
                             break
 
                         print(f"[fault_manager][{datetime.datetime.now()}] start rebuild")
-                        cls.rebuild_wg(roles=roles)
-                        cls.rebuild_rollout_manager()
+                        actor_rollout_resource_pool = cls.rebuild_wg(roles=roles)
+                        cls.rebuild_rollout_manager(actor_rollout_resource_pool)
                         if cls.trainer._load_checkpoint() != 0:
                             cls.trainer.global_steps += 1
                         gen_batch_output = cls._update_gen_batch(
@@ -523,7 +527,7 @@ class FaultMgr:
         return 0
 
     @classmethod
-    def rebuild_rollout_manager(cls):
+    def rebuild_rollout_manager(cls, actor_rollout_resource_pool):
         from recipe.fault_recover.agent_loop.fault_recover_agent_loop import (
             FaultRecoverAgentLoopManager as AgentLoopManager,
         )
@@ -537,7 +541,10 @@ class FaultMgr:
         [ray.kill(rr.server_handle) for rr in cls.trainer.async_rollout_manager.rollout_replicas]
 
         cls.trainer.async_rollout_manager = AgentLoopManager(
-            config=cls.trainer.config, worker_group=cls.trainer.actor_rollout_wg, rm_resource_pool=rm_resource_pool
+            config=cls.trainer.config,
+            worker_group=cls.trainer.actor_rollout_wg,
+            rollout_resource_pool=actor_rollout_resource_pool,
+            rm_resource_pool=rm_resource_pool,
         )
 
     @classmethod
