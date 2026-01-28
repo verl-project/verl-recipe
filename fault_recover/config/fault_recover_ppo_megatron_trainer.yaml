@@ -249,7 +249,9 @@ fault_manager:
   max_reschedule_times: 1
   # max retry times for rollout phase (rebuild worker group)
   max_rebuild_times: 1
-  # timeout of waiting cluster to be ready
+  # timeout of waiting cluster to be ready for reschedule
+  timeout_reschedule: 300
+  # timeout of waiting cluster to be ready for rebuild
   timeout_rebuild: 300
   # check chips usage interval during rollout, set -1 to disable timeout check
   timeout_task_check_interval: 10

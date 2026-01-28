@@ -262,8 +262,7 @@ class FaultMgr:
                     while (max_reschedule_times > 0) and (reschedule_times < max_reschedule_times):
                         try:
                             ray.shutdown()
-                            print(f"[fault_manager][{datetime.datetime.now()}] start reschedule")
-                            func(config, task_runner_class)
+                            func(config, task_runner_class, is_rescheduling=True)
                         except Exception as e:
                             print(
                                 f"[fault_manager][{datetime.datetime.now()}] catch reschedule fault: "
@@ -580,7 +579,7 @@ class FaultMgr:
         timeout_rebuild = cls.trainer.config.fault_manager.timeout_rebuild
         while time.time() - rebuild_time < timeout_rebuild:
             try:
-                cls.trainer.resource_pool_manager._check_resource_available()
+                check_resource_available(cls.trainer.resource_pool_manager.resource_pool_spec)
                 return True
             except ValueError as e:
                 print(f"[fault_manager][{datetime.datetime.now()}] {str(e)}\nwaiting for resource to be ready...")
@@ -604,3 +603,39 @@ def get_tokens_queue():
     except ValueError:
         tokens_queue = None
     return tokens_queue
+
+
+def check_resource_available(resource_pool_spec):
+    """Check if the resource pool can be satisfied in this ray cluster."""
+    node_available_resources = ray._private.state.available_resources_per_node()
+    node_available_gpus = {
+        node: node_info.get("GPU", 0) if "GPU" in node_info else node_info.get("NPU", 0)
+        for node, node_info in node_available_resources.items()
+    }
+
+    # check total required gpus can be satisfied
+    total_available_gpus = sum(node_available_gpus.values())
+    total_required_gpus = sum(
+        [n_gpus for process_on_nodes in resource_pool_spec.values() for n_gpus in process_on_nodes]
+    )
+    if total_available_gpus < total_required_gpus:
+        raise ValueError(
+            f"Total available GPUs {total_available_gpus} is less than total desired GPUs {total_required_gpus}"
+        )
+
+
+def get_resource_pool_spec(config):
+    global_pool_id = "global_pool"
+    resource_pool_spec = {
+        global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
+    }
+    # TODO Here you can use the new registration method to support dynamic registration of roles
+    if config.reward_model.enable_resource_pool:
+        if config.reward_model.n_gpus_per_node <= 0:
+            raise ValueError("config.reward_model.n_gpus_per_node must be greater than 0")
+        if config.reward_model.nnodes <= 0:
+            raise ValueError("config.reward_model.nnodes must be greater than 0")
+
+        reward_pool = [config.reward_model.n_gpus_per_node] * config.reward_model.nnodes
+        resource_pool_spec["reward_pool"] = reward_pool
+    return resource_pool_spec
