@@ -1,0 +1,60 @@
+# SDPO (Self-Distillation Policy Optimization) trainer config
+# Uses GRPO as base with async 2-GPU training
+#
+# NOTE: Full SDPO (self-distillation loss) requires the modified verl code from /root/SDPO.
+# This config uses standard GRPO with importance reweighting and higher clip ratios.
+
+hydra:
+  searchpath:
+    - pkg://verl.trainer.config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+# Config for the rollout (resource isolation for async training)
+rollout:
+  nnodes: 1
+  n_gpus_per_node: 1
+
+# Trainer resource configuration
+trainer:
+  nnodes: 1
+  n_gpus_per_node: 1
+
+# Actor/Rollout configuration
+actor_rollout_ref:
+  # CRITICAL: Must be False for async/one-step-off training
+  hybrid_engine: False
+
+  rollout:
+    free_cache_engine: False
+    calculate_log_probs: True
+    mode: async
+    n: 1
+
+  actor:
+    # Standard PPO/GRPO loss (SDPO requires modified verl from /root/SDPO)
+    policy_loss:
+      loss_mode: vanilla
+
+    # PPO clipping - use higher clip ratio for GRPO style
+    clip_ratio: 0.2
+    clip_ratio_low: 0.2
+    clip_ratio_high: 0.28
+
+  model:
+    use_remove_padding: True
+
+# Algorithm configuration
+algorithm:
+  adv_estimator: grpo
+  use_kl_in_reward: False
+  norm_adv_by_std_in_grpo: True
+
+  # Rollout correction for async training with importance reweighting
+  rollout_correction:
+    bypass_mode: True
+    rollout_is: sequence
+    rollout_is_threshold: 2.0
+    loss_type: ppo_clip
