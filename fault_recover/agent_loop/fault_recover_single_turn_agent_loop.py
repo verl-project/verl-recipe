@@ -72,6 +72,7 @@ class FaultRecoverSingleTurnAgentLoop(AgentLoopBase):
                 multi_modal_data=multi_modal_data,
                 num_turns=2,
                 metrics=metrics,
+                extra_fields={}
             )
 
         origin_prompt_length = len(prompt_ids)
@@ -87,7 +88,12 @@ class FaultRecoverSingleTurnAgentLoop(AgentLoopBase):
                 global_id=kwargs.get("global_id"),
             )
 
-        if output.log_probs is not None or output.routed_experts is not None:
+        if (
+            output.log_probs is not None or
+            output.routed_experts is not None or
+            output.start_model_version is not None or
+            output.finish_model_version is not None
+        ):
             raise NotImplementedError("[fault_manager] Do not support currently")
 
         if metrics.get("num_preempted") is None:
@@ -109,5 +115,9 @@ class FaultRecoverSingleTurnAgentLoop(AgentLoopBase):
             multi_modal_data=multi_modal_data,
             num_turns=2,
             metrics=metrics,
+            extra_fields={
+                "start_model_version": output.start_model_version,
+                "finish_model_version": output.finish_model_version,
+            },
         )
         return output

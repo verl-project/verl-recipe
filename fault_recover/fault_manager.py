@@ -356,14 +356,13 @@ class FaultMgr:
 
                         print(f"[fault_manager][{datetime.datetime.now()}] start rebuild")
                         actor_rollout_resource_pool = cls.rebuild_wg(roles=roles)
-                        cls.rebuild_rollout_manager(actor_rollout_resource_pool)
-                        if cls.trainer._load_checkpoint() != 0:
-                            cls.trainer.global_steps += 1
+                        cls.rebuild_manager(actor_rollout_resource_pool)
                         gen_batch_output = cls._update_gen_batch(
                             gen_batch_output, ray.get(cls.tokens_dict.get.remote())
                         )
                         print(f"[fault_manager][{datetime.datetime.now()}] retry rollout")
                         gen_batch_output = func(cls.trainer.async_rollout_manager, gen_batch_output)
+                        cls.trainer.checkpoint_manager.sleep_replicas()
                         return gen_batch_output
                     except Exception as e:
                         print(
@@ -526,7 +525,8 @@ class FaultMgr:
         return 0
 
     @classmethod
-    def rebuild_rollout_manager(cls, actor_rollout_resource_pool):
+    def rebuild_manager(cls, actor_rollout_resource_pool):
+        from verl.checkpoint_engine import CheckpointEngineManager
         from recipe.fault_recover.agent_loop.fault_recover_agent_loop import (
             FaultRecoverAgentLoopManager as AgentLoopManager,
         )
@@ -539,12 +539,25 @@ class FaultMgr:
         [ray.kill(w) for w in cls.trainer.async_rollout_manager.agent_loop_workers]
         [ray.kill(rr.server_handle) for rr in cls.trainer.async_rollout_manager.rollout_replicas]
 
-        cls.trainer.async_rollout_manager = AgentLoopManager(
+        cls.trainer.async_rollout_manager = AgentLoopManager.create(
             config=cls.trainer.config,
             worker_group=cls.trainer.actor_rollout_wg,
             rollout_resource_pool=actor_rollout_resource_pool,
             rm_resource_pool=rm_resource_pool,
         )
+
+        cls.trainer.checkpoint_manager = CheckpointEngineManager(
+            backend=cls.trainer.config.actor_rollout_ref.rollout.checkpoint_engine.backend,
+            trainer=cls.trainer.actor_rollout_wg,
+            replicas=cls.trainer.async_rollout_manager.rollout_replicas,
+        )
+
+        # sleep all replicas to load checkpoint
+        cls.trainer.checkpoint_manager.sleep_replicas()
+
+        if cls.trainer._load_checkpoint() != 0:
+            cls.trainer.global_steps += 1
+        cls.trainer.checkpoint_manager.update_weights()
 
     @classmethod
     def _init_node_workers(cls):
