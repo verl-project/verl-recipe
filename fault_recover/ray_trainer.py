@@ -29,6 +29,7 @@ from omegaconf import OmegaConf
 from tqdm import tqdm
 
 from verl import DataProto
+from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.dataset.sampler import AbstractCurriculumSampler
 from verl.single_controller.ray import RayClassWithInitArgs
 from verl.single_controller.ray.base import create_colocated_worker_cls
@@ -243,6 +244,16 @@ class FaultRecoverRayPPOTrainer(RayPPOTrainer):
             rollout_resource_pool=actor_rollout_resource_pool,
             rm_resource_pool=rm_resource_pool,
         )
+
+        self.checkpoint_manager = CheckpointEngineManager(
+            backend=self.config.actor_rollout_ref.rollout.checkpoint_engine.backend,
+            trainer=self.actor_rollout_wg,
+            replicas=self.async_rollout_manager.rollout_replicas,
+        )
+
+        # sleep all replicas to load checkpoint
+        self.checkpoint_manager.sleep_replicas()
+
         if self.config.fault_manager.enable:
             FaultMgr.bind_trainer(self)
 
@@ -269,6 +280,7 @@ class FaultRecoverRayPPOTrainer(RayPPOTrainer):
 
         # load checkpoint before doing anything
         self._load_checkpoint()
+        self.checkpoint_manager.update_weights()
 
         current_epoch = self.global_steps // len(self.train_dataloader)
 
@@ -342,8 +354,9 @@ class FaultRecoverRayPPOTrainer(RayPPOTrainer):
                             gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch_output)
                         else:
                             if curr_step_profile:
-                                self.async_rollout_manager.start_profile()
+                                self.async_rollout_manager.start_profile(global_step=self.global_steps)
                             gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
+                            self.checkpoint_manager.sleep_replicas()
                             if curr_step_profile:
                                 self.async_rollout_manager.stop_profile()
 
@@ -363,6 +376,7 @@ class FaultRecoverRayPPOTrainer(RayPPOTrainer):
                                 if curr_step_profile:
                                     self.async_rollout_manager.start_profile()
                                 gen_baseline_output = self.async_rollout_manager.generate_sequences(gen_baseline_batch)
+                                self.checkpoint_manager.sleep_replicas()
                                 if curr_step_profile:
                                     self.async_rollout_manager.stop_profile()
                             batch = batch.union(gen_baseline_output)
@@ -463,6 +477,14 @@ class FaultRecoverRayPPOTrainer(RayPPOTrainer):
                             }
                             metrics.update(old_log_prob_metrics)
                             old_log_prob.batch.pop("entropys")
+                            if "routed_experts" in batch.batch and "routed_experts" in old_log_prob.batch:
+                                router_mode = getattr(
+                                    self.config.actor_rollout_ref.actor.router_replay, "mode", "disabled"
+                                )
+                                if router_mode == "R2":
+                                    batch.batch.pop("routed_experts")
+                                else:
+                                    old_log_prob.batch.pop("routed_experts")
                             batch = batch.union(old_log_prob)
                             if "rollout_log_probs" in batch.batch.keys():
                                 # TODO: we may want to add diff of probs too.
@@ -545,6 +567,11 @@ class FaultRecoverRayPPOTrainer(RayPPOTrainer):
                         # update actor
                         with marked_timer("update_actor", timing_raw, color="red"):
                             actor_output = self._update_actor(batch)
+
+                        # update weights from trainer to rollout
+                        with marked_timer("update_weights", timing_raw, color="red"):
+                            self.checkpoint_manager.update_weights()
+
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
 
@@ -583,7 +610,11 @@ class FaultRecoverRayPPOTrainer(RayPPOTrainer):
                     if esi_close_to_expiration:
                         print("Force saving checkpoint: ESI instance expiration approaching.")
                     with marked_timer("save_checkpoint", timing_raw, color="green"):
+                        # sleep replicas to avoid OOM during checkpoint saving
+                        self.checkpoint_manager.sleep_replicas()
                         self._save_checkpoint()
+                        # wake replicas to avoid OOM during checkpoint saving
+                        self.checkpoint_manager.update_weights()
 
                 with marked_timer("stop_profile", timing_raw):
                     next_step_profile = (

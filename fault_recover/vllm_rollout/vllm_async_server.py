@@ -76,6 +76,9 @@ class FaultRecovervLLMHttpServer(vLLMHttpServer):
         self.engine = engine_client
         self._server_port, self._server_task = await run_unvicorn(app, args, self._server_address)
 
+    def clear_engine(self):
+        self.engine.shutdown()
+
 
 class FaultRecovervLLMReplica(vLLMReplica):
     def __init__(
