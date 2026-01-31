@@ -24,7 +24,7 @@ QUEUE_NAME = "fault_manager_queue"
 
 @ray.remote
 class TokensDict:
-    def __init__(self, auto_save_path=None, save_interval=5):
+    def __init__(self, auto_save_path=None, save_interval=5, batch_size=0):
         self.iteration = 0
         self.index_prompt_tokens = {}
         self._lock = threading.Lock()
@@ -32,6 +32,7 @@ class TokensDict:
         self.save_interval = save_interval
         self.saving_thread = None
         self.saved_step_ckpt = {}
+        self.batch_size = batch_size
 
     def start_save(self):
         if self.auto_save_path:
@@ -46,8 +47,10 @@ class TokensDict:
             for k, v in new_token_info.items():
                 if k not in self.index_prompt_tokens[global_id]:
                     self.index_prompt_tokens[global_id][k] = type(v)()
-            self.index_prompt_tokens[global_id]["finished"] = new_token_info["finished"]
-            self.index_prompt_tokens[global_id]["new_token_ids"].extend(new_token_info["new_token_ids"])
+                if k == "new_token_ids":
+                    self.index_prompt_tokens[global_id][k].extend(v)
+                else:
+                    self.index_prompt_tokens[global_id][k] = v
 
     def update_datas(self, global_id_map, req_info):
         with self._lock:
@@ -59,8 +62,10 @@ class TokensDict:
                     for k, v in new_token_info.items():
                         if k not in self.index_prompt_tokens[global_id]:
                             self.index_prompt_tokens[global_id][k] = type(v)()
-                    self.index_prompt_tokens[global_id]["finished"] = new_token_info["finished"]
-                    self.index_prompt_tokens[global_id]["new_token_ids"].extend(new_token_info["new_token_ids"])
+                        if k == "new_token_ids":
+                            self.index_prompt_tokens[global_id][k].extend(v)
+                        else:
+                            self.index_prompt_tokens[global_id][k] = v
 
     def set_data(self, global_id, key, value):
         with self._lock:
@@ -133,7 +138,10 @@ class TokensDict:
                     [1 for _, req_info in self.index_prompt_tokens.items() if req_info.get("finished", False)]
                 )
                 print(f"[fault_manager][{datetime.datetime.now()}] finished_num: {finished}")
-                if all([req_info.get("finished", False) for _, req_info in self.index_prompt_tokens.items()]):
+                if (
+                    all([req_info.get("finished", False) for _, req_info in self.index_prompt_tokens.items()])
+                    and finished == self.batch_size
+                ):
                     global_step_path = os.path.join(save_dir, f"global_step_{self.iteration}.pt")
                     shutil.copy(self.auto_save_path, global_step_path)
                     self.saved_step_ckpt[self.iteration] = global_step_path
@@ -236,6 +244,7 @@ class FaultMgr:
         cls.tokens_dict = TokensDict.options(scheduling_strategy=cls._get_head_node_strategy()).remote(
             auto_save_path=cls.trainer.config.fault_manager.tokens_save_file,
             save_interval=cls.trainer.config.fault_manager.tokens_save_interval,
+            batch_size=cls.trainer.config.data.train_batch_size * cls.trainer.config.actor_rollout_ref.rollout.n,
         )
         cls.catch_rollout_tokens()
         cls.device_type = cls.trainer.actor_rollout_wg.get_device_name()[0]
@@ -356,9 +365,7 @@ class FaultMgr:
 
                         print(f"[fault_manager][{datetime.datetime.now()}] start rebuild")
                         actor_rollout_resource_pool = cls.rebuild_wg(roles=roles)
-                        cls.rebuild_rollout_manager(actor_rollout_resource_pool)
-                        if cls.trainer._load_checkpoint() != 0:
-                            cls.trainer.global_steps += 1
+                        cls.rebuild_manager(actor_rollout_resource_pool)
                         gen_batch_output = cls._update_gen_batch(
                             gen_batch_output, ray.get(cls.tokens_dict.get.remote())
                         )
@@ -414,6 +421,10 @@ class FaultMgr:
                 if cls.timeout_chip_check:
                     if free_flag.is_set():
                         [ray.kill(w) for w in cls.trainer.async_rollout_manager.agent_loop_workers]
+                        [
+                            ray.get(rr.server_handle.clear_engine.remote())
+                            for rr in cls.trainer.async_rollout_manager.rollout_replicas
+                        ]
                         [ray.kill(rr.server_handle) for rr in cls.trainer.async_rollout_manager.rollout_replicas]
                     else:
                         signal.alarm(timeout_task_check_interval)
@@ -496,20 +507,32 @@ class FaultMgr:
         all_new_token_ids = []
         all_new_token_length = []
         all_token_finished = []
+        all_log_probs = []
+        all_routed_experts = []
+        all_num_preempted = []
 
         for global_id in global_ids:
             token_info = all_tokens.get(global_id, {"new_token_ids": [], "finished": False})
             new_token_ids = token_info.get("new_token_ids", [])
             finished = token_info.get("finished", False)
+            log_probs = token_info.get("log_probs", None)
+            routed_experts = token_info.get("routed_experts", None)
+            num_preempted = token_info.get("num_preempted", -1)
             all_new_token_ids.append(new_token_ids)
             all_new_token_length.append(len(new_token_ids))
             all_token_finished.append(finished)
+            all_log_probs.append(log_probs)
+            all_routed_experts.append(routed_experts)
+            all_num_preempted.append(num_preempted)
 
         if all([length == 0 for length in all_new_token_length]):
             return gen_batch_output
 
         gen_batch_output.non_tensor_batch["new_token_ids"] = np.array(all_new_token_ids, dtype=object)
         gen_batch_output.non_tensor_batch["finished"] = np.array(all_token_finished, dtype=bool)
+        gen_batch_output.non_tensor_batch["log_probs"] = np.array(all_log_probs, dtype=object)
+        gen_batch_output.non_tensor_batch["routed_experts"] = np.array(all_routed_experts, dtype=object)
+        gen_batch_output.non_tensor_batch["num_preempted"] = np.array(all_num_preempted, dtype=object)
         return gen_batch_output
 
     @classmethod
@@ -526,10 +549,12 @@ class FaultMgr:
         return 0
 
     @classmethod
-    def rebuild_rollout_manager(cls, actor_rollout_resource_pool):
+    def rebuild_manager(cls, actor_rollout_resource_pool):
         from recipe.fault_recover.agent_loop.fault_recover_agent_loop import (
             FaultRecoverAgentLoopManager as AgentLoopManager,
         )
+
+        from verl.checkpoint_engine import CheckpointEngineManager
 
         if cls.trainer.config.reward_model.enable and cls.trainer.config.reward_model.enable_resource_pool:
             rm_resource_pool = cls.trainer.resource_pool_manager.get_resource_pool(Role.RewardModel)
@@ -537,6 +562,7 @@ class FaultMgr:
             rm_resource_pool = None
 
         [ray.kill(w) for w in cls.trainer.async_rollout_manager.agent_loop_workers]
+        [ray.get(rr.server_handle.clear_engine.remote()) for rr in cls.trainer.async_rollout_manager.rollout_replicas]
         [ray.kill(rr.server_handle) for rr in cls.trainer.async_rollout_manager.rollout_replicas]
 
         cls.trainer.async_rollout_manager = AgentLoopManager(
@@ -545,6 +571,19 @@ class FaultMgr:
             rollout_resource_pool=actor_rollout_resource_pool,
             rm_resource_pool=rm_resource_pool,
         )
+
+        cls.trainer.checkpoint_manager = CheckpointEngineManager(
+            backend=cls.trainer.config.actor_rollout_ref.rollout.checkpoint_engine.backend,
+            trainer=cls.trainer.actor_rollout_wg,
+            replicas=cls.trainer.async_rollout_manager.rollout_replicas,
+        )
+
+        # sleep all replicas to load checkpoint
+        cls.trainer.checkpoint_manager.sleep_replicas()
+
+        if cls.trainer._load_checkpoint() != 0:
+            cls.trainer.global_steps += 1
+        cls.trainer.checkpoint_manager.update_weights()
 
     @classmethod
     def _init_node_workers(cls):

@@ -299,8 +299,12 @@ class FaultRecoverTaskRunner(TaskRunner):
         # Initialize the workers of the trainer.
         trainer.init_workers()
 
-        # Start the training process.
-        trainer.fit()
+        try:
+            # Start the training process.
+            trainer.fit()
+        except Exception as e:
+            [ray.get(rr.server_handle.clear_engine.remote()) for rr in trainer.async_rollout_manager.rollout_replicas]
+            raise e
 
 
 if __name__ == "__main__":
