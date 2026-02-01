@@ -1,0 +1,17 @@
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - dapo_trainer
+  - _self_
+
+# TransferQueue config for DAPO
+transfer_queue:
+  enable: True
+  num_global_batch: 1
+  storage_backend: AsyncSimpleStorageManager
+  num_data_storage_units: 8
+
+trainer:
+  project_name: verl-dapo-transfer-queue
