@@ -557,7 +557,7 @@ class FaultMgr:
         from verl.checkpoint_engine import CheckpointEngineManager
 
         if cls.trainer.use_reward_loop and cls.trainer.use_rm:
-            raise NotImplementedError(f'[fault_manager] fault_recover does not support use_rm yet')
+            raise NotImplementedError("[fault_manager] fault_recover does not support use_rm yet")
 
         [ray.kill(w) for w in cls.trainer.async_rollout_manager.agent_loop_workers]
         [ray.get(rr.server_handle.clear_engine.remote()) for rr in cls.trainer.async_rollout_manager.rollout_replicas]
