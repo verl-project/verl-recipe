@@ -20,12 +20,37 @@ to provide dense per-token credit assignment.
 Reference: https://arxiv.org/abs/2601.20802
 """
 
-from .sdpo_advantage import SDPOConfig, compute_sdpo_loss, update_teacher_ema
-from .sdpo_ray_trainer import SDPORayTrainer
+from dataclasses import dataclass
+from typing import Optional
+
+from .sdpo_advantage import compute_sdpo_loss, update_teacher_ema
+from .sdpo_ray_trainer import RaySDPOTrainer
+
+
+@dataclass
+class SDPOConfig:
+    """Configuration for SDPO self-distillation.
+
+    Args:
+        full_logit_distillation: Whether to use full-logit KL distillation.
+        alpha: KL interpolation. 0.0=forward KL, 1.0=reverse KL, in-between=JSD.
+        ema_update_rate: EMA update rate for teacher weights (0.0 = no EMA, use ref directly).
+        is_clip: Clip value for importance sampling ratio; None disables IS clipping.
+        distillation_topk: If set, use top-k logits for distillation.
+        distillation_add_tail: Whether to add tail bucket for top-k distillation.
+    """
+
+    full_logit_distillation: bool = True
+    alpha: float = 0.0  # 0.0 = forward KL (teacher → student)
+    ema_update_rate: float = 0.05
+    is_clip: Optional[float] = None
+    distillation_topk: Optional[int] = None
+    distillation_add_tail: bool = True
+
 
 __all__ = [
     "SDPOConfig",
-    "SDPORayTrainer",
+    "RaySDPOTrainer",
     "compute_sdpo_loss",
     "update_teacher_ema",
 ]

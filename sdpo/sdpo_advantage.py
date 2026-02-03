@@ -21,7 +21,6 @@ of the reference policy and training policy weights.
 Reference: https://arxiv.org/abs/2601.20802
 """
 
-from dataclasses import dataclass
 from typing import Any, Optional
 
 import torch
@@ -29,26 +28,7 @@ import torch.nn.functional as F
 
 from verl.trainer.ppo.core_algos import agg_loss
 
-
-@dataclass
-class SDPOConfig:
-    """Configuration for SDPO self-distillation.
-
-    Args:
-        full_logit_distillation: Whether to use full-logit KL distillation.
-        alpha: KL interpolation. 0.0=forward KL, 1.0=reverse KL, in-between=JSD.
-        ema_update_rate: EMA update rate for teacher weights (0.0 = no EMA, use ref directly).
-        is_clip: Clip value for importance sampling ratio; None disables IS clipping.
-        distillation_topk: If set, use top-k logits for distillation.
-        distillation_add_tail: Whether to add tail bucket for top-k distillation.
-    """
-
-    full_logit_distillation: bool = True
-    alpha: float = 0.0  # 0.0 = forward KL (teacher → student)
-    ema_update_rate: float = 0.05
-    is_clip: Optional[float] = None
-    distillation_topk: Optional[int] = None
-    distillation_add_tail: bool = True
+from .__init__ import SDPOConfig
 
 
 def compute_sdpo_loss(
@@ -130,14 +110,10 @@ def compute_sdpo_loss(
         # Compute KL divergence based on alpha
         if config.alpha == 0.0:
             # Forward KL: KL(teacher || student)
-            kl_loss = F.kl_div(
-                student_distill_log_probs, teacher_distill_log_probs, reduction="none", log_target=True
-            )
+            kl_loss = F.kl_div(student_distill_log_probs, teacher_distill_log_probs, reduction="none", log_target=True)
         elif config.alpha == 1.0:
             # Reverse KL: KL(student || teacher)
-            kl_loss = F.kl_div(
-                teacher_distill_log_probs, student_distill_log_probs, reduction="none", log_target=True
-            )
+            kl_loss = F.kl_div(teacher_distill_log_probs, student_distill_log_probs, reduction="none", log_target=True)
         else:
             # Generalized Jensen-Shannon Divergence
             alpha = torch.tensor(
@@ -146,10 +122,9 @@ def compute_sdpo_loss(
                 device=student_distill_log_probs.device,
             )
             mixture_log_probs = torch.logsumexp(
-                torch.stack([
-                    student_distill_log_probs + torch.log(1 - alpha),
-                    teacher_distill_log_probs + torch.log(alpha)
-                ]),
+                torch.stack(
+                    [student_distill_log_probs + torch.log(1 - alpha), teacher_distill_log_probs + torch.log(alpha)]
+                ),
                 dim=0,
             )
             kl_teacher = F.kl_div(mixture_log_probs, teacher_distill_log_probs, reduction="none", log_target=True)
@@ -187,31 +162,9 @@ def compute_sdpo_loss(
 
     # Metrics
     with torch.no_grad():
-        mean_log_ratio = ((student_log_probs - teacher_log_probs) * response_mask).sum() / response_mask.sum().clamp(min=1)
+        mean_log_ratio = ((student_log_probs - teacher_log_probs) * response_mask).sum() / response_mask.sum().clamp(
+            min=1
+        )
         metrics["sdpo/teacher_student_logp_diff"] = mean_log_ratio.item()
 
     return loss, metrics
-
-
-def update_teacher_ema(
-    teacher_params,
-    student_params,
-    ema_rate: float,
-) -> None:
-    """
-    Update teacher parameters using EMA of student parameters.
-
-    teacher = (1 - ema_rate) * teacher + ema_rate * student
-
-    Args:
-        teacher_params: Iterator over teacher model parameters.
-        student_params: Iterator over student model parameters.
-        ema_rate: EMA update rate.
-    """
-    if ema_rate == 0.0:
-        return
-
-    with torch.no_grad():
-        for teacher_param, student_param in zip(teacher_params, student_params):
-            student_data = student_param.data.to(device=teacher_param.device)
-            teacher_param.data.mul_(1.0 - ema_rate).add_(student_data, alpha=ema_rate)
