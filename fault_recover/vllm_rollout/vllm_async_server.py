@@ -61,6 +61,9 @@ class FaultRecovervLLMHttpServer(vLLMHttpServer):
 
         # Don't keep the dummy data in memory
         await engine_client.reset_mm_cache()
+        await engine_client.collective_rpc(
+            method="monkey_patch_model", kwargs={"vocab_size": len(self.model_config.tokenizer)}
+        )
 
         app = build_app(args)
         if _VLLM_VERSION > version.parse("0.11.0"):
@@ -72,6 +75,9 @@ class FaultRecovervLLMHttpServer(vLLMHttpServer):
 
         self.engine = engine_client
         self._server_port, self._server_task = await run_unvicorn(app, args, self._server_address)
+
+    def clear_engine(self):
+        self.engine.shutdown()
 
 
 class FaultRecovervLLMReplica(vLLMReplica):

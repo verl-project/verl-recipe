@@ -58,15 +58,18 @@ class FaultRecoverSingleTurnAgentLoop(AgentLoopBase):
         request_id = uuid4().hex
         new_token_ids = kwargs.get("new_token_ids", [])
         finished = kwargs.get("finished", False)
+        num_preempted = kwargs.get("num_preempted")
         if finished:
             with simple_timer("generate_sequences", metrics):
                 response_mask = [1] * len(new_token_ids)
+            if metrics.get("num_preempted") is None:
+                metrics["num_preempted"] = num_preempted if num_preempted is not None else -1
             return AgentLoopOutput(
                 prompt_ids=prompt_ids,
                 response_ids=new_token_ids[: self.response_length],
                 response_mask=response_mask[: self.response_length],
-                response_logprobs=None,
-                routed_experts=None,
+                response_logprobs=kwargs.get("log_probs"),
+                routed_experts=kwargs.get("routed_experts"),
                 multi_modal_data=multi_modal_data,
                 num_turns=2,
                 metrics=metrics,
@@ -85,8 +88,8 @@ class FaultRecoverSingleTurnAgentLoop(AgentLoopBase):
                 global_id=kwargs.get("global_id"),
             )
 
-        if output.log_probs is not None or output.routed_experts is not None:
-            raise NotImplementedError("[fault_manager] Do not support currently")
+        if metrics.get("num_preempted") is None:
+            metrics["num_preempted"] = output.num_preempted if output.num_preempted is not None else -1
 
         all_token_ids = new_token_ids + output.token_ids
         response_mask = [1] * len(all_token_ids)

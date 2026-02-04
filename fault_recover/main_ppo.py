@@ -15,13 +15,15 @@
 Note that we don't combine the main with ray_trainer as ray_trainer is used by other mpain.
 """
 
+import datetime
 import os
 import socket
+import time
 
 import hydra
 import ray
 from omegaconf import OmegaConf, open_dict
-from recipe.fault_recover.fault_manager import FaultMgr
+from recipe.fault_recover.fault_manager import FaultMgr, check_resource_available, get_resource_pool_spec
 from recipe.fault_recover.ray_trainer import FaultRecoverRayPPOTrainer
 
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
@@ -37,7 +39,7 @@ def main(config):
     """Main entry point for PPO training with Hydra configuration management.
 
     Args:
-        config_dict: Hydra configuration dictionary containing training parameters.
+        config: Hydra configuration dictionary containing training parameters.
     """
     # Automatically set `config.trainer.device = npu` when running on Ascend NPU.
     auto_set_device(config)
@@ -46,7 +48,8 @@ def main(config):
 
 
 # Define a function to run the PPO-like training process
-def run_ppo(config, task_runner_class=None) -> None:
+@FaultMgr.reschedule
+def run_ppo(config, task_runner_class=None, is_rescheduling=False) -> None:
     """Initialize Ray cluster and run distributed PPO training process.
 
     Args:
@@ -75,6 +78,25 @@ def run_ppo(config, task_runner_class=None) -> None:
         ray_init_kwargs = OmegaConf.create({**ray_init_kwargs, "runtime_env": runtime_env})
         print(f"ray init kwargs: {ray_init_kwargs}")
         ray.init(**OmegaConf.to_container(ray_init_kwargs))
+
+    if is_rescheduling:
+        reschedule_time = time.time()
+        timeout_reschedule = config.fault_manager.timeout_reschedule
+        resource_pool_spec = get_resource_pool_spec(config)
+        while True:
+            if time.time() - reschedule_time >= timeout_reschedule:
+                raise Exception(
+                    f"[fault_manager][{datetime.datetime.now()}] "
+                    f"timeout waiting for resource to be ready for {timeout_reschedule}s"
+                )
+            try:
+                check_resource_available(resource_pool_spec)
+                break
+            except ValueError as e:
+                print(f"[fault_manager][{datetime.datetime.now()}] {str(e)}\nwaiting for resource to be ready...")
+                time.sleep(5)
+
+        print(f"[fault_manager][{datetime.datetime.now()}] start reschedule")
 
     if task_runner_class is None:
         task_runner_class = ray.remote(num_cpus=1)(
@@ -277,8 +299,12 @@ class FaultRecoverTaskRunner(TaskRunner):
         # Initialize the workers of the trainer.
         trainer.init_workers()
 
-        # Start the training process.
-        trainer.fit()
+        try:
+            # Start the training process.
+            trainer.fit()
+        except Exception as e:
+            [ray.get(rr.server_handle.clear_engine.remote()) for rr in trainer.async_rollout_manager.rollout_replicas]
+            raise e
 
 
 if __name__ == "__main__":

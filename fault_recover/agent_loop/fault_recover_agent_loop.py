@@ -59,13 +59,14 @@ class FaultRecoverAsyncLLMServerManager(AsyncLLMServerManager):
         """
         server = self._choose_server(request_id)
         new_request_id = uuid4().hex
+        tokens_queue = None
         if global_id is not None:
             from recipe.fault_recover.fault_manager import get_tokens_queue
 
             tokens_queue = get_tokens_queue()
 
-            if tokens_queue is not None:
-                await tokens_queue.put.remote((new_request_id, global_id))
+        if tokens_queue is not None:
+            await tokens_queue.put.remote((new_request_id, global_id))
 
         output = await server.generate.remote(
             request_id=new_request_id,  # use new request_id for each turn
@@ -74,6 +75,18 @@ class FaultRecoverAsyncLLMServerManager(AsyncLLMServerManager):
             image_data=image_data,
             video_data=video_data,
         )
+
+        if tokens_queue is not None:
+            await tokens_queue.put.remote(
+                {
+                    new_request_id: {
+                        "log_probs": output.log_probs,
+                        "routed_experts": output.routed_experts,
+                        "num_preempted": output.num_preempted,
+                    }
+                }
+            )
+
         return output
 
 
@@ -94,13 +107,18 @@ class FaultRecoverAgentLoopManager(AgentLoopManager):
     """Agent loop manager that manages a group of agent loop workers."""
 
     def __init__(
-        self, config: DictConfig, worker_group: RayWorkerGroup = None, rm_resource_pool: RayResourcePool = None
+        self,
+        config: DictConfig,
+        worker_group: RayWorkerGroup = None,
+        rollout_resource_pool: RayResourcePool = None,
+        rm_resource_pool: RayResourcePool = None,
     ):
         """Initialize agent loop manager.
 
         Args:
             config (DictConfig): trainer config.
             worker_group (RayWorkerGroup): ActorRolloutRef worker group for hybrid mode; None for standalone mode.
+            rollout_resource_pool (RayResourcePool): Resource pool for actor rollout (Colocate or Standalone mode).
             rm_resource_pool (RayResourcePool): Resource pool for reward model (Standalone mode).
         """
         self.config = config
@@ -121,9 +139,5 @@ class FaultRecoverAgentLoopManager(AgentLoopManager):
         if not hasattr(self, "agent_loop_workers_class"):
             self.agent_loop_workers_class = ray.remote(FaultRecoverAgentLoopWorker)
 
-        self._initialize_llm_servers()
+        self._initialize_llm_servers(rollout_resource_pool)
         self._init_agent_loop_workers()
-
-        # Initially we're in sleep mode.
-        if self.config.actor_rollout_ref.rollout.free_cache_engine:
-            self.sleep()
