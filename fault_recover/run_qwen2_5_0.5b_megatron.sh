@@ -11,6 +11,8 @@ export RAY_DEBUG=1
 export VLLM_ASCEND_ENABLE_NZ=0
 # export VLLM_USE_V1=1
 
+project_name='GRPO'
+exp_name='Qwen2.5-0.5B-Instruct-megatron-vllm-fault-recover'
 
 MODEL_PATH="${HOME}/model/Qwen2.5-0.5B-Instruct"
 CKPTS_DIR="${HOME}/model/Qwen2.5-0.5B-Instruct-save"

@@ -24,6 +24,13 @@ train
 - [x] megatron
 - [ ] fsdp
 
+## Version
+
+```bash
+# dev version
+pip install verl@git+https://github.com/volcengine/verl.git@b97ebfd5062223337ae065c2250f8ab5c0e08e5e
+```
+
 ## Quickstart
 
 ```bash

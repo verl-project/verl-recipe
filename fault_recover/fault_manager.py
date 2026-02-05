@@ -33,6 +33,7 @@ class TokensDict:
         self.saving_thread = None
         self.saved_step_ckpt = {}
         self.batch_size = batch_size
+        self.is_rollout_finished_step = False
 
     def start_save(self):
         if self.auto_save_path:
@@ -113,7 +114,9 @@ class TokensDict:
             if os.path.exists(finished_save_path):
                 load_data = torch.load(finished_save_path)
                 self.index_prompt_tokens = load_data["tokens"]
+                self.is_rollout_finished_step = True
                 return True
+            self.is_rollout_finished_step = False
             if os.path.exists(self.auto_save_path):
                 load_data = torch.load(self.auto_save_path)
                 if load_data["iter"] == self.iteration:
@@ -131,20 +134,21 @@ class TokensDict:
         os.makedirs(save_dir_tmp, exist_ok=True)
         os.makedirs(save_dir, exist_ok=True)
         while True:
-            with self._lock:
-                torch.save({"iter": self.iteration, "tokens": self.index_prompt_tokens}, tmp_path)
-                os.replace(tmp_path, self.auto_save_path)
-                finished = sum(
-                    [1 for _, req_info in self.index_prompt_tokens.items() if req_info.get("finished", False)]
-                )
-                print(f"[fault_manager][{datetime.datetime.now()}] finished_num: {finished}")
-                if (
-                    all([req_info.get("finished", False) for _, req_info in self.index_prompt_tokens.items()])
-                    and finished == self.batch_size
-                ):
-                    global_step_path = os.path.join(save_dir, f"global_step_{self.iteration}.pt")
-                    shutil.copy(self.auto_save_path, global_step_path)
-                    self.saved_step_ckpt[self.iteration] = global_step_path
+            if not self.is_rollout_finished_step:
+                with self._lock:
+                    torch.save({"iter": self.iteration, "tokens": self.index_prompt_tokens}, tmp_path)
+                    os.replace(tmp_path, self.auto_save_path)
+                    finished = sum(
+                        [1 for _, req_info in self.index_prompt_tokens.items() if req_info.get("finished", False)]
+                    )
+                    print(f"[fault_manager][{datetime.datetime.now()}] finished requests num: {finished}")
+                    if (
+                        all([req_info.get("finished", False) for _, req_info in self.index_prompt_tokens.items()])
+                        and finished == self.batch_size
+                    ):
+                        global_step_path = os.path.join(save_dir, f"global_step_{self.iteration}.pt")
+                        shutil.copy(self.auto_save_path, global_step_path)
+                        self.saved_step_ckpt[self.iteration] = global_step_path
             time.sleep(self.save_interval)
 
 
@@ -167,7 +171,7 @@ class NodeWorker:
 
         with ThreadPoolExecutor(max_workers=len(devices_info)) as executor:
             usages = list(executor.map(self.get_usage_fn, devices_info))
-        print(f"[fault_manager][{datetime.datetime.now()}] usages: {usages}")
+        print(f"[fault_manager][{datetime.datetime.now()}] chips core utilization: {usages}")
         return all([usage == 0 for usage in usages])
 
     def _get_npu_usage(self, device_info):
@@ -556,10 +560,8 @@ class FaultMgr:
 
         from verl.checkpoint_engine import CheckpointEngineManager
 
-        if cls.trainer.config.reward_model.enable and cls.trainer.config.reward_model.enable_resource_pool:
-            rm_resource_pool = cls.trainer.resource_pool_manager.get_resource_pool(Role.RewardModel)
-        else:
-            rm_resource_pool = None
+        if cls.trainer.use_reward_loop and cls.trainer.use_rm:
+            raise NotImplementedError("[fault_manager] fault_recover does not support use_rm yet")
 
         [ray.kill(w) for w in cls.trainer.async_rollout_manager.agent_loop_workers]
         [ray.get(rr.server_handle.clear_engine.remote()) for rr in cls.trainer.async_rollout_manager.rollout_replicas]
@@ -569,7 +571,7 @@ class FaultMgr:
             config=cls.trainer.config,
             worker_group=cls.trainer.actor_rollout_wg,
             rollout_resource_pool=actor_rollout_resource_pool,
-            rm_resource_pool=rm_resource_pool,
+            reward_loop_worker_handles=None,
         )
 
         cls.trainer.checkpoint_manager = CheckpointEngineManager(

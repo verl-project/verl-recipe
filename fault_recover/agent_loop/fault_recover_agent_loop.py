@@ -97,9 +97,9 @@ class FaultRecoverAgentLoopWorker(AgentLoopWorker):
         self,
         config: DictConfig,
         server_handles: list[ray.actor.ActorHandle],
-        reward_router_address: str = None,
+        reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
-        super().__init__(config, server_handles, reward_router_address)
+        super().__init__(config, server_handles, reward_loop_worker_handles)
         self.server_manager = FaultRecoverAsyncLLMServerManager(config, server_handles)
 
 
@@ -111,7 +111,7 @@ class FaultRecoverAgentLoopManager(AgentLoopManager):
         config: DictConfig,
         worker_group: RayWorkerGroup = None,
         rollout_resource_pool: RayResourcePool = None,
-        rm_resource_pool: RayResourcePool = None,
+        reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
         """Initialize agent loop manager.
 
@@ -119,17 +119,11 @@ class FaultRecoverAgentLoopManager(AgentLoopManager):
             config (DictConfig): trainer config.
             worker_group (RayWorkerGroup): ActorRolloutRef worker group for hybrid mode; None for standalone mode.
             rollout_resource_pool (RayResourcePool): Resource pool for actor rollout (Colocate or Standalone mode).
-            rm_resource_pool (RayResourcePool): Resource pool for reward model (Standalone mode).
+            reward_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
         """
         self.config = config
         self.worker_group = worker_group
-        self.reward_model_manager = None
-        self.reward_router_address = None
-        if self.config.reward_model.enable and self.config.reward_model.enable_resource_pool:
-            from verl.experimental.reward_loop import RewardModelManager
-
-            self.reward_model_manager = RewardModelManager(config.reward_model, rm_resource_pool)
-            self.reward_router_address = self.reward_model_manager.get_router_address()
+        self.reward_loop_worker_handles = reward_loop_worker_handles
 
         # for recipe to change
         if not hasattr(self, "rollout_replica_class"):
