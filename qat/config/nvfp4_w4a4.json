@@ -1,0 +1,45 @@
+{
+    "quant_method": "compressed-tensors",
+    "format": "nvfp4-pack-quantized",
+    "quantization_status": "compressed",
+    "config_groups": {
+        "group_0": {
+            "format": "nvfp4-pack-quantized",
+            "targets": [
+                "Linear"
+            ],
+            "weights": {
+                "num_bits": 4,
+                "type": "float",
+                "symmetric": true,
+                "strategy": "tensor_group",
+                "group_size": 16,
+                "dynamic": false,
+                "observer": "minmax",
+                "observer_kwargs": {},
+                "actorder": null,
+                "block_structure": null
+            },
+            "input_activations": {
+                "num_bits": 4,
+                "type": "float",
+                "symmetric": true,
+                "strategy": "tensor_group",
+                "group_size": 16,
+                "dynamic": "local",
+                "observer": "minmax",
+                "observer_kwargs": {},
+                "actorder": null,
+                "block_structure": null
+            },
+            "output_activations": null
+        }
+    },
+    "ignore": [
+        "lm_head"
+    ],
+    "kv_cache_scheme": null,
+    "sparsity_config": {},
+    "transform_config": {},
+    "global_compression_ratio": null
+}
