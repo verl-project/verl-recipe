@@ -18,13 +18,13 @@ bash recipe/dapo/prepare_dapo_data.sh
 
 ## Quick Start
 
-### Qwen3-30B-A3B W4A16 Full Quantization
+### Qwen3-30B-A3B-Base W4A16 Full Quantization
 
 ```bash
 bash recipe/qat/run_qwen3_30b_w4a16.sh
 ```
 
-### Qwen3-30B-A3B W4A16 FFN-only Quantization
+### Qwen3-30B-A3B-Base W4A16 FFN-only Quantization
 
 ```bash
 bash recipe/qat/run_qwen3_30b_w4a16_FFN_only.sh
@@ -171,13 +171,13 @@ Comparing different quantization strategies:
 | W4A16 + QAT (FFN-only) | FFN-only quantization | Red |
 
 **Conclusions**:
-- Online evaluation: BF16 > FFN-only(W4A16) > Full(W4A16) .
-- Offline evaluation (AIME24/25, BF16): All three configurations perform similarly during training
+- Online evaluation (first figure): During training, each configuration uses its own rollout precision (BF16 rollout for BF16, W4A16 rollout for W4A16), so the online metrics are not directly comparable across precisions. Under this setting, BF16 > FFN-only(W4A16) > Full(W4A16).
+- Offline evaluation (second figure, AIME24/25): When all trained checkpoints are evaluated uniformly using BF16 precision, all three configurations achieve similar accuracy, indicating that QAT training does not degrade the model's inherent capability.
 
 <img src="./img/image2.png">
 <img src="./img/image3.png">
 
-### Experiment 3: Qwen3-30B-A3B QAT Validation
+### Experiment 3: Qwen3-30B-A3B-Base QAT Validation
 
 Validating QAT effectiveness on larger models. Results are consistent with the 8B experiments.
 
@@ -191,7 +191,7 @@ Validating QAT effectiveness on larger models. Results are consistent with the 8
 
 **Memory Analysis**
 
-Analyzed memory impact of NVFP4 during Rollout phase for Qwen3-30B-A3B.
+Analyzed memory impact of NVFP4 during Rollout phase for Qwen3-30B-A3B-Base.
 
 Config: vLLM rollout settings with `gpu_memory_utilization=0.90`, `max_num_batched_tokens=32768`, `max_num_seqs=256`, `TP=1`.
 
