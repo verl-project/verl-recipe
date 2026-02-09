@@ -1,0 +1,120 @@
+# Copyright 2024 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# =============================================================================
+# SWE Agent Loop Configuration for VERL
+# =============================================================================
+# Reference: SWE-agent/config/default.yaml official config
+# Optimized for small models (Qwen2.5-3B):
+#   - system_template specifies thought_action format (single code block only)
+#   - instance_template emphasizes submitting patch via submit command
+#   - max_requeries=5 gives small models more retry opportunities
+# =============================================================================
+
+- name: swe_agent
+  _target_: recipe.swe_agent.swe_agent_loop.SWEAgentLoop
+
+  # ModelProxy config - intercepts SWE-Agent API requests
+  proxy_config:
+    port: 8080              # ModelProxy listening port (auto-increments to avoid conflicts)
+    timeout: 600            # Per-request timeout (seconds)
+
+  # SWE-Agent execution config
+  sandbox_config:
+    swe_agent_timeout: 1800 # SWE-Agent total execution time limit (seconds)
+    max_steps: 30           # Max model call count (simple tasks need 5~10 steps)
+    execution_timeout: 300  # Per-tool execution timeout (seconds)
+    output_dir: /data1/lmy/workspace/swe_agent_outputs  # Output directory
+    python_path: /usr/bin/python3.12  # Use python3.12 as base environment
+    # Max interaction turns, aborts current task when reached
+    max_turns: 15
+    # deployment_type: "docker" uses Docker isolation (default, recommended for production)
+    # deployment_type: "local" skips Docker containers (faster startup, for debugging only)
+    deployment_type: docker
+    # Docker config (only effective when deployment_type=docker)
+    docker_image: swerex-python:3.11
+    docker_memory_limit: 8g
+    docker_startup_timeout: 180.0
+    docker_remove_container: true
+
+  # Agent config - optimized for small models
+  agent:
+    # Retries after format errors (default 3, small models need more retries)
+    max_requeries: 5
+    templates:
+      system_template: |-
+        You are a helpful assistant that can interact with a computer to solve tasks.
+
+        IMPORTANT: Every response MUST follow this exact format:
+
+        DISCUSSION
+        Your reasoning about what to do next.
+
+        ```
+        exactly_one_command_here
+        ```
+
+        Rules:
+        - Include EXACTLY ONE code block (``` ```) per response
+        - The code block must be the LAST thing in your response
+        - The code block contains the bash command or tool command to execute
+        - Do NOT put example outputs or other code blocks in your response
+        - When you are done, run the `submit` command to submit your changes
+      instance_template: |-
+        <uploaded_files>
+        {{working_dir}}
+        </uploaded_files>
+        I've uploaded a python code repository in the directory {{working_dir}}.
+
+        <pr_description>
+        {{problem_statement}}
+        </pr_description>
+
+        Implement the necessary changes to satisfy the <pr_description>.
+        Do NOT modify any test files.
+
+        Steps:
+        1. Explore the repo with `ls` and `cat` to understand the code
+        2. Make the required changes using `str_replace_editor` or bash commands
+        3. Verify your changes work
+        4. Run `submit` to submit your patch
+
+        You MUST run `submit` when you are done to generate the final patch.
+      next_step_template: |-
+        OBSERVATION:
+        {{observation}}
+      next_step_no_output_template: |-
+        Your command ran successfully and did not produce any output.
+    tools:
+      env_variables:
+        PAGER: cat
+        MANPAGER: cat
+        LESS: -R
+        PIP_PROGRESS_BAR: 'off'
+        TQDM_DISABLE: '1'
+        GIT_PAGER: cat
+      bundles:
+        - path: tools/registry
+        - path: tools/edit_anthropic
+        - path: tools/review_on_submit_m
+      registry_variables:
+        USE_FILEMAP: 'true'
+      enable_bash_tool: true
+      # Use thought_action mode - suitable for text generation models
+      # function_calling requires OpenAI API tool_calls field, which Qwen models don't support
+      parse_function:
+        type: thought_action
+    history_processors:
+      - type: cache_control
+        last_n_messages: 2
