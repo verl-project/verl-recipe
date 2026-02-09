@@ -1,0 +1,114 @@
+# =============================================================================
+# SWE Agent Loop Configuration for SWE-bench Training
+# =============================================================================
+# Adapted from swe_agent_config.yaml for SWE-bench Verified/Lite evaluation.
+# Key differences from simple test config:
+#   - Higher execution_timeout (SWE-bench instances may need longer setup)
+#   - SWE-bench specific instance template
+#   - Per-instance docker_image override support (each repo has its own image)
+#   - docker_image default is overridden per-instance via sandbox_overrides
+#
+# Per-instance override mechanism:
+#   Each SWE-bench instance specifies its own Docker image via:
+#     extra_info.sandbox_overrides.docker_image = "sweb.eval.x86_64.<repo>__<project>-<id>"
+#   This is set during data preparation (prepare_data.py --mode swebench).
+# =============================================================================
+
+- name: swe_agent
+  _target_: recipe.swe_agent.swe_agent_loop.SWEAgentLoop
+
+  # ModelProxy config
+  proxy_config:
+    port: 0
+    max_port_retries: 1000
+    timeout: 1800  # Match swe_agent_timeout; SWE-bench Docker containers may take time to init
+
+  # SWE-Agent execution config
+  sandbox_config:
+    # --- Infrastructure fields ---
+    swe_agent_timeout: 1800    # Total execution time limit (30 min)
+    execution_timeout: 600     # Per-tool timeout: edit_anthropic install.sh compiles tree-sitter (~5 min in sweb images)
+    output_dir: ./swe_agent_outputs
+    docker_memory_limit: 8g
+    docker_startup_timeout: 600.0  # SWE-bench eval images need pipx install of swe-rex (slow first run)
+    docker_remove_container: true
+
+    # --- Data-affine fields ---
+    # [DATA-AFFINE] Max model call count
+    max_steps: 30
+    # [DATA-AFFINE] Max interaction turns
+    max_turns: 15
+    # [DATA-AFFINE] Default Docker image — overridden per-instance for SWE-bench
+    # Each SWE-bench instance uses sweb.eval.x86_64.<repo>-<id> image
+    # This default is used only as fallback
+    docker_image: swerex-python:3.11-preinstalled
+
+  # Agent config
+  agent:
+    max_requeries: 5
+
+    templates:
+      system_template: |-
+        You are a helpful assistant that can interact with a computer to solve tasks.
+
+        IMPORTANT: Every response MUST follow this exact format:
+
+        DISCUSSION
+        Your reasoning about what to do next.
+
+        ```
+        exactly_one_command_here
+        ```
+
+        Rules:
+        - Include EXACTLY ONE code block (``` ```) per response
+        - The code block must be the LAST thing in your response
+        - The code block contains the bash command or tool command to execute
+        - Do NOT put example outputs or other code blocks in your response
+        - When you are done, run the `submit` command to submit your changes
+      instance_template: |-
+        <uploaded_files>
+        /testbed
+        </uploaded_files>
+        I've uploaded a python code repository in the directory /testbed.
+
+        <pr_description>
+        {{problem_statement}}
+        </pr_description>
+
+        Implement the necessary changes to satisfy the <pr_description>.
+        Do NOT modify any test files.
+
+        Steps:
+        1. Explore the repo with `ls` and `cat` to understand the code
+        2. Make the required changes using `str_replace_editor` or bash commands
+        3. Verify your changes work
+        4. Run `submit` to submit your patch
+
+        You MUST run `submit` when you are done to generate the final patch.
+      next_step_template: |-
+        OBSERVATION:
+        {{observation}}
+      next_step_no_output_template: |-
+        Your command ran successfully and did not produce any output.
+
+    tools:
+      env_variables:
+        PAGER: cat
+        MANPAGER: cat
+        LESS: -R
+        PIP_PROGRESS_BAR: 'off'
+        TQDM_DISABLE: '1'
+        GIT_PAGER: cat
+      bundles:
+        - path: tools/registry
+        - path: tools/edit_anthropic
+        - path: tools/review_on_submit_m
+      registry_variables:
+        USE_FILEMAP: 'true'
+      enable_bash_tool: true
+      parse_function:
+        type: thought_action
+    history_processors:
+      - type: cache_control
+        last_n_messages: 2

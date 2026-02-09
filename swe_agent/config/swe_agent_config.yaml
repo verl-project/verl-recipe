@@ -1,0 +1,145 @@
+# Copyright 2026 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# =============================================================================
+# SWE Agent Loop Configuration for VERL
+# =============================================================================
+# Reference: SWE-agent/config/default.yaml official config
+# Optimized for small models (Qwen3-4B):
+#   - system_template specifies thought_action format (single code block only)
+#   - instance_template emphasizes submitting patch via submit command
+#   - max_requeries=5 gives small models more retry opportunities
+#
+# --- Field Override Mechanism ---
+# Fields are divided into two categories:
+#
+# 1. Infrastructure fields: Fixed per deployment, shared across all tasks.
+#    Defined ONLY in this YAML.
+#
+# 2. Data-affine fields (marked with "# [DATA-AFFINE]"):
+#    May vary per task/dataset. Values here serve as DEFAULTS.
+#    At runtime, per-instance overrides from extra_info take priority:
+#      extra_info > YAML defaults
+#    Data-affine fields can be set during data preparation (prepare_data.py)
+#    in the extra_info.sandbox_overrides / extra_info.agent_overrides dicts.
+# =============================================================================
+
+- name: swe_agent
+  _target_: recipe.swe_agent.swe_agent_loop.SWEAgentLoop
+
+  # ModelProxy config - intercepts SWE-Agent API requests
+  # [INFRASTRUCTURE]
+  proxy_config:
+    port: 0                 # 0 => let OS assign an available port (recommended for multi-worker)
+    max_port_retries: 1000  # Used when port > 0: max consecutive ports to try (increase for 500+ workers per node)
+    timeout: 600            # Per-request timeout (seconds)
+
+  # SWE-Agent execution config
+  sandbox_config:
+    # --- Infrastructure fields (fixed per deployment) ---
+    swe_agent_timeout: 1800 # SWE-Agent total execution time limit (seconds)
+    execution_timeout: 300  # Per-tool execution timeout (seconds)
+    max_parallel_tasks_per_worker: 2  # Cross-process concurrent SWE-Agent loops per node (0 = unlimited)
+    output_dir: ./swe_agent_outputs    # Output directory (relative to cwd; override as needed)
+    docker_memory_limit: 8g
+    docker_startup_timeout: 180.0
+    docker_remove_container: true
+
+    # --- Data-affine fields (can be overridden per instance via extra_info.sandbox_overrides) ---
+    # [DATA-AFFINE] Max model call count (simple tasks: 5~10, complex tasks: 30+)
+    max_steps: 30
+    # [DATA-AFFINE] Max interaction turns (global loop cap; includes normal steps + requery retries)
+    max_turns: 15
+    # [DATA-AFFINE] Docker image - different repos need different Python versions/dependencies
+    # SWE-bench instances map to specific images; override via extra_info.sandbox_overrides.docker_image
+    docker_image: swerex-python:3.11-preinstalled  # Pre-installed tree-sitter; eliminates install.sh timeout
+
+  # Agent config - optimized for small models
+  agent:
+    # Retries per step after format/blocklist/bash-syntax errors; each retry still consumes max_turns budget
+    max_requeries: 5
+
+    # --- Data-affine templates (can be overridden per instance via extra_info.agent_overrides.templates) ---
+    # [DATA-AFFINE] Templates vary by task type (SWE-bench vs custom tasks vs different prompt styles)
+    templates:
+      system_template: |-
+        You are a helpful assistant that can interact with a computer to solve tasks.
+
+        IMPORTANT: Every response MUST follow this exact format:
+
+        DISCUSSION
+        Your reasoning about what to do next.
+
+        ```
+        exactly_one_command_here
+        ```
+
+        Rules:
+        - Include EXACTLY ONE code block (``` ```) per response
+        - The code block must be the LAST thing in your response
+        - The code block contains the bash command or tool command to execute
+        - Do NOT put example outputs or other code blocks in your response
+        - When you are done, run the `submit` command to submit your changes
+      instance_template: |-
+        <uploaded_files>
+        {{working_dir}}
+        </uploaded_files>
+        I've uploaded a python code repository in the directory {{working_dir}}.
+
+        <pr_description>
+        {{problem_statement}}
+        </pr_description>
+
+        Implement the necessary changes to satisfy the <pr_description>.
+        Do NOT modify any test files.
+
+        Steps:
+        1. Explore the repo with `ls` and `cat` to understand the code
+        2. Make the required changes using `str_replace_editor` or bash commands
+           - `str_replace_editor` requires positional args: <command> <path> (no --path flag)
+           - Example: str_replace_editor str_replace /testbed/file.py --old_str "<exact old>" --new_str "<new>"
+           - Quote arguments carefully when strings contain spaces or newlines
+        3. Verify your changes work
+        4. Run `submit` to submit your patch
+
+        You MUST run `submit` when you are done to generate the final patch.
+      next_step_template: |-
+        OBSERVATION:
+        {{observation}}
+      next_step_no_output_template: |-
+        Your command ran successfully and did not produce any output.
+
+    # --- Data-affine tools config (can be overridden per instance via extra_info.agent_overrides.tools) ---
+    tools:
+      env_variables:
+        PAGER: cat
+        MANPAGER: cat
+        LESS: -R
+        PIP_PROGRESS_BAR: 'off'
+        TQDM_DISABLE: '1'
+        GIT_PAGER: cat
+      # [DATA-AFFINE] Tool bundles may vary by task type
+      bundles:
+        - path: tools/registry
+        - path: tools/edit_anthropic
+        - path: tools/review_on_submit_m
+      registry_variables:
+        USE_FILEMAP: 'true'
+      enable_bash_tool: true
+      # [DATA-AFFINE] Parse function type: thought_action for text-gen models, function_calling for OpenAI-compatible
+      parse_function:
+        type: thought_action
+    history_processors:
+      - type: cache_control
+        last_n_messages: 2
