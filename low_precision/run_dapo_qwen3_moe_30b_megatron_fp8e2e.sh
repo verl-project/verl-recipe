@@ -49,7 +49,7 @@ train_prompt_mini_bsz=128
 gen_prompt_bsz=$((128 * 3))
 
 # Ray
-RAY_ADDRESS=${RAY_ADDRESS:-"http://localhost:8265"}
+RAY_ADDRESS=${RAY_ADDRESS:-"http://127.0.0.1:8265"}
 WORKING_DIR=${WORKING_DIR:-"${PWD}"}
 RUNTIME_ENV=${RUNTIME_ENV:-"${WORKING_DIR}/verl/trainer/runtime_env.yaml"}
 NNODES=${NNODES:-1}
@@ -172,7 +172,7 @@ ROLLOUT=(
     actor_rollout_ref.rollout.expert_parallel_size=1
     actor_rollout_ref.rollout.enable_chunked_prefill=True
     actor_rollout_ref.rollout.max_num_batched_tokens=$((1024 * 32))
-     actor_rollout_ref.rollout.max_num_seqs=256
+    actor_rollout_ref.rollout.max_num_seqs=256
     actor_rollout_ref.rollout.temperature=${temperature}
     actor_rollout_ref.rollout.top_p=${top_p}
     actor_rollout_ref.rollout.top_k=${top_k}
@@ -228,7 +228,7 @@ ALGORITHM=(
     algorithm.rollout_correction.rollout_rs_threshold=${rollout_rs_threshold}
 )
 ################################################### start script ###################################################
-RAY_ADDRESS='http://127.0.0.1:8265' ray job submit --runtime-env="${RUNTIME_ENV}" \
+RAY_ADDRESS=$RAY_ADDRESS ray job submit --runtime-env="${RUNTIME_ENV}" \
     -- python3 -m recipe.dapo.main_dapo \
     --config-path=config \
     --config-name='dapo_megatron_trainer.yaml' \
