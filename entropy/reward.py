@@ -18,7 +18,7 @@ from functools import partial
 import ray
 
 from verl import DataProto
-from verl.trainer.ppo.reward import compute_reward, get_custom_reward_fn
+from verl.trainer.ppo.reward import extract_reward, get_custom_reward_fn
 
 from .reward_score import _default_compute_score
 
@@ -83,4 +83,4 @@ def compute_reward_async(data: DataProto, config, tokenizer):
     This is meant to be run in a separate Ray worker.
     """
     reward_fn = load_reward_manager(config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {}))
-    return compute_reward(data, reward_fn)
+    return extract_reward(data)

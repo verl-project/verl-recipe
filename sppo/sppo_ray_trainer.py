@@ -40,7 +40,7 @@ from verl.trainer.ppo.ray_trainer import (
     apply_kl_penalty,
     compute_response_mask,
 )
-from verl.trainer.ppo.reward import compute_reward, compute_reward_async
+from verl.trainer.ppo.reward import extract_reward, compute_reward_async
 from verl.trainer.ppo.utils import Role, WorkerType, need_reference_policy, need_reward_model
 from verl.utils.metric import reduce_metrics
 from verl.utils.profiler.performance import simple_timer
@@ -210,7 +210,7 @@ class RaySPPOTrainer(RayPPOTrainer):
                             if self.use_rm and "rm_scores" not in batch.batch.keys():
                                 rm_scores = self.rm_wg.compute_rm_score(batch)
                                 batch = batch.union(rm_scores)
-                            reward_baseline_tensor, _ = compute_reward(batch, self.reward_fn)
+                            reward_baseline_tensor, _ = extract_reward(batch)
                             reward_baseline_tensor = reward_baseline_tensor.sum(dim=-1)
 
                             keys_to_pop = set(gen_baseline_output.batch.keys())
@@ -250,7 +250,7 @@ class RaySPPOTrainer(RayPPOTrainer):
                     if self.config.reward_model.launch_reward_fn_async:
                         future_reward = compute_reward_async.remote(batch, self.config, self.tokenizer)
                     else:
-                        reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
+                        reward_tensor, reward_extra_infos_dict = extract_reward(batch)
 
                 # recompute old_log_probs
                 with simple_timer("old_log_prob", timing_raw):

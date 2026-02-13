@@ -34,7 +34,7 @@ from verl.trainer.ppo.ray_trainer import (
     compute_advantage,
     compute_response_mask,
 )
-from verl.trainer.ppo.reward import compute_reward
+from verl.trainer.ppo.reward import extract_reward
 from verl.utils.metric import reduce_metrics
 from verl.utils.profiler import simple_timer
 
@@ -150,7 +150,7 @@ class RayEntropyTrainer(RayPPOTrainer):
                             if self.use_rm and "rm_scores" not in new_batch.batch.keys():
                                 rm_scores = self.rm_wg.compute_rm_score(new_batch)
                                 new_batch = new_batch.union(rm_scores)
-                            reward_baseline_tensor, _ = compute_reward(new_batch, self.reward_fn)
+                            reward_baseline_tensor, _ = extract_reward(new_batch)
                             reward_baseline_tensor = reward_baseline_tensor.sum(dim=-1)
 
                             keys_to_pop = set(gen_baseline_output.batch.keys())
@@ -184,7 +184,7 @@ class RayEntropyTrainer(RayPPOTrainer):
                             new_batch = new_batch.union(reward_tensor)
 
                         # we combine with rule-based rm
-                        reward_tensor, reward_extra_infos_dict = compute_reward(new_batch, self.reward_fn)
+                        reward_tensor, reward_extra_infos_dict = extract_reward(new_batch)
 
                         new_batch.batch["token_level_scores"] = reward_tensor
 
