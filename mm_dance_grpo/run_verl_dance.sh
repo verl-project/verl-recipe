@@ -1,7 +1,6 @@
 ray stop --force
 
-source /usr/local/Ascend/ascend-toolkit/set_env.sh
-source /usr/local/Ascend/nnal/atb/set_env.sh
+# source /usr/local/Ascend/ascend-toolkit/set_env.sh
 
 export CUSTOM_TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 export CUDA_DEVICE_MAX_CONNECTIONS=1
@@ -25,7 +24,7 @@ model_args_path=$PROJECT_DIR/recipe/mm_dance_grpo/examples/wan2.2/5B/t2v/output_
 # 用于在训练过程中，每隔n步进行一次相同prompt的推理，保存推理结果和评分
 rollout_online_path=$PROJECT_DIR/rollout_online_save/$(date +%Y%m%d)_$(date +%H%M%S)/
 # 间隔测试的prompt
-rollout_online_prompt = 'The video presents a serene winter landscape that remains consistent throughout its duration. It begins showcasing breathtaking scenery that includes snow-capped mountains, a mirror-like body of water reflecting the mountains and sky, snowflakes falling gently, and coniferous trees lining the shoreline. The scene is marked by a tranquil ambiance, with no noticeable changes as the video progresses. The mountains, water, snowflakes, and trees maintain their picturesque and motionless state, creating a continuous and peaceful winter wonderland. The overall composition of the landscape evokes a sense of tranquility and natural beauty, with the elements of the scene—light, shadow, and color—remaining unchanged, reinforcing the stillness and serenity of the winter setting.'
+rollout_online_prompt='The video presents a serene winter landscape that remains consistent throughout its duration. It begins showcasing breathtaking scenery that includes snow-capped mountains, a mirror-like body of water reflecting the mountains and sky, snowflakes falling gently, and coniferous trees lining the shoreline. The scene is marked by a tranquil ambiance, with no noticeable changes as the video progresses. The mountains, water, snowflakes, and trees maintain their picturesque and motionless state, creating a continuous and peaceful winter wonderland. The overall composition of the landscape evokes a sense of tranquility and natural beauty, with the elements of the scene—light, shadow, and color—remaining unchanged, reinforcing the stillness and serenity of the winter setting.'
 # 用于单独进行推理测试，保存所有推理结果和评分
 rollout_result_path=$PROJECT_DIR/rollout_result_save/$(date +%Y%m%d)_$(date +%H%M%S)/
 
@@ -51,10 +50,10 @@ python3 -m recipe.mm_dance_grpo.main_dance \
     +actor_rollout_ref.model.reward_model_path=$reward_model_path \
     actor_rollout_ref.actor.optim.lr=5e-8 \
     actor_rollout_ref.actor.optim.weight_decay=0.01 \
-    +actor_rollout_ref.actor.optim.lr_scheduler.name='cosine' \
-    +actor_rollout_ref.actor.optim.lr_scheduler.num_warmup_steps=1000 \
-    +actor_rollout_ref.actor.optim.lr_scheduler.num_training_steps=10000 \
-    +actor_rollout_ref.actor.optim.lr_scheduler.num_cycles=1 \
+    +actor_rollout_ref.actor.optim.lr_scheduler_name='cosine' \
+    +actor_rollout_ref.actor.optim.lr_scheduler_num_warmup_steps=1000 \
+    +actor_rollout_ref.actor.optim.lr_scheduler_num_training_steps=10000 \
+    +actor_rollout_ref.actor.optim.lr_scheduler_num_cycles=1 \
     +actor_rollout_ref.actor.ppo_adv_clip_max=10.0 \
     +actor_rollout_ref.actor.ppo_kl_coeff=1.0 \
     +actor_rollout_ref.actor.ppo_max_grad_norm=1.0 \
@@ -69,9 +68,9 @@ python3 -m recipe.mm_dance_grpo.main_dance \
     +actor_rollout_ref.rollout.latent_h=128 \
     +actor_rollout_ref.rollout.init_same_noise=True \
     +actor_rollout_ref.rollout.online.test=True \
-    +actor_rollout_ref.rollout.online.step.interval=1 \
+    +actor_rollout_ref.rollout.online.step.interval=10 \
     +actor_rollout_ref.rollout.online.save.path=$rollout_online_path \
-    +actor_rollout_ref.rollout.online.prompt=$rollout_online_prompt \
+    "+actor_rollout_ref.rollout.online.prompt=\"$rollout_online_prompt\"" \
     +actor_rollout_ref.rollout.only=False \
     +actor_rollout_ref.rollout.result.save.path=$rollout_result_path \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \

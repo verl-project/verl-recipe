@@ -183,16 +183,6 @@ class RayDANCETrainer(RayPPOTrainer):
                 role=str(actor_role),
             )
             self.resource_pool_to_cls[resource_pool][str(actor_role)] = actor_rollout_cls
-
-            # Create Mllm worker
-            mllm_role = Role.Mllm
-            mllm_resource_pool = self.resource_pool_manager.get_resource_pool(mllm_role)
-            mllm_cls = RayClassWithInitArgs(
-                cls=self.role_worker_mapping[mllm_role],
-                config=self.config,
-                role=str(mllm_role),
-            )
-            self.resource_pool_to_cls[mllm_resource_pool][str(mllm_role)] = mllm_cls
         else:
             raise NotImplementedError
 
@@ -272,9 +262,6 @@ class RayDANCETrainer(RayPPOTrainer):
 
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
         self.actor_rollout_wg = all_wg[str(actor_role)]
-
-        # Initialize Mllm worker group
-        self.mllm_wg = all_wg[str(Role.Mllm)]
 
         if self.ref_in_actor:
             self.ref_policy_wg = self.actor_rollout_wg
@@ -557,7 +544,7 @@ class RayDANCETrainer(RayPPOTrainer):
 
     def _get_gen_batch(self, batch: DataProto) -> DataProto:
         reward_model_keys = set({}) & batch.non_tensor_batch.keys()
-        batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
+        batch_keys_to_pop = ["input_ids"]
         non_tensor_batch_keys_to_pop = set(batch.non_tensor_batch.keys()) - reward_model_keys
         gen_batch = batch.pop(
             batch_keys=batch_keys_to_pop,

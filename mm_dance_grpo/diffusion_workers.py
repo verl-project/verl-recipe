@@ -382,7 +382,7 @@ class DiffusionActorRolloutWorker(Worker, DistProfilerExtension):
                         clamped_advantages = torch.clamp(sample_advantages[batch_idx], -adv_clip_max, adv_clip_max)
                         # Calculate policy loss
                         ratio = torch.exp(new_log_probs.npu() - log_probs_chunk.npu()[:, timestep_idx])
-                        unclipped_loss = -clamped_advantages.npu() * ratio
+                        unclipped_loss = -clamped_advantages.npu() * ratio.npu()
                         clipped_loss = -clamped_advantages.npu() * torch.clamp(ratio, 1.0 - clip_range,
                                                                                1.0 + clip_range)
                         loss = torch.mean(torch.max(clipped_loss, unclipped_loss)) / (
@@ -392,17 +392,18 @@ class DiffusionActorRolloutWorker(Worker, DistProfilerExtension):
                         # Backward pass
                         loss.backward()
                         avg_loss = loss.detach().clone()
-                        dist.all_reduce(avg_loss, op=dist.ReduceOp.AVG)
-                        total_loss += avg_loss
+                        abs_loss = torch.abs(avg_loss)
+                        dist.all_reduce(abs_loss, op=dist.ReduceOp.AVG)
+                        total_loss += abs_loss.item()
 
                     rank = torch.distributed.get_rank()
                     if rank == 0:
                         end_time = time.time()
                         logger.info(
-                            f"Step {i + 1}/{len(train_timesteps)}: Loss {total_loss:.4f}, Time {end_time - start_time:.4f}")
+                            f"Step {i + 1}/{len(train_timesteps)}: ABS Loss {total_loss:.4f}, Time {end_time - start_time:.4f}")
 
             # Gradient clipping
-            grad_norm = torch.nn.utils.clip_grad_norm_(self.actor_module_fsdp.parameters(), actor_config.ppo_max_grad_norm)
+            grad_norm = torch.nn.utils.clip_grad_norm_(self.actor_module_fsdp.parameters(), actor_config.ppo_max_grad_norm).to(device='cpu')
 
             # wan2.2 optimizer
             self.actor_optimizer.step()
@@ -426,7 +427,7 @@ class DiffusionActorRolloutWorker(Worker, DistProfilerExtension):
             }
             output = DataProto(meta_info={"metrics": metrics})
             log_gpu_memory_usage(f"After update_actor", logger=logger, level=logging.INFO)
-        return output
+            return output
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):

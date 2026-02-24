@@ -1,7 +1,7 @@
 <p align="center">
 <h1 align="center"> Recipe: Reinforcement learning for generative models using MindSpeed-mm as the backend (DanceGRPO) </h1>
 
-## Environment installation ##
+## 1. Environment installation ##
 
 \[You are advised to use the matching environment version during model development.\]
 
@@ -76,7 +76,7 @@ ln -s ../MindSpeed-MM/mindspeed_mm/ ./mindspeed_mm
 #     ├── mm_dance_grpo
 ```
 
-## Dataset preparation ##
+## 2. Dataset preparation ##
 
 Reference ` verl/recipe/mm_dance_grpo/data/prompt.txt ` In the example provided in, you can replace the customized prompt text and run the following command to generate a parquet file:
 
@@ -88,7 +88,7 @@ python ./recipe/mm_dance_grpo/dataset/data_process.py
 # Check whether the parquet file is generated in ./recipe/mm_dance_grpo/data/parquet.
 ```
 
-## Training model preparation ##
+## 3. Training model preparation ##
 
 Wan2.2 5B model download address:
 
@@ -96,7 +96,7 @@ https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers
 
 The downloaded model is in the huggingface format and needs to be converted to the dcp format for training. For details, see the following section. If you need to convert the model back to the huggingface format after training, see the section about converting the dcp format to hf.
 
-### HF to DCP ###
+### 3.1 HF to DCP ###
 
 1.  Weight of the downloaded Wan2.2 model`transformer`In the mm root directory, run the following script to convert the weight:
 
@@ -116,7 +116,7 @@ mm-convert WanConverter mm_to_dcp \
  --cfg.target_path ./dcp_weights/Wan-AI/Wan2.2-TI2V-5B-Diffusers/transformer
 ```
 
-### DCP conversion to HF ###
+### 3.2 DCP conversion to HF ###
 
 Currently, the format for saving the mm backend training is dcp. To convert the format to huggingface, perform the following operations:
 
@@ -153,7 +153,21 @@ Parameters in the weight conversion script are described as follows:
 | --cfg.target_path | Path for storing weights after conversion or segmentation |
 | --cfg.hf_dir      | Original weight path of the huggingface                   |
 
-## Parameters for configuring args ##
+## 4. Scoring Model preparation ##
+
+1. Download the HPSv3 model: https://huggingface.co/MizzenAI/HPSv3/tree/main
+In the training script, change the value of +actor_rollout_ref.model.reward_model_path to the HPSv3 weight path.
+```shell
++actor_rollout_ref.model.reward_model_path=/home/CKPT/HPSv3/HPSv3.safetensors
+```
+
+2. Download the Qwen2.5VL 7B model: https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct/tree/main
+Modify the HPSv3/hpsv3/config/HPSv3_7B.yaml file to configure the directory for the Qwen2-VL-7B model.
+```shell
+model_name_or_path: "/home/CKPT/Qwen2-VL-7B-Instruct"
+```
+
+## 5. Parameters for configuring args ##
 
 Modify the following parameters and run the script to generate the args file for training preparation:
 
@@ -164,14 +178,15 @@ Modify the following parameters and run the script to generate the args file for
 | verl/recipe/mm_dance_grpo/examples/wan2.2/5B/fsdp2_config.yaml       | sharding_size     | Indicates the number of fragments with the weight in FSDP2 mode, which is usually the same as the number of cards. |
 
 ```shell
-cd verl
+# source /usr/local/Ascend/cann/set_env.sh
+# cd verl
 
 bash ./recipe/mm_dance_grpo/examples/wan2.2/5B/t2v/get_train_args.sh
 
 # Check whether the mindspeed_args.pkl and mm_args.pkl files are generated in ./recipe/mm_dance_grpo/examples/wan2.2/5B/t2v/output_args.
 ```
 
-## Model RL training ##
+## 6. Model RL training ##
 
 Modifying Parameters in the verl/recipe/mm_dance_grpo/run_verl_dance.sh RL Training Script
 

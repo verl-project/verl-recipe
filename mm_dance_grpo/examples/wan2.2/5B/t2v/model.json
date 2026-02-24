@@ -64,7 +64,7 @@
         "max_seq_len": 1024,
         "attention_async_offload": false,
         "use_fused_rmsnorm":true,
-        "seperated_timestep": true
+        "seperated_timestep": false
     },
     "text_encoder": {
         "model_id": "UMT5",
