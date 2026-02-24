@@ -24,6 +24,8 @@ reward_model_path=/home/CKPT/HPSv3/HPSv3.safetensors
 model_args_path=$PROJECT_DIR/recipe/mm_dance_grpo/examples/wan2.2/5B/t2v/output_args
 # 用于在训练过程中，每隔n步进行一次相同prompt的推理，保存推理结果和评分
 rollout_online_path=$PROJECT_DIR/rollout_online_save/$(date +%Y%m%d)_$(date +%H%M%S)/
+# 间隔测试的prompt
+rollout_online_prompt = 'The video presents a serene winter landscape that remains consistent throughout its duration. It begins showcasing breathtaking scenery that includes snow-capped mountains, a mirror-like body of water reflecting the mountains and sky, snowflakes falling gently, and coniferous trees lining the shoreline. The scene is marked by a tranquil ambiance, with no noticeable changes as the video progresses. The mountains, water, snowflakes, and trees maintain their picturesque and motionless state, creating a continuous and peaceful winter wonderland. The overall composition of the landscape evokes a sense of tranquility and natural beauty, with the elements of the scene—light, shadow, and color—remaining unchanged, reinforcing the stillness and serenity of the winter setting.'
 # 用于单独进行推理测试，保存所有推理结果和评分
 rollout_result_path=$PROJECT_DIR/rollout_result_save/$(date +%Y%m%d)_$(date +%H%M%S)/
 
@@ -69,6 +71,7 @@ python3 -m recipe.mm_dance_grpo.main_dance \
     +actor_rollout_ref.rollout.online.test=True \
     +actor_rollout_ref.rollout.online.step.interval=1 \
     +actor_rollout_ref.rollout.online.save.path=$rollout_online_path \
+    +actor_rollout_ref.rollout.online.prompt=$rollout_online_prompt \
     +actor_rollout_ref.rollout.only=False \
     +actor_rollout_ref.rollout.result.save.path=$rollout_result_path \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \

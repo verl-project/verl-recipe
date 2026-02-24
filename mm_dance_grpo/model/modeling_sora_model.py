@@ -27,7 +27,7 @@ from mindspeed_mm.models.diffusion import DiffusionModel
 from mindspeed_mm.models.text_encoder import Tokenizer
 from torch import nn
 
-do_classifier_free_guidance = True
+do_classifier_free_guidance = False
 
 
 def flux_step(

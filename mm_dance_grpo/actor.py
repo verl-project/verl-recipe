@@ -75,8 +75,6 @@ class DataParallelPPOActor(BasePPOActor):
 
         Returns:
             log_prob: Log probability for PPO bookkeeping
-            prev_sample_mean: Mean of the previous sample
-            std_dev_t: Standard deviation at timestep t
         """
         # Forward pass through the actor module
         with torch.autocast(device_type=self.device_name, dtype=self.param_dtype):

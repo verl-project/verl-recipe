@@ -16,6 +16,7 @@
 import dataclasses
 import datetime
 import logging
+import random
 import os
 import pickle
 import time
@@ -332,7 +333,6 @@ class DiffusionActorRolloutWorker(Worker, DistProfilerExtension):
 
             # Get sigma schedule
             timesteps = self.scheduler.timesteps
-            import random
             train_timesteps = random.sample(range(len(timesteps)), int(len(timesteps) * timestep_fraction))
 
             # Initialize losses
@@ -472,7 +472,7 @@ class DiffusionActorRolloutWorker(Worker, DistProfilerExtension):
             raise ValueError('the rollout online save path is None')
         os.makedirs(save_path, exist_ok=True)
         # 重复推理当前文本
-        prompt = 'The video presents a serene winter landscape that remains consistent throughout its duration. It begins showcasing breathtaking scenery that includes snow-capped mountains, a mirror-like body of water reflecting the mountains and sky, snowflakes falling gently, and coniferous trees lining the shoreline. The scene is marked by a tranquil ambiance, with no noticeable changes as the video progresses. The mountains, water, snowflakes, and trees maintain their picturesque and motionless state, creating a continuous and peaceful winter wonderland. The overall composition of the landscape evokes a sense of tranquility and natural beauty, with the elements of the scene—light, shadow, and color—remaining unchanged, reinforcing the stillness and serenity of the winter setting.'
+        prompt = self.config.rollout.online.prompt
         images_path = self.rollout.generate_test(prompt, step, save_path)
         # 获取第一帧打分
         image = video_first_frame_to_pil(images_path)

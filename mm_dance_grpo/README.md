@@ -5,7 +5,7 @@
 
 \[You are advised to use the matching environment version during model development.\]
 
-For details, see.[Installation Guide](https://gitcode.com/Ascend/MindSpeed-MM/blob/master/docs/user-guide/installation.md)	
+For details, see[Installation Guide](https://gitcode.com/Ascend/MindSpeed-MM/blob/master/docs/user-guide/installation.md).
 
 ```shell
 # Importing CAN Environment Variables
@@ -49,7 +49,7 @@ cd ..
 pip install -e .
 cd ..
 
-# Installing theHPSv3 Scoring Model
+# Installing the HPSv3 Scoring Model
 git clone https://github.com/MizzenAI/HPSv3.git
 cd HPSv3
 git checkout upgrade_transformers_version
@@ -57,7 +57,7 @@ pip install -e .
 cd ..
 
 # Installing Other Packages
-pip install diffusers==0.35.1 peft==0.17.1 torch_npu==2.7.1 loguru==0.7.3 opencv-python-headless==4.10.0.84 tf-keras matplotlib==3.10.8
+pip install diffusers==0.35.1 peft==0.17.1 torch_npu==2.7.1 loguru==0.7.3 opencv-python-headless==4.10.0.84 tf-keras matplotlib==3.8.4
 
 cd verl
 
@@ -78,7 +78,7 @@ ln -s ../MindSpeed-MM/mindspeed_mm/ ./mindspeed_mm
 
 ## Dataset preparation ##
 
-Reference`verl/recipe/mm_dance_grpo/data/prompt.txt`In the example provided in, you can replace the customized prompt text and run the following command to generate a parquet file:
+Reference ` verl/recipe/mm_dance_grpo/data/prompt.txt ` In the example provided in, you can replace the customized prompt text and run the following command to generate a parquet file:
 
 ```shell
 # cd verl

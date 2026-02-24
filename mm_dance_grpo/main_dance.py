@@ -123,7 +123,7 @@ class TaskRunner:
             return actor_rollout_cls, ray_worker_group_cls
 
         if config.actor_rollout_ref.actor.strategy in {"fsdp", "fsdp2"}:
-            from recipe.mm_dance_grpo.diffusion_workers import DiffusionActorRolloutWorker, MllmWorker
+            from recipe.mm_dance_grpo.diffusion_workers import DiffusionActorRolloutWorker
             actor_rollout_cls = DiffusionActorRolloutWorker
             ray_worker_group_cls = RayWorkerGroup
         else:
@@ -131,12 +131,6 @@ class TaskRunner:
 
         self.role_worker_mapping[Role.ActorRollout] = ray.remote(actor_rollout_cls)
         self.mapping[Role.ActorRollout] = "global_pool"
-
-        # Add MllmWorker for Qwen3-VL understanding
-        from verl.trainer.ppo.ray_trainer import Role
-        self.role_worker_mapping[Role.Mllm] = ray.remote(MllmWorker)
-        self.mapping[Role.Mllm] = "global_pool"
-
         return actor_rollout_cls, ray_worker_group_cls
 
     def init_resource_pool_mgr(self, config):

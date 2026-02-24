@@ -11,12 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""
-Rollout with huggingface models.
-TODO: refactor this class. Currently, it will hang when using FSDP HybridShard. We should actually create a single
-GPU model. Then, get full state_dict and bind the state_dict to the single GPU model. Then, use the single GPU model
-to perform generation.
-"""
+
 import numpy as np
 import torch
 import torch.distributed
