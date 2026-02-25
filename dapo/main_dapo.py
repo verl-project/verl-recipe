@@ -22,8 +22,8 @@ import hydra
 import ray
 from omegaconf import OmegaConf
 
+from verl.experimental.reward_loop import migrate_legacy_reward_impl
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
-from verl.trainer.ppo.reward import load_reward_manager
 from verl.utils.device import auto_set_device, is_cuda_available
 
 from .dapo_ray_trainer import RayDAPOTrainer
@@ -33,6 +33,7 @@ from .dapo_ray_trainer import RayDAPOTrainer
 def main(config):
     # Automatically set `config.trainer.device = npu` when running on Ascend NPU.
     auto_set_device(config)
+    config = migrate_legacy_reward_impl(config)
 
     run_ppo(config)
 
@@ -134,10 +135,10 @@ class TaskRunner:
         # - for code related prompt, we send to a sandbox if there are test cases
         # - finally, we combine all the rewards together
         # - The reward type depends on the tag of the data
-        if config.reward_model.enable:
-            if config.reward_model.strategy in {"fsdp", "fsdp2"}:
+        if config.reward.reward_model.enable:
+            if config.reward.reward_model.get("strategy") in {"fsdp", "fsdp2"}:
                 from verl.workers.fsdp_workers import RewardModelWorker
-            elif config.reward_model.strategy == "megatron":
+            elif config.reward.reward_model.get("strategy") == "megatron":
                 from verl.workers.megatron_workers import RewardModelWorker
             else:
                 raise NotImplementedError
@@ -149,22 +150,6 @@ class TaskRunner:
             role_worker_mapping[Role.RefPolicy] = ray.remote(AsyncActorRolloutRefWorker)
             mapping[Role.RefPolicy] = global_pool_id
 
-        reward_fn = load_reward_manager(
-            config,
-            tokenizer,
-            0,
-            max_resp_len=config.data.max_response_length,
-            overlong_buffer_cfg=config.reward_model.overlong_buffer,
-        )
-
-        # Note that we always use function-based RM for validation
-        val_reward_fn = load_reward_manager(
-            config,
-            tokenizer,
-            1,
-            max_resp_len=config.data.max_response_length,
-            overlong_buffer_cfg=config.reward_model.overlong_buffer,
-        )
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
         trainer = RayDAPOTrainer(
@@ -174,8 +159,6 @@ class TaskRunner:
             role_worker_mapping=role_worker_mapping,
             resource_pool_manager=resource_pool_manager,
             ray_worker_group_cls=ray_worker_group_cls,
-            reward_fn=reward_fn,
-            val_reward_fn=val_reward_fn,
         )
         trainer.init_workers()
         trainer.fit()
