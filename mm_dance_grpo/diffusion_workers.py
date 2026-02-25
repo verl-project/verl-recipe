@@ -363,8 +363,8 @@ class DiffusionActorRolloutWorker(Worker, DistProfilerExtension):
                     for idx, batch_idx in enumerate(batch_indices):
                         log_probs_chunk = sample_log_probs[batch_idx]
                         latents_chunk = sample_latents[batch_idx]
-                        prompt_embeds_chunk = sample_prompt_embeds[batch_ind]
-                        negative_prompt_embeds_chunk = sample_negative_prompt_embeds[batch_ind]
+                        prompt_embeds_chunk = sample_prompt_embeds[batch_idx]
+                        negative_prompt_embeds_chunk = sample_negative_prompt_embeds[batch_idx]
                         current_latents = latents_chunk[:, timestep_idx]
                         next_latents = latents_chunk[:, timestep_idx + 1]
 
