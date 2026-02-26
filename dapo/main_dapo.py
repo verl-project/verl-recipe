@@ -95,46 +95,59 @@ class TaskRunner:
         processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
 
         from verl.single_controller.ray import RayWorkerGroup
+        from verl.trainer.ppo.ray_trainer import ResourcePoolManager, Role
+        from verl.trainer.ppo.utils import need_reference_policy
 
-        # define worker classes
-        if config.actor_rollout_ref.actor.strategy in {"fsdp", "fsdp2"}:
-            assert config.critic.strategy in {"fsdp", "fsdp2"}
+        use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
+        ray_worker_group_cls = RayWorkerGroup
 
-            from verl.workers.fsdp_workers import AsyncActorRolloutRefWorker, CriticWorker
+        role_worker_mapping = {}
+        mapping = {}
+        global_pool_id = "global_pool"
 
-            ray_worker_group_cls = RayWorkerGroup
+        # define actor/rollout worker class
+        if use_legacy_worker_impl == "disable":
+            from verl.workers.engine_workers import ActorRolloutRefWorker
 
-        elif config.actor_rollout_ref.actor.strategy == "megatron":
-            assert config.actor_rollout_ref.actor.strategy == config.critic.strategy
-            from verl.workers.megatron_workers import AsyncActorRolloutRefWorker, CriticWorker
+            actor_rollout_cls = ActorRolloutRefWorker
 
-            ray_worker_group_cls = RayWorkerGroup
+            lora_rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
+            if lora_rank <= 0:
+                lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
+            ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+            if need_reference_policy(config) and not ref_in_actor:
+                actor_role = Role.ActorRolloutRef
+            else:
+                actor_role = Role.ActorRollout
+            role_worker_mapping[actor_role] = ray.remote(actor_rollout_cls)
+            mapping[actor_role] = global_pool_id
+        else:
+            if config.actor_rollout_ref.actor.strategy in {"fsdp", "fsdp2"}:
+                from verl.workers.fsdp_workers import AsyncActorRolloutRefWorker
+            elif config.actor_rollout_ref.actor.strategy == "megatron":
+                from verl.workers.megatron_workers import AsyncActorRolloutRefWorker
+            else:
+                raise NotImplementedError
 
+            actor_rollout_cls = AsyncActorRolloutRefWorker
+            role_worker_mapping[Role.ActorRollout] = ray.remote(actor_rollout_cls)
+            mapping[Role.ActorRollout] = global_pool_id
+
+        # define critic worker class
+        if config.critic.strategy in {"fsdp", "fsdp2"}:
+            from verl.workers.fsdp_workers import CriticWorker
+        elif config.critic.strategy == "megatron":
+            from verl.workers.megatron_workers import CriticWorker
         else:
             raise NotImplementedError
+        role_worker_mapping[Role.Critic] = ray.remote(CriticWorker)
+        mapping[Role.Critic] = global_pool_id
 
-        from verl.trainer.ppo.ray_trainer import ResourcePoolManager, Role
-
-        role_worker_mapping = {
-            Role.ActorRollout: ray.remote(AsyncActorRolloutRefWorker),
-            Role.Critic: ray.remote(CriticWorker),
-        }
-
-        global_pool_id = "global_pool"
         resource_pool_spec = {
             global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
         }
-        mapping = {
-            Role.ActorRollout: global_pool_id,
-            Role.Critic: global_pool_id,
-        }
 
-        # we should adopt a multi-source reward function here
-        # - for rule-based rm, we directly call a reward score
-        # - for model-based rm, we call a model
-        # - for code related prompt, we send to a sandbox if there are test cases
-        # - finally, we combine all the rewards together
-        # - The reward type depends on the tag of the data
+        # reward model
         if config.reward.reward_model.enable:
             if config.reward.reward_model.get("strategy") in {"fsdp", "fsdp2"}:
                 from verl.workers.fsdp_workers import RewardModelWorker
@@ -145,10 +158,11 @@ class TaskRunner:
             role_worker_mapping[Role.RewardModel] = ray.remote(RewardModelWorker)
             mapping[Role.RewardModel] = global_pool_id
 
-        # reference model
-        if config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss:
-            role_worker_mapping[Role.RefPolicy] = ray.remote(AsyncActorRolloutRefWorker)
-            mapping[Role.RefPolicy] = global_pool_id
+        # reference model (fused into ActorRolloutRefWorker when disable)
+        if use_legacy_worker_impl != "disable":
+            if need_reference_policy(config):
+                role_worker_mapping[Role.RefPolicy] = ray.remote(actor_rollout_cls)
+                mapping[Role.RefPolicy] = global_pool_id
 
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
