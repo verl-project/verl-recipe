@@ -36,13 +36,15 @@ bash recipe/qat/run_qwen3_30b_w4a16_FFN_only.sh
 
 ### QAT Configuration
 
+QAT is configured under `actor_rollout_ref.actor.fsdp_config.qat`:
+
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `qat.enable` | Enable QAT | `False` |
-| `qat.mode` | Quantization mode | `"w4a16"` |
-| `qat.group_size` | Quantization group size | `16` |
-| `qat.ignore_patterns` | Layer name patterns to ignore (supports regex) | `["lm_head", "embed_tokens", "re:.*mlp.gate$"]` |
-| `qat.quantization_config_path` | vLLM quantization config JSON path | `recipe/qat/config/nvfp4_w4a16.json` |
+| `fsdp_config.qat.enable` | Enable QAT | `False` |
+| `fsdp_config.qat.mode` | Quantization mode | `"w4a16"` |
+| `fsdp_config.qat.group_size` | Quantization group size | `16` |
+| `fsdp_config.qat.ignore_patterns` | Layer name patterns to ignore (supports regex) | `["lm_head", "embed_tokens", "re:.*mlp.gate$"]` |
+| `fsdp_config.qat.quantization_config_path` | vLLM quantization config JSON path | `recipe/qat/config/nvfp4_w4a16.json` |
 
 ### YAML Configuration Examples
 
@@ -51,15 +53,16 @@ bash recipe/qat/run_qwen3_30b_w4a16_FFN_only.sh
 ```yaml
 actor_rollout_ref:
   actor:
-    qat:
-      enable: true
-      mode: "w4a16"
-      group_size: 16
-      ignore_patterns:
-        - "lm_head"
-        - "embed_tokens"
-        - "re:.*mlp.gate$"
-      quantization_config_path: "recipe/qat/config/nvfp4_w4a16.json"
+    fsdp_config:
+      qat:
+        enable: true
+        mode: "w4a16"
+        group_size: 16
+        ignore_patterns:
+          - "lm_head"
+          - "embed_tokens"
+          - "re:.*mlp.gate$"
+        quantization_config_path: "recipe/qat/config/nvfp4_w4a16.json"
 ```
 
 **FFN-only Quantization** (exclude Attention Linear layers):
@@ -67,16 +70,17 @@ actor_rollout_ref:
 ```yaml
 actor_rollout_ref:
   actor:
-    qat:
-      enable: true
-      mode: "w4a16"
-      group_size: 16
-      ignore_patterns:
-        - "lm_head"
-        - "embed_tokens"
-        - "re:.*mlp.gate$"
-        - "re:.*self_attn.*"
-      quantization_config_path: "recipe/qat/config/nvfp4_w4a16.json"
+    fsdp_config:
+      qat:
+        enable: true
+        mode: "w4a16"
+        group_size: 16
+        ignore_patterns:
+          - "lm_head"
+          - "embed_tokens"
+          - "re:.*mlp.gate$"
+          - "re:.*self_attn.*"
+        quantization_config_path: "recipe/qat/config/nvfp4_w4a16.json"
 ```
 
 ---
@@ -188,6 +192,7 @@ Validating QAT effectiveness on larger models. Results are consistent with the 8
 | W4A16 + QAT (FFN-only) | Red |
 
 <img src="./img/image4.png">
+<img src="./img/image5.png">
 
 **Memory Analysis**
 

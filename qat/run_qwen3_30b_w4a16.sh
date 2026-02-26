@@ -81,7 +81,7 @@ export TORCH_DIST_TIMEOUT=4000
 
 RAY_ADDRESS='http://127.0.0.1:8265' ray job submit --runtime-env="${RUNTIME_ENV}" \
     --working-dir "${WORKING_DIR}" \
-    -- python3 -m verl.trainer.main_ppo \
+    -- python3 -m recipe.dapo.main_dapo \
     --config-path "${WORKING_DIR}/recipe/qat/config" \
     --config-name dapo_qat_trainer \
     data.train_files="${TRAIN_FILE}" \
@@ -130,10 +130,10 @@ RAY_ADDRESS='http://127.0.0.1:8265' ray job submit --runtime-env="${RUNTIME_ENV}
     actor_rollout_ref.actor.grad_clip=1.0 \
     actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode} \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=${sp_size} \
-    actor_rollout_ref.actor.qat.enable=${qat_enable} \
-    actor_rollout_ref.actor.qat.mode=${qat_mode} \
-    actor_rollout_ref.actor.qat.quantization_config_path=${qat_config_path} \
-    'actor_rollout_ref.actor.qat.ignore_patterns=["lm_head", "embed_tokens", "re:.*mlp.gate$"]' \
+    actor_rollout_ref.actor.fsdp_config.qat.enable=${qat_enable} \
+    actor_rollout_ref.actor.fsdp_config.qat.mode=${qat_mode} \
+    actor_rollout_ref.actor.fsdp_config.qat.quantization_config_path="${qat_config_path}" \
+    'actor_rollout_ref.actor.fsdp_config.qat.ignore_patterns=["lm_head", "embed_tokens", "re:.*mlp.gate$"]' \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.max_num_batched_tokens=$(( 1024 * 32 )) \
@@ -151,10 +151,11 @@ RAY_ADDRESS='http://127.0.0.1:8265' ray job submit --runtime-env="${RUNTIME_ENV}
     actor_rollout_ref.ref.fsdp_config.param_offload=${offload} \
     actor_rollout_ref.ref.ulysses_sequence_parallel_size=${sp_size} \
     actor_rollout_ref.actor.fsdp_config.fsdp_size=-1 \
-    reward_model.reward_manager=dapo \
-    reward_model.overlong_buffer.enable=${enable_overlong_buffer} \
-    reward_model.overlong_buffer.len=${overlong_buffer_len} \
-    reward_model.overlong_buffer.penalty_factor=${overlong_penalty_factor} \
+    reward.reward_manager=dapo \
+    reward.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer} \
+    reward.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len} \
+    reward.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
+    reward.reward_kwargs.max_resp_len=${max_response_length} \
     trainer.logger='["console","wandb"]' \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \
@@ -166,4 +167,6 @@ RAY_ADDRESS='http://127.0.0.1:8265' ray job submit --runtime-env="${RUNTIME_ENV}
     trainer.total_epochs=1 \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=auto \
-    trainer.max_actor_ckpt_to_keep=3
+    trainer.max_actor_ckpt_to_keep=3 \
+    trainer.use_legacy_worker_impl=disable
+
