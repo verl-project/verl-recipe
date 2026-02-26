@@ -58,7 +58,10 @@ class RayDAPOTrainer(RayPPOTrainer):
             response_masks = batch.batch["response_mask"]
             actor_config = self.config.actor_rollout_ref.actor
             entropy_agg = agg_loss(
-                loss_mat=entropys, loss_mask=response_masks, loss_agg_mode=actor_config.loss_agg_mode
+                loss_mat=entropys,
+                loss_mask=response_masks,
+                loss_agg_mode=actor_config.loss_agg_mode,
+                loss_scale_factor=actor_config.loss_scale_factor,
             )
             old_log_prob_metrics = {
                 "actor/entropy": entropy_agg.detach().item(),
@@ -136,7 +139,9 @@ class RayDAPOTrainer(RayPPOTrainer):
         batch = None
         num_prompt_in_batch = 0
         num_gen_batches = 0
-        for epoch in range(self.config.trainer.total_epochs):
+        current_epoch = self.global_steps // len(self.train_dataloader)
+
+        for epoch in range(current_epoch, self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
                 if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
                     self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=False)
