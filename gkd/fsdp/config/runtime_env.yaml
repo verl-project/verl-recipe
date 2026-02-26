@@ -1,0 +1,13 @@
+working_dir: ./
+excludes: ["/.git/"]
+env_vars:
+  TORCH_NCCL_AVOID_RECORD_STREAMS: "1"
+  CUDA_LAUNCH_BLOCKING: "0"
+  NVTE_DEBUG: "1"
+  NVTE_DEBUG_LEVEL: "2"
+  NVTE_FLASH_ATTN: "1" 
+  RAY_DEBUG: "legacy"
+  NCCL_DEBUG: "WARN"
+  PYTHONPATH: "/home/work/cxr/verl-opkd"  
+  VLLM_USE_V1: "1"
+  VERL_VLLM_DISTRIBUTED_BACKEND: "ray"
