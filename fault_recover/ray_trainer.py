@@ -29,6 +29,7 @@ from omegaconf import OmegaConf
 from tqdm import tqdm
 
 from verl import DataProto
+from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.dataset.sampler import AbstractCurriculumSampler
 from verl.single_controller.ray import RayClassWithInitArgs
 from verl.single_controller.ray.base import create_colocated_worker_cls
@@ -122,34 +123,8 @@ class FaultRecoverRayPPOTrainer(RayPPOTrainer):
         # create a reward model if reward_fn is None
         # for legacy discriminative reward model, we create a reward model worker here
         # for reward loop discriminative reward model, we create a reward loop manager here
-        if not self.use_reward_loop:
-            # legacy reward model only handle reward-model based scenario
-            if self.use_rm:
-                # we create a RM here
-                resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel)
-                rm_cls = RayClassWithInitArgs(
-                    self.role_worker_mapping[Role.RewardModel], config=self.config.reward_model
-                )
-                self.resource_pool_to_cls[resource_pool][str(Role.RewardModel)] = rm_cls
-        else:
-            # reward loop handle hybrid reward scenario (rule, disrm, genrm, ...)
-            # Note: mode is always "async" since sync mode is deprecated
-            can_reward_loop_parallelize = not self.use_rm or self.config.reward_model.enable_resource_pool
-            # judge if we can asynchronously parallelize reward model with actor rollout
-            # two condition that we can parallelize reward model with actor rollout:
-            # 1. reward model is not enabled (rule-based reward can parallelize)
-            # 2. reward model is enabled but extra resource pool is enabled
-            # If we cannot parallelize, we should enable synchronous mode here, and launch a reward loop manager here
-            # else for parallelize mode, we launch a reward worker for each rollout worker (in agent loop, not here)
-            if not can_reward_loop_parallelize:
-                from verl.experimental.reward_loop import RewardLoopManager
-
-                self.config.reward_model.n_gpus_per_node = self.config.trainer.n_gpus_per_node
-                resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel)
-                self.reward_loop_manager = RewardLoopManager(
-                    config=self.config,
-                    rm_resource_pool=resource_pool,
-                )
+        if self.use_rm and not self.use_reward_loop:
+            raise RuntimeError("Reward model worker group is not supported, please set use_reward_loop=True")
 
         # initialize WorkerGroup
         # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
@@ -219,6 +194,19 @@ class FaultRecoverRayPPOTrainer(RayPPOTrainer):
         if self.ref_in_actor:
             self.ref_policy_wg = self.actor_rollout_wg
 
+        # create reward loop manager
+        if self.use_reward_loop:
+            from verl.experimental.reward_loop import RewardLoopManager
+
+            # initalize reward loop manager
+            # reward model (colocate or standalone): get resource_pool
+            # no reward model: resource_pool = None
+            resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel) if self.use_rm else None
+            self.reward_loop_manager = RewardLoopManager(
+                config=self.config,
+                rm_resource_pool=resource_pool,
+            )
+
         # create async rollout manager and request scheduler
         # Note: mode is always "async" since sync mode is deprecated
         self.async_rollout_mode = True
@@ -232,17 +220,32 @@ class FaultRecoverRayPPOTrainer(RayPPOTrainer):
                 FaultRecoverAgentLoopManager as AgentLoopManager,
             )
 
-        if self.config.reward_model.enable and self.config.reward_model.enable_resource_pool:
-            rm_resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel)
-        else:
-            rm_resource_pool = None
+        # infrastructure overview: https://verl.readthedocs.io/en/latest/advance/reward_loop.html#architecture-design
+        # agent_reward_loop: streaming reward computation with actor rollout
+        # two conditions satisfied: (1) no reward model, or (2) reward model with extra resource pool
+        enable_agent_reward_loop = self.use_reward_loop and (
+            not self.use_rm or self.config.reward_model.enable_resource_pool
+        )
+        # if enable_agent_reward_loop, we directly pass reward_loop_workers to agent loop manager
+        # to stream reward computation with actor rollout
 
+        reward_loop_worker_handles = self.reward_loop_manager.reward_loop_workers if enable_agent_reward_loop else None
         self.async_rollout_manager = AgentLoopManager(
             config=self.config,
             worker_group=self.actor_rollout_wg,
             rollout_resource_pool=actor_rollout_resource_pool,
-            rm_resource_pool=rm_resource_pool,
+            reward_loop_worker_handles=reward_loop_worker_handles,
         )
+
+        self.checkpoint_manager = CheckpointEngineManager(
+            backend=self.config.actor_rollout_ref.rollout.checkpoint_engine.backend,
+            trainer=self.actor_rollout_wg,
+            replicas=self.async_rollout_manager.rollout_replicas,
+        )
+
+        # sleep all replicas to load checkpoint
+        self.checkpoint_manager.sleep_replicas()
+
         if self.config.fault_manager.enable:
             FaultMgr.bind_trainer(self)
 
@@ -267,8 +270,9 @@ class FaultRecoverRayPPOTrainer(RayPPOTrainer):
 
         self.global_steps = 0
 
-        # load checkpoint before doing anything
+        # load checkpoint and update weights before doing anything
         self._load_checkpoint()
+        self.checkpoint_manager.update_weights()
 
         current_epoch = self.global_steps // len(self.train_dataloader)
 
@@ -342,8 +346,9 @@ class FaultRecoverRayPPOTrainer(RayPPOTrainer):
                             gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch_output)
                         else:
                             if curr_step_profile:
-                                self.async_rollout_manager.start_profile()
+                                self.async_rollout_manager.start_profile(global_step=self.global_steps)
                             gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
+                            self.checkpoint_manager.sleep_replicas()
                             if curr_step_profile:
                                 self.async_rollout_manager.stop_profile()
 
@@ -363,6 +368,7 @@ class FaultRecoverRayPPOTrainer(RayPPOTrainer):
                                 if curr_step_profile:
                                     self.async_rollout_manager.start_profile()
                                 gen_baseline_output = self.async_rollout_manager.generate_sequences(gen_baseline_batch)
+                                self.checkpoint_manager.sleep_replicas()
                                 if curr_step_profile:
                                     self.async_rollout_manager.stop_profile()
                             batch = batch.union(gen_baseline_output)
@@ -463,6 +469,14 @@ class FaultRecoverRayPPOTrainer(RayPPOTrainer):
                             }
                             metrics.update(old_log_prob_metrics)
                             old_log_prob.batch.pop("entropys")
+                            if "routed_experts" in batch.batch and "routed_experts" in old_log_prob.batch:
+                                router_mode = getattr(
+                                    self.config.actor_rollout_ref.actor.router_replay, "mode", "disabled"
+                                )
+                                if router_mode == "R2":
+                                    batch.batch.pop("routed_experts")
+                                else:
+                                    old_log_prob.batch.pop("routed_experts")
                             batch = batch.union(old_log_prob)
                             if "rollout_log_probs" in batch.batch.keys():
                                 # TODO: we may want to add diff of probs too.
@@ -545,6 +559,33 @@ class FaultRecoverRayPPOTrainer(RayPPOTrainer):
                         # update actor
                         with marked_timer("update_actor", timing_raw, color="red"):
                             actor_output = self._update_actor(batch)
+
+                        # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.
+                        esi_close_to_expiration = should_save_ckpt_esi(
+                            max_steps_duration=self.max_steps_duration,
+                            redundant_time=self.config.trainer.esi_redundant_time,
+                        )
+                        # Check if the conditions for saving a checkpoint are met.
+                        # The conditions include a mandatory condition (1) and
+                        # one of the following optional conditions (2/3/4):
+                        # 1. The save frequency is set to a positive value.
+                        # 2. It's the last training step.
+                        # 3. The current step number is a multiple of the save frequency.
+                        # 4. The ESI(Elastic Server Instance)/training plan is close to expiration.
+                        if self.config.trainer.save_freq > 0 and (
+                            is_last_step
+                            or self.global_steps % self.config.trainer.save_freq == 0
+                            or esi_close_to_expiration
+                        ):
+                            if esi_close_to_expiration:
+                                print("Force saving checkpoint: ESI instance expiration approaching.")
+                            with marked_timer("save_checkpoint", timing_raw, color="green"):
+                                self._save_checkpoint()
+
+                        # update weights from trainer to rollout
+                        with marked_timer("update_weights", timing_raw, color="red"):
+                            self.checkpoint_manager.update_weights()
+
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
 
@@ -564,26 +605,6 @@ class FaultRecoverRayPPOTrainer(RayPPOTrainer):
                         if is_last_step:
                             last_val_metrics = val_metrics
                     metrics.update(val_metrics)
-
-                # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.
-                esi_close_to_expiration = should_save_ckpt_esi(
-                    max_steps_duration=self.max_steps_duration,
-                    redundant_time=self.config.trainer.esi_redundant_time,
-                )
-                # Check if the conditions for saving a checkpoint are met.
-                # The conditions include a mandatory condition (1) and
-                # one of the following optional conditions (2/3/4):
-                # 1. The save frequency is set to a positive value.
-                # 2. It's the last training step.
-                # 3. The current step number is a multiple of the save frequency.
-                # 4. The ESI(Elastic Server Instance)/training plan is close to expiration.
-                if self.config.trainer.save_freq > 0 and (
-                    is_last_step or self.global_steps % self.config.trainer.save_freq == 0 or esi_close_to_expiration
-                ):
-                    if esi_close_to_expiration:
-                        print("Force saving checkpoint: ESI instance expiration approaching.")
-                    with marked_timer("save_checkpoint", timing_raw, color="green"):
-                        self._save_checkpoint()
 
                 with marked_timer("stop_profile", timing_raw):
                     next_step_profile = (

@@ -59,13 +59,14 @@ class FaultRecoverAsyncLLMServerManager(AsyncLLMServerManager):
         """
         server = self._choose_server(request_id)
         new_request_id = uuid4().hex
+        tokens_queue = None
         if global_id is not None:
             from recipe.fault_recover.fault_manager import get_tokens_queue
 
             tokens_queue = get_tokens_queue()
 
-            if tokens_queue is not None:
-                await tokens_queue.put.remote((new_request_id, global_id))
+        if tokens_queue is not None:
+            await tokens_queue.put.remote((new_request_id, global_id))
 
         output = await server.generate.remote(
             request_id=new_request_id,  # use new request_id for each turn
@@ -74,6 +75,18 @@ class FaultRecoverAsyncLLMServerManager(AsyncLLMServerManager):
             image_data=image_data,
             video_data=video_data,
         )
+
+        if tokens_queue is not None:
+            await tokens_queue.put.remote(
+                {
+                    new_request_id: {
+                        "log_probs": output.log_probs,
+                        "routed_experts": output.routed_experts,
+                        "num_preempted": output.num_preempted,
+                    }
+                }
+            )
+
         return output
 
 
@@ -84,9 +97,9 @@ class FaultRecoverAgentLoopWorker(AgentLoopWorker):
         self,
         config: DictConfig,
         server_handles: list[ray.actor.ActorHandle],
-        reward_router_address: str = None,
+        reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
-        super().__init__(config, server_handles, reward_router_address)
+        super().__init__(config, server_handles, reward_loop_worker_handles)
         self.server_manager = FaultRecoverAsyncLLMServerManager(config, server_handles)
 
 
@@ -98,24 +111,19 @@ class FaultRecoverAgentLoopManager(AgentLoopManager):
         config: DictConfig,
         worker_group: RayWorkerGroup = None,
         rollout_resource_pool: RayResourcePool = None,
-        rm_resource_pool: RayResourcePool = None,
+        reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
         """Initialize agent loop manager.
 
         Args:
             config (DictConfig): trainer config.
             worker_group (RayWorkerGroup): ActorRolloutRef worker group for hybrid mode; None for standalone mode.
-            rm_resource_pool (RayResourcePool): Resource pool for reward model (Standalone mode).
+            rollout_resource_pool (RayResourcePool): Resource pool for actor rollout (Colocate or Standalone mode).
+            reward_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
         """
         self.config = config
         self.worker_group = worker_group
-        self.reward_model_manager = None
-        self.reward_router_address = None
-        if self.config.reward_model.enable and self.config.reward_model.enable_resource_pool:
-            from verl.experimental.reward_loop import RewardModelManager
-
-            self.reward_model_manager = RewardModelManager(config.reward_model, rm_resource_pool)
-            self.reward_router_address = self.reward_model_manager.get_router_address()
+        self.reward_loop_worker_handles = reward_loop_worker_handles
 
         # for recipe to change
         if not hasattr(self, "rollout_replica_class"):
@@ -127,7 +135,3 @@ class FaultRecoverAgentLoopManager(AgentLoopManager):
 
         self._initialize_llm_servers(rollout_resource_pool)
         self._init_agent_loop_workers()
-
-        # Initially we're in sleep mode.
-        if self.config.actor_rollout_ref.rollout.free_cache_engine:
-            self.sleep()
