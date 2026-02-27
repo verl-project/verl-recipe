@@ -435,7 +435,7 @@ class RayPRIMETrainer(RayPPOTrainer):
                             gen_baseline_output = self.actor_rollout_wg.generate_sequences(gen_baseline_batch)
 
                             batch = batch.union(gen_baseline_output)
-                            rm_scores, _ = self.compute_reward(batch, 1)
+                            rm_scores, _ = self.extract_reward(batch)
                             reward_baseline_tensor = rm_scores.batch.get(
                                 "rm_scores", rm_scores.batch.get("acc_bc", None)
                             )
