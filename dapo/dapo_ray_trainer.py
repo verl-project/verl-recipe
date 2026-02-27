@@ -36,7 +36,7 @@ from verl.trainer.ppo.ray_trainer import (
     compute_advantage,
     compute_response_mask,
 )
-from verl.trainer.ppo.reward import compute_reward
+from verl.trainer.ppo.reward import extract_reward
 from verl.utils.metric import reduce_metrics
 from verl.utils.profiler import marked_timer
 from verl.utils.rollout_skip import RolloutSkip
@@ -96,10 +96,11 @@ class RayDAPOTrainer(RayPPOTrainer):
 
         # load checkpoint before doing anything
         self._load_checkpoint()
+        self.checkpoint_manager.update_weights()
 
         # perform validation before training
         # currently, we only support validation using the reward_function.
-        if self.val_reward_fn is not None and self.config.trainer.get("val_before_train", True):
+        if self.config.trainer.get("val_before_train", True):
             val_metrics = self._validate()
             assert val_metrics, f"{val_metrics=}"
             pprint(f"Initial validation metrics: {val_metrics}")
@@ -108,7 +109,7 @@ class RayDAPOTrainer(RayPPOTrainer):
                 return
 
         if self.config.actor_rollout_ref.rollout.get("skip_rollout", False):
-            rollout_skip = RolloutSkip(self.config, self.actor_rollout_wg)
+            rollout_skip = RolloutSkip(self.config, self.async_rollout_manager)
             rollout_skip.wrap_generate_sequences()
 
         # add tqdm
@@ -170,9 +171,9 @@ class RayDAPOTrainer(RayPPOTrainer):
                             # compute reward model score on new_batch
                             rm_scores = None
                             if self.use_rm and "rm_scores" not in new_batch.batch.keys():
-                                rm_scores = self.rm_wg.compute_rm_score(new_batch)
+                                rm_scores = self._compute_reward_colocate(new_batch)
                                 new_batch = new_batch.union(rm_scores)
-                            reward_baseline_tensor, _ = compute_reward(new_batch, self.reward_fn)
+                            reward_baseline_tensor, _ = extract_reward(new_batch)
                             reward_baseline_tensor = reward_baseline_tensor.sum(dim=-1)
 
                             keys_to_pop = set(gen_baseline_output.batch.keys())
@@ -202,11 +203,11 @@ class RayDAPOTrainer(RayPPOTrainer):
                         # the results from reward model and rule-based results.
                         if self.use_rm and "rm_scores" not in new_batch.batch.keys():
                             # we first compute reward model score
-                            reward_tensor = self.rm_wg.compute_rm_score(new_batch)
-                            new_batch = new_batch.union(reward_tensor)
+                            batch_reward = self._compute_reward_colocate(new_batch)
+                            new_batch = new_batch.union(batch_reward)
 
                         # we combine with rule-based rm
-                        reward_tensor, reward_extra_infos_dict = compute_reward(new_batch, self.reward_fn)
+                        reward_tensor, reward_extra_infos_dict = extract_reward(new_batch)
 
                         new_batch.batch["token_level_scores"] = reward_tensor
 
@@ -287,6 +288,8 @@ class RayDAPOTrainer(RayPPOTrainer):
                             traj_bsz = self.config.data.train_batch_size * self.config.actor_rollout_ref.rollout.n
                             batch = batch[:traj_bsz]
 
+                    self.checkpoint_manager.sleep_replicas()
+
                     # === Updating ===
                     # Balance the number of valid tokens across DP ranks.
                     # NOTE: This usually changes the order of data in the `batch`,
@@ -341,6 +344,8 @@ class RayDAPOTrainer(RayPPOTrainer):
                         # update actor
                         with marked_timer("update_actor", timing_raw, "red"):
                             actor_output = self.actor_rollout_wg.update_actor(batch)
+                        with marked_timer("update_weights", timing_raw, "red"):
+                            self.checkpoint_manager.update_weights()
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
 
@@ -350,10 +355,8 @@ class RayDAPOTrainer(RayPPOTrainer):
                         self._log_rollout_data(batch, reward_extra_infos_dict, timing_raw, rollout_data_dir)
 
                 # validate
-                if (
-                    self.val_reward_fn is not None
-                    and self.config.trainer.test_freq > 0
-                    and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0)
+                if self.config.trainer.test_freq > 0 and (
+                    is_last_step or self.global_steps % self.config.trainer.test_freq == 0
                 ):
                     with marked_timer("testing", timing_raw, "green"):
                         val_metrics: dict = self._validate()
