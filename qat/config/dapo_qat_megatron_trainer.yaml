@@ -1,0 +1,49 @@
+# DAPO trainer config with QAT (Quantization-Aware Training) support
+#
+# QAT Modes:
+#   - w4a16: Weight-only 4-bit quantization (NVFP4)
+
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - ppo_megatron_trainer
+  - _self_
+
+data:
+  gen_batch_size: ${data.train_batch_size}
+
+reward_model:
+  reward_manager: dapo
+  overlong_buffer: 
+    enable: False
+    len: 0
+    penalty_factor: 0.0
+    log: False
+
+algorithm:
+  filter_groups:
+    _target_: verl.trainer.config.FilterGroupsConfig
+    enable: False
+    metric: null
+    max_num_gen_batches: 0
+
+trainer:
+  project_name: verl-dapo-qat
+
+actor_rollout_ref:
+  actor:
+    qat:
+      # Enable QAT
+      enable: true
+      # Quantization mode: "w4a16" (weight-only)
+      mode: "w4a16"
+      group_size: 16
+      # Layers to skip (not quantized)
+      ignore_patterns:
+        - "lm_head"
+        - "*mlp.gate"
+
+      activation_observer: null
+      quantization_config_path: null
