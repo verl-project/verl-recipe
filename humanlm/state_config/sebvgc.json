@@ -1,0 +1,44 @@
+{
+    "stance":
+    {
+        "desc": "HUMAN's agreement (must be within 15 words) toward the explicitly named target, such as a claim or subject, in provided context. For example, \"strongly agrees with student loan forgiveness,\" or \"somewhat disagrees with a carbon tax\". In these cases, having only \"strongly agrees\" or \"somewhat disagrees\" is not enough, as they are missing targets. If there are multiple, include all of them separated by semicolons.",
+        "threshold": 0.9,
+        "max_tokens": 48,
+        "system_prompt": "../system_prompts/sebvgcr_stance.txt"
+    },
+    "emotion": 
+    {
+        "desc": "HUMAN's emotions with intensity (must be within 15 words) toward an explicitly named target. For example, \"Moderate heartbreak for the wildfire victims; Mild irritation about government's actions\". In this case, having only \"mild irritation,\" or \"moderate heartbreak\" are not sufficient, as the answer must express all three aspects: the emotion, the degree of emotion, and the target. If there are multiple, include all of them separated by semicolons.",
+        "threshold": 0.9,
+        "max_tokens": 48,
+        "system_prompt": "../system_prompts/sebvgcr_emotion.txt"
+    },
+    "belief": 
+    {
+        "desc": "HUMAN's belief (must be within 15 words), namely a foundational assumption about how people, relationships, or the world fundamentally operate. Beliefs should reflect underlying mental models, not surface-level observations. Prefer beliefs that would explain multiple behaviors over beliefs that describe a single situation. Ask: \"What deeper assumption about human nature or the world would lead someone to say/do this?\" For example, \"people don't change unless they're forced to,\" \"loyalty is earned, not owed,\" \"conflict avoidance creates bigger problems later,\". Not beliefs: Practical advice, strategies, or statements about what should happen. Belief is not specific to a target or event, it should be a general statement about how HUMAN views the world.",
+        "threshold": 0.9,
+        "max_tokens": 48,
+        "system_prompt": "../system_prompts/sebvgcr_belief.txt"
+    },
+    "value": 
+    {
+        "desc": "HUMAN's value (must be within 15 words): what they think is important or should be prioritized. It is about \"what should matter\", not \"what is true\". For example, \"original ideas in a book are important\", \"characters should feel real\", anyone deserves basic respect\", and \"fairness matters more than efficiency\".",
+        "threshold": 0.9,
+        "max_tokens": 48,
+        "system_prompt": "../system_prompts/sebvgcr_value.txt"
+    },
+    "goal": 
+    {
+        "desc": "HUMAN's goal (must be within 15 words): what they are trying to do with this comment. For example, \"persuade people that ...\", \"making fun of the poster on ...\", \"further seek help with ...\", \"offer support to ...\"",
+        "threshold": 0.9,
+        "max_tokens": 48,
+        "system_prompt": "../system_prompts/sebvgcr_goal.txt"
+    },
+    "communication": 
+    {
+        "desc": "HUMAN's communication approach (must be within 15 words): tone and how they structure their message. For examples, \"friendly, builds on a personal story then draws a lesson\", \"analytical, links claims with reasons and evidence step by step\", \"blunt, states conclusions with little explanation\"",
+        "threshold": 0.9,
+        "max_tokens": 48,
+        "system_prompt": "../system_prompts/sebvgcr_communication.txt"
+    }
+}
