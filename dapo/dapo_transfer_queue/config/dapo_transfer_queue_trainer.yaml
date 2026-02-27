@@ -1,0 +1,36 @@
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+# DAPO-specific (aligned with recipe/dapo/config/dapo_trainer.yaml)
+data:
+  gen_batch_size: ${data.train_batch_size}
+
+reward_model:
+  reward_manager: dapo
+  overlong_buffer:
+    enable: False
+    len: 0
+    penalty_factor: 0.0
+    log: False
+
+algorithm:
+  filter_groups:
+    _target_: verl.trainer.config.FilterGroupsConfig
+    enable: False
+    metric: null
+    max_num_gen_batches: 0
+
+trainer:
+  project_name: verl-dapo-transferqueue
+
+# config for TransferQueue (DAPO + TQ)
+transfer_queue:
+  enable: True
+  num_global_batch: 1
+  storage_backend: AsyncSimpleStorageManager
+  num_data_storage_units: 8

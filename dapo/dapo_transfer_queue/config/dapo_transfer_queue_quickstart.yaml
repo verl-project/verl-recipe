@@ -1,0 +1,21 @@
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - dapo_transfer_queue_trainer
+  - _self_
+
+trainer:
+  project_name: verl-dapo-transferqueue
+  experiment_name: dapo-tq-quickstart
+  logger: console
+  total_epochs: 1
+  total_training_steps: 2
+  val_before_train: False
+  save_freq: -1
+  test_freq: -1
+
+algorithm:
+  filter_groups:
+    enable: False
