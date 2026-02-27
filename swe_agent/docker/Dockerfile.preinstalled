@@ -1,0 +1,17 @@
+# Dockerfile for swerex-python:3.11-preinstalled
+# Pre-installs edit_anthropic tool dependencies (tree-sitter, tree-sitter-languages)
+# to eliminate the 300s+ install.sh timeout during SWE-Agent training rollouts.
+#
+# Build:
+#   docker build -t swerex-python:3.11-preinstalled \
+#       -f verl/recipe/swe_agent/docker/Dockerfile.preinstalled .
+#
+# The resulting image is a drop-in replacement for swerex-python:3.11.
+# Update swe_agent_config.yaml docker_image to use it.
+
+FROM swerex-python:3.11
+
+# Pre-install edit_anthropic dependencies that install.sh would install at runtime.
+# Using --no-cache-dir to keep image small; || true mirrors install.sh behavior.
+RUN pip install --no-cache-dir 'tree-sitter==0.21.3' || true \
+ && pip install --no-cache-dir 'tree-sitter-languages' || true
