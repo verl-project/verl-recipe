@@ -178,7 +178,7 @@ python3 -m verl.trainer.main_ppo \
     ++actor_rollout_ref.nccl_timeout=7200 \
     actor_rollout_ref.actor.use_torch_compile=False \
     actor_rollout_ref.ref.use_torch_compile=False \
-    reward_model.reward_manager=naive \
+    reward.reward_manager=naive \
     trainer.logger='["console"]' \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \
