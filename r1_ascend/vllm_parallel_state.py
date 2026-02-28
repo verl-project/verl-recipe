@@ -10,7 +10,9 @@ import socket
 import subprocess
 
 import torch
+import vllm
 import vllm.envs as envs
+from packaging import version
 from vllm.distributed import parallel_state as vllm_ps
 from vllm.distributed.parallel_state import (
     init_distributed_environment,
@@ -88,7 +90,15 @@ def init_parallel_state(tensor_parallel_size):
     backend = "hccl"
     init_distributed_environment(world_size, rank, distributed_init_method, local_rank, backend)
 
-    initialize_model_parallel(tensor_parallel_size)
+    _VLLM_VERSION = version.parse(vllm.__version__)
+    if _VLLM_VERSION >= version.parse("0.14.0"):
+        from vllm.config import VllmConfig, set_current_vllm_config
+
+        with set_current_vllm_config(VllmConfig()):
+            initialize_model_parallel(tensor_parallel_size)
+    else:
+        initialize_model_parallel(tensor_parallel_size)
+
     logger.info(
         f"[DEBUG]: RANK[{rank}]: TP group: {vllm_ps._TP.ranks}\n"
         f"[DEBUG]: RANK[{rank}]: PP group: {vllm_ps._PP.ranks}\n"
