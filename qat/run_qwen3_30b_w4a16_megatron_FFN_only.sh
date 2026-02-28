@@ -151,7 +151,7 @@ QAT=(
     actor_rollout_ref.actor.qat.enable=${qat_enable}
     actor_rollout_ref.actor.qat.mode=${qat_mode}
     actor_rollout_ref.actor.qat.quantization_config_path="${qat_config_path}"
-    'actor_rollout_ref.actor.qat.ignore_patterns=["lm_head", "*mlp.gate", "*self_attn*"]' \
+    'actor_rollout_ref.actor.qat.ignore_patterns=["lm_head", "*mlp.gate", "*self_attn*"]'
 )
 
 ROLLOUT=(
