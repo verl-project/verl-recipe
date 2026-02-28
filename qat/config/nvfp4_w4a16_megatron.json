@@ -3,13 +3,13 @@
     "config_groups": {
         "group_0": {
             "input_activations": {
-                "dynamic": "false",
+                "dynamic": false,
                 "num_bits": 4,
                 "type": "float",
                 "group_size": 16
             },
             "weights": {
-                "dynamic": "false",
+                "dynamic": false,
                 "num_bits": 4,
                 "type": "float",
                 "group_size": 16

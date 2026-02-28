@@ -17,15 +17,15 @@ data:
 reward_model:
   reward_manager: dapo
   overlong_buffer: 
-    enable: False
+    enable: false
     len: 0
     penalty_factor: 0.0
-    log: False
+    log: false
 
 algorithm:
   filter_groups:
     _target_: verl.trainer.config.FilterGroupsConfig
-    enable: False
+    enable: false
     metric: null
     max_num_gen_batches: 0
 

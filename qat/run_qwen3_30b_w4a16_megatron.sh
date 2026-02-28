@@ -85,7 +85,6 @@ export VERL_LOGGING_LEVEL=INFO
 export VLLM_CONFIGURE_LOGGING=1
 export VLLM_USE_V1=1
 export TORCH_NCCL_AVOID_RECORD_STREAMS=1
-export WANDB_API_KEY=149737fd3c4537b349a37aab90b6fff96f385ebc
 
 ################################################### start of config ###################################################
 
