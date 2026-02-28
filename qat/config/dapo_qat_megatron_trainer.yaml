@@ -41,6 +41,7 @@ actor_rollout_ref:
       mode: "w4a16"
       group_size: 16
       # Layers to skip (not quantized)
+      # Megatron use fnmatch patterns to match layer names
       ignore_patterns:
         - "lm_head"
         - "*mlp.gate"

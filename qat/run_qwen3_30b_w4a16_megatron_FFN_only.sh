@@ -9,7 +9,7 @@ set -xeuo pipefail
 #   Megatron-Bridge needs to be installed manually inside the container:
 #     pip install --no-deps git+https://github.com/NVIDIA-NeMo/Megatron-Bridge@e940d997d7bdb7810f621f5b32bf70255b5aa2d9
 
-ID=${1:-"dapo-qwen3-30b-a3b-b32-r20k-nvfp4-qat-megatron-4n"}
+ID=${1:-"dapo-qwen3-30b-a3b-b32-r20k-nvfp4-qat-megatron-ffn-only-4n"}
 HOME_DIR=/apps
 
 ################################################### quick config ###################################################
@@ -51,7 +51,7 @@ NNODES=4
 RAY_DATA_HOME=${RAY_DATA_HOME:-"${HOME_DIR}"}
 MODEL_PATH="/apps/models/Qwen3-30B-A3B-Base"
 CKPTS_DIR=${CKPTS_DIR:-"${RAY_DATA_HOME}/ckpts/${project_name}/${exp_name}"}
-TRAIN_FILE=${TRAIN_FILE:-"${RAY_DATA_HOME}/data/dapo-math-17k.parquet"}
+TRAIN_FILE=${TRAIN_FILE:-"${RAY_DATA_HOME}/data/dapo-math-17k-one.parquet"}
 TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/data/aime-2024.parquet"}
 
 # Algorithm
@@ -152,6 +152,7 @@ QAT=(
     actor_rollout_ref.actor.qat.enable=${qat_enable}
     actor_rollout_ref.actor.qat.mode=${qat_mode}
     actor_rollout_ref.actor.qat.quantization_config_path="${qat_config_path}"
+    'actor_rollout_ref.actor.qat.ignore_patterns=["lm_head", "*mlp.gate", "*self_attn*"]' \
 )
 
 ROLLOUT=(
