@@ -142,8 +142,6 @@ actor_rollout_ref:
 
     ppo_mini_batch_size: 16
 
-    ppo_micro_batch_size: 16
-
     ppo_micro_batch_size_per_gpu: 16
 
     topk: null
@@ -384,7 +382,5 @@ algorithm:
 
 
 ray_init:
-
   num_cpus: null
-
   timeline_json_file: null

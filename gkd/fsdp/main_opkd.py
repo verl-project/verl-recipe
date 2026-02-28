@@ -78,7 +78,7 @@ def run_opkd(config) -> None:
 
     # [Optional] get the path of the timeline trace file from the configuration, default to None
     # This file is used for performance analysis
-    timeline_json_file = config.ray_kwargs.get("timeline_json_file", None)
+    timeline_json_file = config.ray_init.get("timeline_json_file", None)
     if timeline_json_file:
         ray.timeline(filename=timeline_json_file)
 

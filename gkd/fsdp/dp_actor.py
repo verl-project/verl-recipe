@@ -279,7 +279,7 @@ class DataParallelOPKDActor(DataParallelPPOActor):
 
         Assumption (from Ray fit + actor config):
           - rollout.n > 1
-          - repeat(interleave=False) in fit()
+          - repeat(interleave=True) in fit()
           - ppo_mini_batch_size == ppo_micro_batch_size_per_gpu == rollout.n
           => each micro_batch contains n responses for a SINGLE prompt.
         """
@@ -319,80 +319,80 @@ class DataParallelOPKDActor(DataParallelPPOActor):
                     micro_batches = mini_batch.split(self.config.ppo_micro_batch_size_per_gpu)
                 self.actor_optimizer.zero_grad()
 
-                # import hashlib
+                import hashlib
 
-                # def _rank_info():
-                #     if torch.distributed.is_available() and torch.distributed.is_initialized():
-                #         rank = torch.distributed.get_rank()
-                #         world = torch.distributed.get_world_size()
-                #     else:
-                #         rank, world = 0, 1
-                #     dev = torch.cuda.current_device() if torch.cuda.is_available() else -1
-                #     return rank, world, dev
+                def _rank_info():
+                    if torch.distributed.is_available() and torch.distributed.is_initialized():
+                        rank = torch.distributed.get_rank()
+                        world = torch.distributed.get_world_size()
+                    else:
+                        rank, world = 0, 1
+                    dev = torch.cuda.current_device() if torch.cuda.is_available() else -1
+                    return rank, world, dev
 
-                # def _hash_prompt(input_ids, attention_mask, response_mask):
-                #     """
-                #     input_ids:      [B, S] (prompt + response padded)
-                #     attention_mask: [B, S]
-                #     response_mask:  [B, R] (mask over response span; 1=valid response token, 0=response padding)
+                def _hash_prompt(input_ids, attention_mask, response_mask):
+                    """
+                    input_ids:      [B, S] (prompt + response padded)
+                    attention_mask: [B, S]
+                    response_mask:  [B, R] (mask over response span; 1=valid response token, 0=response padding)
 
-                #     return:
-                #         hashes: list[str] length B, short hash for prompt tokens
-                #         prompt_len: list[int] length B, estimated prompt lengths
-                #         resp_len: list[int] length B, effective response lengths (non-pad) from response_mask
-                #     """
-                #     # Estimate prompt effective length: total_effective_len - response_effective_len.
-                #     total_len = attention_mask.sum(dim=-1).to(torch.long)  # [B]
-                #     resp_len = response_mask.sum(dim=-1).to(torch.long)  # [B]
-                #     prompt_len = (total_len - resp_len).clamp(min=0)  # [B]
+                    return:
+                        hashes: list[str] length B, short hash for prompt tokens
+                        prompt_len: list[int] length B, estimated prompt lengths
+                        resp_len: list[int] length B, effective response lengths (non-pad) from response_mask
+                    """
+                    # Estimate prompt effective length: total_effective_len - response_effective_len.
+                    total_len = attention_mask.sum(dim=-1).to(torch.long)  # [B]
+                    resp_len = response_mask.sum(dim=-1).to(torch.long)  # [B]
+                    prompt_len = (total_len - resp_len).clamp(min=0)  # [B]
 
-                #     hashes = []
-                #     for b in range(input_ids.size(0)):
-                #         plen = int(prompt_len[b].item())
-                #         toks = input_ids[b, :plen].detach().cpu().to(torch.int32).numpy().tobytes()
-                #         h = hashlib.sha1(toks).hexdigest()[:10]
-                #         hashes.append(h)
-                #     return hashes, prompt_len.detach().cpu().tolist(), resp_len.detach().cpu().tolist()
+                    hashes = []
+                    for b in range(input_ids.size(0)):
+                        plen = int(prompt_len[b].item())
+                        toks = input_ids[b, :plen].detach().cpu().to(torch.int32).numpy().tobytes()
+                        h = hashlib.sha1(toks).hexdigest()[:10]
+                        hashes.append(h)
+                    return hashes, prompt_len.detach().cpu().tolist(), resp_len.detach().cpu().tolist()
 
-                # rank, world, dev = _rank_info()
-                # print(
-                #     f"[DBG][rank {rank}/{world}][cuda:{dev}] micro_batches={len(micro_batches)} "
-                #     f"mini_batch_size={len(mini_batch.batch)} micro_bsz={self.config.ppo_micro_batch_size_per_gpu}"
-                # )
-                # uids = None
-                # try:
-                #     uids = mini_batch.non_tensor_batch.get("uid", None)
-                # except Exception:
-                #     uids = None
+                rank, world, dev = _rank_info()
+                print(
+                    f"[DBG][rank {rank}/{world}][cuda:{dev}] micro_batches={len(micro_batches)} "
+                    f"mini_batch_size={len(mini_batch.batch)} micro_bsz={self.config.ppo_micro_batch_size_per_gpu}"
+                )
+                uids = None
+                try:
+                    uids = mini_batch.non_tensor_batch.get("uid", None)
+                except Exception:
+                    uids = None
 
-                # if uids is not None:
-                #     uid_list = uids.tolist()
-                #     total = len(uid_list)
+                if uids is not None:
+                    uid_list = uids.tolist()
+                    total = len(uid_list)
 
-                #     from collections import Counter
+                    from collections import Counter
 
-                #     cnt = Counter(uid_list)
-                #     uniq = list(cnt.keys())
-                #     n_unique = len(uniq)
+                    cnt = Counter(uid_list)
+                    uniq = list(cnt.keys())
+                    n_unique = len(uniq)
 
-                #     print(f"[DBG][rank {rank}][cuda:{dev}] mini_batch uid summary: total={total}, unique={n_unique}")
-                #     uid_cnt_preview = {k: cnt[k] for k in uniq[:5]}
-                #     print(f"[DBG][rank {rank}][cuda:{dev}] mini_batch uid counts (preview): {uid_cnt_preview}")
+                    print(f"[DBG][rank {rank}][cuda:{dev}] mini_batch uid summary: total={total}, unique={n_unique}")
+                    uid_cnt_preview = {k: cnt[k] for k in uniq[:5]}
+                    print(f"[DBG][rank {rank}][cuda:{dev}] mini_batch uid counts (preview): {uid_cnt_preview}")
 
-                # # Check whether prompts are identical inside a micro-batch (should be, if grouped by rollouts).
-                # for i, mb in enumerate(micro_batches[: min(4, len(micro_batches))]):  # show up to 4
-                #     try:
-                #         inp = mb.batch["input_ids"]
-                #         am = mb.batch["attention_mask"]
-                #         rm = mb.batch["response_mask"]
-                #         hs, plen, rlen = _hash_prompt(inp, am, rm)
-                #         uniq = len(set(hs))
-                #         print(
-                #             f"[DBG][rank {rank}][cuda:{dev}] micro[{i}] B={inp.size(0)} "
-                #             f"prompt_hash_unique={uniq} prompt_len={plen} resp_len={rlen} hashes={hs}"
-                #         )
-                #     except Exception as e:
-                #         print(f"[DBG][rank {rank}][cuda:{dev}] micro[{i}] prompt check failed: {repr(e)}")
+                # Check whether prompts are identical inside a micro-batch (should be, if grouped by rollouts).
+                for i, mb in enumerate(micro_batches[: min(4, len(micro_batches))]):  # show up to 4
+                    try:
+                        inp = mb.batch["input_ids"]
+                        am = mb.batch["attention_mask"]
+                        rm = mb.batch["response_mask"]
+                        hs, plen, rlen = _hash_prompt(inp, am, rm)
+                        uniq = len(set(hs))
+                        print(
+                            f"[DBG][rank {rank}][cuda:{dev}] micro[{i}] B={inp.size(0)} "
+                            f"prompt_hash_unique={uniq} prompt_len={plen} resp_len={rlen} hashes={hs}"
+                        )
+                    except Exception as e:
+                        print(f"[DBG][rank {rank}][cuda:{dev}] micro[{i}] prompt check failed: {repr(e)}")
 
                 for micro_batch in micro_batches:
                     micro_batch = micro_batch.to(get_device_id())
