@@ -57,7 +57,7 @@ On the GSM8K dataset, our method achieves comparable convergence and tangible pe
 > source data: https://swanlab.cn/@allenzpma/verl_exp_partial-rollout_gsm8k/runs
 
 #### DAPO-MATH17k
-Furthermore, on the DAPO-math dataset, our approach facilitates **full dataset** training with a <span style="color:red">51.1%</span> reduction in end-to-end execution time and an <span style="color:red">8.77%</span> boost in GPU utilization. And, our method achieve comparable convergence to the baseline.
+Furthermore, on the DAPO-math dataset, our approach facilitates **full dataset** training with a <span style="color:red">51.1%</span> reduction in end-to-end execution time and an <span style="color:red">8.77%</span> boost in GPU utilization. And, our method achieves comparable convergence to the baseline.
 
 | Training Mode | Engine | Step | Total Time |Acc/best@32/mean | Acc/maj@32/mean |GPU Avg Utilization |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |

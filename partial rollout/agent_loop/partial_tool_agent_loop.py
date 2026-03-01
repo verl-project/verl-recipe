@@ -47,7 +47,7 @@ class PartialToolAgentLoop(ToolAgentLoop):
 
         Args:
             sampling_params: Sampling parameters
-            cancellation_event: cancellationn sginal
+            cancellation_event: cancellation sginal
             **kwargs: Contains output (for recovery), raw_prompt, param_version, etc.
 
         Returns:
