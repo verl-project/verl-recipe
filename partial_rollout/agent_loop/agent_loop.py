@@ -33,7 +33,6 @@ from verl.experimental.agent_loop.agent_loop import (
     get_trajectory_info,
 )
 from verl.protocol import DataProto
-from verl.single_controller.ray import RayWorkerGroup
 from verl.single_controller.ray.base import RayResourcePool, RayWorkerGroup
 from verl.utils.rollout_trace import (
     rollout_trace_attr,
