@@ -178,6 +178,7 @@ bash recipe/partial_rollout/run_dapo_math17k_pr_4b_2node.sh
 
 ## 4. Functional Support
 
+Furthermore, **our implementation supports both verl 0.5.0 and 0.6.1.** We recommend freezing the verl version in your environment to ensure long-term stability and prevent potential breaking changes from future upstream PRs.
 
 | Category           | Support Situation                                                                                               |
 |--------------------|-----------------------------------------------------------------------------------------------------------------|
