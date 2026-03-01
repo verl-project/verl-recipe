@@ -22,7 +22,6 @@ import json
 import os
 import uuid
 from collections import defaultdict
-from copy import deepcopy
 from dataclasses import dataclass, field
 from pprint import pprint
 from typing import Optional
@@ -55,7 +54,6 @@ from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
-from verl.utils.import_utils import load_class_from_fqn
 from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.rollout_skip import RolloutSkip
@@ -854,8 +852,9 @@ class RayPPOTrainer:
             #     AgentLoopManager = load_class_from_fqn(manager_class_fqn, "AgentLoopManager")
             # else:
             #     from verl.experimental.agent_loop import AgentLoopManager
-            from recipe.partial_rollout.prompt_manager import RolloutPromptManager
             from recipe.partial_rollout.agent_loop import PRv3AgentLoopManager
+            from recipe.partial_rollout.prompt_manager import RolloutPromptManager
+
             AgentLoopManager = PRv3AgentLoopManager
 
             self.async_rollout_mode = True
@@ -930,7 +929,7 @@ class RayPPOTrainer:
         dataloader_state_dict = self.train_dataloader.state_dict()
         torch.save(dataloader_state_dict, dataloader_local_path)
 
-        # 这里后续，获取prompt-manager的状态流，然后保存到prompt_manager.pt中，供后续load时恢复        
+        # 这里后续，获取prompt-manager的状态流，然后保存到prompt_manager.pt中，供后续load时恢复
 
         # latest checkpointed iteration tracker (for atomic usage)
         if (
@@ -1508,9 +1507,7 @@ class RayPPOTrainer:
                     }
                 )
                 # collect metrics
-                metrics.update({
-                    k: v for k, v in batch.meta_info.items() if k.startswith("partial_rollout/")
-                })
+                metrics.update({k: v for k, v in batch.meta_info.items() if k.startswith("partial_rollout/")})
                 metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
                 # TODO: implement actual tflpo and theoretical tflpo
@@ -1548,4 +1545,3 @@ class RayPPOTrainer:
                 if hasattr(self.train_dataset, "on_batch_end"):
                     # The dataset may be changed after each training batch
                     self.train_dataset.on_batch_end(batch=batch)
-

@@ -11,30 +11,28 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import time
-from collections import deque
-from dataclasses import dataclass, is_dataclass
-from typing import Any, Optional
-import uuid
-from tensordict import TensorDict
-from torchdata.stateful_dataloader import StatefulDataLoader
-
 import asyncio
-import numpy as np
-import torch
-import ray
+import logging
+import time
+import uuid
+from collections import deque
+from dataclasses import dataclass
+from typing import Any
 
+import numpy as np
+import ray
+import torch
 from omegaconf import DictConfig
+from tensordict import TensorDict
 from torch.utils.data import DataLoader
+from torchdata.stateful_dataloader import StatefulDataLoader
 
 from verl import DataProto
 from verl.experimental.agent_loop.agent_loop import AgentLoopOutput
 from verl.trainer.ppo.ray_trainer import compute_response_mask
 
-import logging
 logger = logging.getLogger(__file__)
 logger.setLevel("INFO")
-
 
 
 @dataclass
@@ -45,18 +43,18 @@ class RolloutPrompt:
     full_batch: DataProto
 
     # AgentLoopOutput from generation
-    agent_loop_output_list: list[AgentLoopOutput]   # length: n
+    agent_loop_output_list: list[AgentLoopOutput]  # length: n
 
     # Metadata
     prompt_id: str
     epoch: int
 
     # Processing metadata
-    processing_times: list[float]   # length: n
-    tool_calls: list[float]         # length: n
+    processing_times: list[float]  # length: n
+    tool_calls: list[float]  # length: n
     param_version: int
     param_version_start: list[int]  # length: n
-    param_version_end: list[int]    # length: n
+    param_version_end: list[int]  # length: n
     rollout_status: dict[str, Any]
     original_batch: DataProto
 
@@ -77,13 +75,12 @@ def dict_of_list_to_list_of_dict(metrics: dict) -> list[dict]:
     for k, v in metrics.items():
         assert len(v) == length, f"Length mismatch for key '{k}'"
 
-    return [
-        {k: metrics[k][i] for k in keys}
-        for i in range(length)
-    ]
+    return [{k: metrics[k][i] for k in keys} for i in range(length)]
 
 
-def assemble_batch_from_rollout_prompts(rollout_prompts: list[RolloutPrompt], current_param_version: int = None) -> DataProto:
+def assemble_batch_from_rollout_prompts(
+    rollout_prompts: list[RolloutPrompt], current_param_version: int = None
+) -> DataProto:
     """
     Assemble gen_batch_output from RolloutPrompt objects
     Assembles batches from RolloutPrompt objects, similar to the _post_generate_batch logic in ray_trainer.
@@ -115,7 +112,7 @@ def assemble_batch_from_rollout_prompts(rollout_prompts: list[RolloutPrompt], cu
 
         for rp in rollout_prompts:
             rollout_prompts_batch.append(rp.full_batch)
-            
+
         final_batch = DataProto.concat(rollout_prompts_batch)
 
         # Calculate response_mask (if not present)
@@ -159,14 +156,16 @@ def assemble_batch_from_rollout_prompts(rollout_prompts: list[RolloutPrompt], cu
         staleness_stats = {}
         if current_param_version is not None:
             staleness = [current_param_version - version_start for version_start in param_version_start]
-            staleness_stats.update({
-                "partial_rollout/partial/staleness_max": np.max(staleness),
-                "partial_rollout/partial/staleness_min": np.min(staleness),
-                "partial_rollout/partial/staleness_avg": np.mean(staleness),
-                "partial_rollout/partial/staleness_tp50": np.percentile(staleness, 50),
-                "partial_rollout/partial/staleness_tp99": np.percentile(staleness, 99),
-                "partial_rollout/partial/staleness_tp95": np.percentile(staleness, 95),
-            })
+            staleness_stats.update(
+                {
+                    "partial_rollout/partial/staleness_max": np.max(staleness),
+                    "partial_rollout/partial/staleness_min": np.min(staleness),
+                    "partial_rollout/partial/staleness_avg": np.mean(staleness),
+                    "partial_rollout/partial/staleness_tp50": np.percentile(staleness, 50),
+                    "partial_rollout/partial/staleness_tp99": np.percentile(staleness, 99),
+                    "partial_rollout/partial/staleness_tp95": np.percentile(staleness, 95),
+                }
+            )
         # add meta_info
         param_versions = [rp.param_version for rp in rollout_prompts]
         trajectorys_param_versions = final_batch.non_tensor_batch["param_version_end"]
@@ -196,7 +195,6 @@ def assemble_batch_from_rollout_prompts(rollout_prompts: list[RolloutPrompt], cu
     return final_batch
 
 
-
 @ray.remote
 class RolloutPromptManager:
     """
@@ -214,6 +212,7 @@ class RolloutPromptManager:
         self.done_queue = deque()
 
         from recipe.partial_rollout.main_ppo import create_rl_dataset, create_rl_sampler
+
         from verl.utils.dataset.rl_dataset import collate_fn
 
         self.dataset = create_rl_dataset(
@@ -232,10 +231,10 @@ class RolloutPromptManager:
             collate_fn=collate_fn,
             sampler=self.sampler,
         )
-        
+
         self.dataiter = iter(self.dataloader)
         self.is_dataiter_exhausted = False
-    
+
     def on_epoch_start(self, epoch: int):
         """On epoch start for the rollout prompt manager."""
         self.epoch = epoch
@@ -251,8 +250,9 @@ class RolloutPromptManager:
 
     def check_generation_once(self, num_rollout_prompts: int) -> bool:
         """Check generation for the rollout prompt manager."""
-        done = len(self.done_queue) >= num_rollout_prompts or \
-            (len(self.ongoing_set) == 0 and len(self.pending_queue) == 0 and self.is_dataiter_exhausted)
+        done = len(self.done_queue) >= num_rollout_prompts or (
+            len(self.ongoing_set) == 0 and len(self.pending_queue) == 0 and self.is_dataiter_exhausted
+        )
 
         if done:
             logger.info(
@@ -264,7 +264,7 @@ class RolloutPromptManager:
             )
             self.cancellation_event.set()
         return done
-    
+
     def check_generation_post_state(self, num_rollout_prompts: int) -> bool:
         """Check generation post state for the rollout prompt manager."""
         logger.info(
@@ -276,10 +276,7 @@ class RolloutPromptManager:
             f"  - num_ongoing_set: {len(self.ongoing_set)}\n"
             "==========================================================\n"
         )
-        return (
-            len(self.ongoing_set) == 0 and
-            len(self.done_queue) >= num_rollout_prompts
-        )
+        return len(self.ongoing_set) == 0 and len(self.done_queue) >= num_rollout_prompts
 
     def pull_done_prompts(self, num_rollout_prompts: int) -> list[DataProto]:
         """Pull done prompts from the rollout prompt manager."""
@@ -308,8 +305,10 @@ class RolloutPromptManager:
                 if max(param_version_diff) < 10:
                     self.done_queue.append(rollout_prompt)
 
-                assert rollout_prompt.prompt_id in self.ongoing_set, f"prompt {rollout_prompt.prompt_id} not in ongoing_set"
-                
+                assert rollout_prompt.prompt_id in self.ongoing_set, (
+                    f"prompt {rollout_prompt.prompt_id} not in ongoing_set"
+                )
+
             self.ongoing_set.remove(rollout_prompt.prompt_id)
         except Exception as e:
             logger.error(f"[RolloutPromptManager] push_done_prompt: {e}")
@@ -335,26 +334,27 @@ class RolloutPromptManager:
                         self.pending_queue.extend(self._prepare_single_rollout_prompt(data) for data in batch)
                     except StopIteration:
                         self.is_dataiter_exhausted = True
-            
+
             for prompt in pending_prompts:
                 assert prompt.prompt_id not in self.ongoing_set, f"prompt {prompt.prompt_id} already in ongoing_set"
                 self.ongoing_set.add(prompt.prompt_id)
-        
+
         except Exception as e:
             logger.error(f"[RolloutPromptManager] pull_pending_prompts: {e}")
             breakpoint()
-            
-        return pending_prompts
 
+        return pending_prompts
 
     def _prepare_single_rollout_prompt(self, data: DataProto) -> RolloutPrompt:
         """Prepare a single rollout prompt."""
         import copy
-        
+
         config = self.config
         original_batch = copy.deepcopy(data)
 
-        reward_model_keys = set({"data_source", "reward_model", "extra_info", "uid"}) & original_batch.non_tensor_batch.keys()
+        reward_model_keys = (
+            set({"data_source", "reward_model", "extra_info", "uid"}) & original_batch.non_tensor_batch.keys()
+        )
 
         batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
         non_tensor_batch_keys_to_pop = set(original_batch.non_tensor_batch.keys()) - reward_model_keys
@@ -362,15 +362,13 @@ class RolloutPromptManager:
             batch_keys=batch_keys_to_pop,
             non_tensor_batch_keys=list(non_tensor_batch_keys_to_pop),
         )
-        
+
         # For agent loop, we need reward model keys to compute score.
         gen_batch.non_tensor_batch.update(original_batch.non_tensor_batch)
 
         # Setting selected agent, that supports partial
         if config.actor_rollout_ref.rollout.multi_turn.enable:
-            gen_batch.non_tensor_batch["agent_name"] = np.array(
-                ["partial_tool_agent"] * len(gen_batch), dtype=object
-            )
+            gen_batch.non_tensor_batch["agent_name"] = np.array(["partial_tool_agent"] * len(gen_batch), dtype=object)
         else:
             gen_batch.non_tensor_batch["agent_name"] = np.array(
                 ["partial_single_turn_agent"] * len(gen_batch), dtype=object
@@ -385,13 +383,11 @@ class RolloutPromptManager:
             agent_loop_output_list=[None] * self.config.actor_rollout_ref.rollout.n,
             prompt_id=f"prompt_{uuid.uuid4()}",
             epoch=self.epoch,
-            param_version=self.current_param_version,   # finish param version
-            param_version_start=[],                     # len()=n, start param version
-            param_version_end=[],                       # len()=n, end param version
+            param_version=self.current_param_version,  # finish param version
+            param_version_start=[],  # len()=n, start param version
+            param_version_end=[],  # len()=n, end param version
             processing_times=[],
             tool_calls=[],
             rollout_status={},
             original_batch=original_batch,
         )
-
-

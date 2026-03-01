@@ -13,7 +13,6 @@
 # limitations under the License.
 import asyncio
 import logging
-import os
 import time
 from typing import Any, Optional, Sequence
 
@@ -21,10 +20,9 @@ import hydra
 import numpy as np
 import ray
 from omegaconf import DictConfig
-
+from recipe.partial_rollout.prompt_manager import RolloutPrompt
 from recipe.partial_rollout.vllm_rollout.vllm_async_server import PRv3vLLMReplica
-from recipe.partial_rollout.prompt_manager import RolloutPromptManager, RolloutPrompt
-from verl.single_controller.ray.base import RayResourcePool, RayWorkerGroup
+
 from verl.experimental.agent_loop.agent_loop import (
     AgentLoopManager,
     AgentLoopOutput,
@@ -34,10 +32,9 @@ from verl.experimental.agent_loop.agent_loop import (
     _agent_loop_registry,
     get_trajectory_info,
 )
-from verl.experimental.agent_loop.prometheus_utils import update_prometheus_config
-from verl.workers.rollout.replica import TokenOutput, get_rollout_replica_class
 from verl.protocol import DataProto
 from verl.single_controller.ray import RayWorkerGroup
+from verl.single_controller.ray.base import RayResourcePool, RayWorkerGroup
 from verl.utils.rollout_trace import (
     rollout_trace_attr,
     rollout_trace_op,
@@ -80,15 +77,20 @@ class PRv3AsyncLLMServerManager(AsyncLLMServerManager):
         return output
 
 
-
 @ray.remote
 class PRv3AgentLoopWorker(AgentLoopWorkerBase):
-    def __init__(self, config: DictConfig, server_handles: list[ray.actor.ActorHandle], reward_router_address: str = None, prompt_manager_handler: ray.actor.ActorHandle = None):
+    def __init__(
+        self,
+        config: DictConfig,
+        server_handles: list[ray.actor.ActorHandle],
+        reward_router_address: str = None,
+        prompt_manager_handler: ray.actor.ActorHandle = None,
+    ):
         self.server_manager = PRv3AsyncLLMServerManager(config, server_handles)
         super().__init__(config, server_handles, reward_router_address)
         self.cancellation_event = asyncio.Event()
         self.prompt_manager_handler = prompt_manager_handler
-    
+
     async def generate_sequences_async(self, batch: DataProto) -> bool:
         num_rollout_prompts = batch.batch.size(0) // self.config.actor_rollout_ref.rollout.n
         num_rollout_prompts = int(num_rollout_prompts * 1)
@@ -97,8 +99,7 @@ class PRv3AgentLoopWorker(AgentLoopWorkerBase):
         )
 
         running_set: set[asyncio.Task] = {
-            asyncio.create_task(self._generate_sequences_no_post(rp))
-            for rp in rollout_prompts
+            asyncio.create_task(self._generate_sequences_no_post(rp)) for rp in rollout_prompts
         }
 
         while running_set:
@@ -106,13 +107,11 @@ class PRv3AgentLoopWorker(AgentLoopWorkerBase):
             logger.info(f"[PRv3AgentLoopWorker] done: {len(done)}")
             for task in done:
                 running_set.remove(task)
-                
+
                 rollout_prompt, is_cancel = task.result()
                 logger.info(f"[PRv3AgentLoopWorker] generate_sequences_async: is_cancel: {is_cancel}")
-                ray.get(
-                    self.prompt_manager_handler.push_done_prompt.remote(rollout_prompt, is_cancel)
-                )
-                logger.info(f"[PRv3AgentLoopWorker] push_done_prompt done")
+                ray.get(self.prompt_manager_handler.push_done_prompt.remote(rollout_prompt, is_cancel))
+                logger.info("[PRv3AgentLoopWorker] push_done_prompt done")
 
                 if self.cancellation_event.is_set():
                     continue
@@ -120,14 +119,16 @@ class PRv3AgentLoopWorker(AgentLoopWorkerBase):
                 new_rollout_prompts: list[RolloutPrompt] = ray.get(
                     self.prompt_manager_handler.pull_pending_prompts.remote(1)
                 )
-                
+
                 running_set.update(
-                    asyncio.create_task(self._generate_sequences_no_post(new_rp))
-                    for new_rp in new_rollout_prompts
+                    asyncio.create_task(self._generate_sequences_no_post(new_rp)) for new_rp in new_rollout_prompts
                 )
         return "DONE"
 
-    async def _generate_sequences_no_post(self, rollout_prompt: RolloutPrompt,) -> tuple[RolloutPrompt, bool]:
+    async def _generate_sequences_no_post(
+        self,
+        rollout_prompt: RolloutPrompt,
+    ) -> tuple[RolloutPrompt, bool]:
         """Generate sequences from agent loop. (one rollout prompt with n rollout samples)
 
         Args:
@@ -152,7 +153,7 @@ class PRv3AgentLoopWorker(AgentLoopWorkerBase):
         if batch.meta_info.get("validate", False):
             sampling_params["top_p"] = config.val_kwargs.top_p
             sampling_params["temperature"] = config.val_kwargs.temperature
-        
+
         if "agent_name" not in batch.non_tensor_batch:
             batch.non_tensor_batch["agent_name"] = np.array(["single_turn_agent"] * len(batch), dtype=object)
 
@@ -201,7 +202,12 @@ class PRv3AgentLoopWorker(AgentLoopWorkerBase):
         return output
 
     async def _partial_run_agent_loop(
-        self, sampling_params: dict[str, Any], trajectory: dict[str, Any], *, agent_name: str, **kwargs,
+        self,
+        sampling_params: dict[str, Any],
+        trajectory: dict[str, Any],
+        *,
+        agent_name: str,
+        **kwargs,
     ) -> AgentLoopOutput:
         """Run agent loop for partial rollout (one sample within a prompt)"""
         # Completed, return directly
@@ -248,12 +254,13 @@ class PRv3AgentLoopWorker(AgentLoopWorkerBase):
         self.cancellation_event.clear()
 
 
-
-
 class PRv3AgentLoopManager(AgentLoopManager):
     def __init__(
-        self, config: DictConfig, worker_group: RayWorkerGroup = None, 
-        rm_resource_pool: RayResourcePool = None, prompt_manager_handler: ray.actor.ActorHandle = None,
+        self,
+        config: DictConfig,
+        worker_group: RayWorkerGroup = None,
+        rm_resource_pool: RayResourcePool = None,
+        prompt_manager_handler: ray.actor.ActorHandle = None,
     ):
         self.config = config
         self.worker_group = worker_group
@@ -294,7 +301,7 @@ class PRv3AgentLoopManager(AgentLoopManager):
                     ),
                 ).remote(self.config, self.server_handles, self.reward_router_address, self.prompt_manager_handler)
             )
-    
+
     def generate_sequences(self, prompts: DataProto) -> DataProto:
         """Split input batch and dispatch to agent loop workers."""
         self.wake_up()
@@ -331,12 +338,14 @@ class PRv3AgentLoopManager(AgentLoopManager):
             # 4. Cancel all AgentLoopWorker's generate_sequences_async task
             self.cancel()
             # 5. Wait for all AgentLoopWorker's generate_sequences_async task to return "DONE"
-            assert all(result == "DONE" for result in ray.get(worker_tasks)), "PRv3AgentLoopWorker generate sequences failed"
+            assert all(result == "DONE" for result in ray.get(worker_tasks)), (
+                "PRv3AgentLoopWorker generate sequences failed"
+            )
             # 6. Pull valid prompts from prompt manager
             is_full = ray.get(self.prompt_manager_handler.check_generation_post_state.remote(num_rollout_prompts))
             outputs = ray.get(self.prompt_manager_handler.pull_done_prompts.remote(num_rollout_prompts))
             outputs[0].meta_info["is_full"] = is_full
-        
+
         output = DataProto.concat(outputs)
 
         # Fix for Issue #4147: Always call sleep() to ensure proper cleanup
@@ -363,5 +372,3 @@ class PRv3AgentLoopManager(AgentLoopManager):
         self._run_all(rollout_resume_tasks)
         worker_resume_tasks = [worker.resume_agent_loops.remote() for worker in self.agent_loop_workers]
         ray.get(worker_resume_tasks)
-
-
