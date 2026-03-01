@@ -21,6 +21,8 @@ def _reset_proxy_state():
     proxy._paused = False
     proxy._in_flight = 0
     proxy._rr_counter = 0
+    proxy._resume_event = asyncio.Event()
+    proxy._resume_event.set()  # start unpaused
     yield
     proxy._paused = False
     proxy._in_flight = 0
@@ -148,10 +150,25 @@ async def test_generate_string_prompt(client):
 
 
 @pytest.mark.asyncio
-async def test_generate_returns_503_when_paused(client):
+async def test_generate_waits_when_paused(client):
+    """Requests arriving while paused wait for resume instead of failing."""
+    mock = _mock_client()
+    mock.post.return_value = httpx.Response(200, json={"choices": [{"text": "ok", "finish_reason": "stop", "logprobs": None}]})
+
     proxy._paused = True
-    resp = await client.post("/generate", json={"prompt": "hi", "max_tokens": 10})
-    assert resp.status_code == 503
+    proxy._resume_event.clear()
+
+    async def _resume_after_delay():
+        await asyncio.sleep(0.1)
+        proxy._paused = False
+        proxy._resume_event.set()
+
+    with patch.object(proxy, "_client", mock):
+        resume_task = asyncio.create_task(_resume_after_delay())
+        resp = await client.post("/generate", json={"prompt": "hi", "max_tokens": 10})
+        await resume_task
+
+    assert resp.status_code == 200
 
 
 @pytest.mark.asyncio
@@ -215,10 +232,25 @@ async def test_completions_no_include_stop_str(client):
 
 
 @pytest.mark.asyncio
-async def test_completions_returns_503_when_paused(client):
+async def test_completions_waits_when_paused(client):
+    """Completions requests wait for resume instead of failing."""
+    mock = _mock_client()
+    mock.post.return_value = httpx.Response(200, json={"choices": []})
+
     proxy._paused = True
-    resp = await client.post("/v1/completions", json={"model": "x", "prompt": "t", "max_tokens": 1})
-    assert resp.status_code == 503
+    proxy._resume_event.clear()
+
+    async def _resume_after_delay():
+        await asyncio.sleep(0.1)
+        proxy._paused = False
+        proxy._resume_event.set()
+
+    with patch.object(proxy, "_client", mock):
+        resume_task = asyncio.create_task(_resume_after_delay())
+        resp = await client.post("/v1/completions", json={"model": "x", "prompt": "t", "max_tokens": 1})
+        await resume_task
+
+    assert resp.status_code == 200
 
 
 # ---------------------------------------------------------------------------
@@ -248,16 +280,28 @@ async def test_chat_completions_forwards(client):
 
 
 @pytest.mark.asyncio
-async def test_chat_completions_returns_503_when_paused(client):
+async def test_chat_completions_waits_when_paused(client):
+    """Chat completions requests wait for resume instead of failing."""
+    mock = _mock_client()
+    mock.post.return_value = httpx.Response(200, json={"choices": [{"message": {"content": "hi"}}]})
+
     proxy._paused = True
-    resp = await client.post(
-        "/v1/chat/completions",
-        json={
-            "model": "x",
-            "messages": [{"role": "user", "content": "t"}],
-        },
-    )
-    assert resp.status_code == 503
+    proxy._resume_event.clear()
+
+    async def _resume_after_delay():
+        await asyncio.sleep(0.1)
+        proxy._paused = False
+        proxy._resume_event.set()
+
+    with patch.object(proxy, "_client", mock):
+        resume_task = asyncio.create_task(_resume_after_delay())
+        resp = await client.post(
+            "/v1/chat/completions",
+            json={"model": "x", "messages": [{"role": "user", "content": "t"}]},
+        )
+        await resume_task
+
+    assert resp.status_code == 200
 
 
 # ---------------------------------------------------------------------------
@@ -266,24 +310,42 @@ async def test_chat_completions_returns_503_when_paused(client):
 
 
 @pytest.mark.asyncio
-async def test_pause_blocks_new_requests(client):
-    """After POST /pause, new generation requests get 503."""
+async def test_pause_and_resume_lifecycle(client):
+    """After POST /pause, requests wait. After POST /resume, they proceed."""
+    mock = _mock_client()
+    mock.post.return_value = httpx.Response(200, json={"choices": [{"text": "ok", "finish_reason": "stop", "logprobs": None}]})
+
     resp = await client.post("/pause")
     assert resp.status_code == 200
     assert resp.json()["status"] == "paused"
+    assert proxy._paused is True
+    assert not proxy._resume_event.is_set()
 
-    resp = await client.post("/generate", json={"prompt": "hi", "max_tokens": 10})
-    assert resp.status_code == 503
+    # request should wait, not fail — resume after a short delay
+    async def _resume_after_delay():
+        await asyncio.sleep(0.1)
+        await client.post("/resume")
+
+    with patch.object(proxy, "_client", mock):
+        resume_task = asyncio.create_task(_resume_after_delay())
+        resp = await client.post("/generate", json={"prompt": "hi", "max_tokens": 10})
+        await resume_task
+
+    assert resp.status_code == 200
+    assert proxy._paused is False
+    assert proxy._resume_event.is_set()
 
 
 @pytest.mark.asyncio
 async def test_resume_allows_requests(client):
     """After POST /resume, requests work again."""
     proxy._paused = True
+    proxy._resume_event.clear()
     resp = await client.post("/resume")
     assert resp.status_code == 200
     assert resp.json()["status"] == "resumed"
     assert proxy._paused is False
+    assert proxy._resume_event.is_set()
 
 
 @pytest.mark.asyncio
@@ -302,6 +364,25 @@ async def test_drain_waits_for_in_flight(client):
     assert resp.json()["drained"] is True
     assert proxy._in_flight == 0
     await task
+
+
+@pytest.mark.asyncio
+async def test_drain_timeout_self_recovers(client):
+    """If drain times out, proxy resumes itself to avoid permanent hang."""
+    proxy._in_flight = 1  # simulate stuck request that never completes
+    original_timeout = proxy._DRAIN_TIMEOUT
+    proxy._DRAIN_TIMEOUT = 0.1  # short timeout for testing
+
+    resp = await client.post("/pause")
+    assert resp.status_code == 504
+    assert resp.json()["status"] == "timeout"
+
+    # proxy must self-recover — not stay permanently paused
+    assert proxy._paused is False
+    assert proxy._resume_event.is_set()
+
+    proxy._DRAIN_TIMEOUT = original_timeout
+    proxy._in_flight = 0
 
 
 # ---------------------------------------------------------------------------

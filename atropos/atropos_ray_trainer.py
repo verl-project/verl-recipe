@@ -260,83 +260,88 @@ class RayAtroposTrainer(RayPPOTrainer):
                     resp.raise_for_status()
                     print(f"proxy paused: {resp.json()}")
 
-                # ensure replicas are in training mode before forward passes
-                self.checkpoint_manager.sleep_replicas()
+                try:
+                    # ensure replicas are in training mode before forward passes
+                    self.checkpoint_manager.sleep_replicas()
 
-                # step 3: compute old_log_probs
-                with marked_timer("old_log_prob", timing_raw, "blue"):
-                    old_log_prob, old_log_prob_mfu = self._compute_old_log_prob(batch)
-                    entropys = old_log_prob.batch["entropys"]
-                    response_masks = batch.batch["response_mask"]
-                    actor_config = self.config.actor_rollout_ref.actor
-                    entropy_agg = agg_loss(
-                        loss_mat=entropys,
-                        loss_mask=response_masks,
-                        loss_agg_mode=actor_config.loss_agg_mode,
-                        loss_scale_factor=actor_config.loss_scale_factor,
-                    )
-                    metrics.update(
-                        {
-                            "actor/entropy": entropy_agg.detach().item(),
-                            "perf/mfu/actor_infer": old_log_prob_mfu,
-                        }
-                    )
-                    old_log_prob.batch.pop("entropys")
-                    batch = batch.union(old_log_prob)
-
-                # step 4: compute ref_log_probs if needed
-                if self.use_reference_policy:
-                    with marked_timer("ref", timing_raw, "olive"):
-                        ref_log_prob = self._compute_ref_log_prob(batch)
-                        batch = batch.union(ref_log_prob)
-
-                # steps 5-6: apply KL penalty and compute advantages
-                with marked_timer("adv", timing_raw, "brown"):
-                    batch.batch["token_level_scores"] = batch.batch["token_level_rewards"].clone()
-
-                    if self.config.algorithm.use_kl_in_reward:
-                        batch, kl_metrics = apply_kl_penalty(
-                            batch, kl_ctrl=self.kl_ctrl_in_reward, kl_penalty=self.config.algorithm.kl_penalty
+                    # step 3: compute old_log_probs
+                    with marked_timer("old_log_prob", timing_raw, "blue"):
+                        old_log_prob, old_log_prob_mfu = self._compute_old_log_prob(batch)
+                        entropys = old_log_prob.batch["entropys"]
+                        response_masks = batch.batch["response_mask"]
+                        actor_config = self.config.actor_rollout_ref.actor
+                        entropy_agg = agg_loss(
+                            loss_mat=entropys,
+                            loss_mask=response_masks,
+                            loss_agg_mode=actor_config.loss_agg_mode,
+                            loss_scale_factor=actor_config.loss_scale_factor,
                         )
-                        metrics.update(kl_metrics)
-                    else:
-                        batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
+                        metrics.update(
+                            {
+                                "actor/entropy": entropy_agg.detach().item(),
+                                "perf/mfu/actor_infer": old_log_prob_mfu,
+                            }
+                        )
+                        old_log_prob.batch.pop("entropys")
+                        batch = batch.union(old_log_prob)
 
-                    norm_adv_by_std_in_grpo = self.config.algorithm.get("norm_adv_by_std_in_grpo", True)
-                    batch = compute_advantage(
-                        batch,
-                        adv_estimator=self.config.algorithm.adv_estimator,
-                        gamma=self.config.algorithm.gamma,
-                        lam=self.config.algorithm.lam,
-                        num_repeat=self.config.actor_rollout_ref.rollout.n,
-                        norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
-                    )
+                    # step 4: compute ref_log_probs if needed
+                    if self.use_reference_policy:
+                        with marked_timer("ref", timing_raw, "olive"):
+                            ref_log_prob = self._compute_ref_log_prob(batch)
+                            batch = batch.union(ref_log_prob)
 
-                # step 7: update actor
-                with marked_timer("update_actor", timing_raw, "red"):
-                    actor_output = self._update_actor(batch)
+                    # steps 5-6: apply KL penalty and compute advantages
+                    with marked_timer("adv", timing_raw, "brown"):
+                        batch.batch["token_level_scores"] = batch.batch["token_level_rewards"].clone()
 
-                actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
-                metrics.update(actor_output_metrics)
+                        if self.config.algorithm.use_kl_in_reward:
+                            batch, kl_metrics = apply_kl_penalty(
+                                batch, kl_ctrl=self.kl_ctrl_in_reward, kl_penalty=self.config.algorithm.kl_penalty
+                            )
+                            metrics.update(kl_metrics)
+                        else:
+                            batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
 
-                gradient_norm = metrics.get("actor/grad_norm", None)
-                metrics.update(compute_variance_proxy_metrics(batch=batch, gradient_norm=gradient_norm))
+                        norm_adv_by_std_in_grpo = self.config.algorithm.get("norm_adv_by_std_in_grpo", True)
+                        batch = compute_advantage(
+                            batch,
+                            adv_estimator=self.config.algorithm.adv_estimator,
+                            gamma=self.config.algorithm.gamma,
+                            lam=self.config.algorithm.lam,
+                            num_repeat=self.config.actor_rollout_ref.rollout.n,
+                            norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+                        )
 
-                # step 8: save checkpoint (for persistence only, not weight sync)
-                if self.config.trainer.save_freq > 0 and (
-                    is_last_step or self.global_steps % self.config.trainer.save_freq == 0
-                ):
-                    with marked_timer("save_checkpoint", timing_raw, "green"):
-                        self._save_checkpoint()
+                    # step 7: update actor
+                    with marked_timer("update_actor", timing_raw, "red"):
+                        actor_output = self._update_actor(batch)
 
-                # sync weights to internal vLLM (wakes from sleep, zero-copy on naive backend)
-                with marked_timer("update_weights", timing_raw, "red"):
-                    self.checkpoint_manager.update_weights()
+                    actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
+                    metrics.update(actor_output_metrics)
 
-                # resume proxy so the env can start generating with the new weights
-                if _proxy_client:
-                    resp = _proxy_client.post(f"{proxy_url}/resume")
-                    resp.raise_for_status()
+                    gradient_norm = metrics.get("actor/grad_norm", None)
+                    metrics.update(compute_variance_proxy_metrics(batch=batch, gradient_norm=gradient_norm))
+
+                    # step 8: save checkpoint (for persistence only, not weight sync)
+                    if self.config.trainer.save_freq > 0 and (
+                        is_last_step or self.global_steps % self.config.trainer.save_freq == 0
+                    ):
+                        with marked_timer("save_checkpoint", timing_raw, "green"):
+                            self._save_checkpoint()
+
+                    # sync weights to internal vLLM (wakes from sleep, zero-copy on naive backend)
+                    with marked_timer("update_weights", timing_raw, "red"):
+                        self.checkpoint_manager.update_weights()
+                finally:
+                    # always resume proxy — if training crashes mid-step, requests
+                    # waiting on _resume_event.wait() would hang forever without this
+                    if _proxy_client:
+                        try:
+                            resp = _proxy_client.post(f"{proxy_url}/resume")
+                            resp.raise_for_status()
+                        except Exception as e:
+                            print(f"WARNING: failed to resume proxy: {e}")
 
             # step 9: collect and log metrics
             metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))

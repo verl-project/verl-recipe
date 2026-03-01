@@ -8,6 +8,8 @@ Handles three request formats used across all atropos environments:
 Drain support: the trainer calls POST /pause before sleeping vLLM and POST /resume
 after waking it. /pause stops accepting new requests and waits for in-flight ones
 to complete, preventing CUDA errors from freed GPU memory during active generation.
+Requests arriving while paused wait for the resume signal instead of failing
+immediately, allowing eval and async generation to survive training pauses.
 
 With multiple backend URLs (multi-GPU DP mode), requests are round-robined across
 all vLLM servers so every GPU participates in generation.
@@ -37,6 +39,7 @@ _client: httpx.AsyncClient | None = None
 _paused: bool = False
 _in_flight: int = 0
 _DRAIN_TIMEOUT: float = 300.0
+_resume_event: asyncio.Event | None = None
 
 
 def _next_backend() -> str:
@@ -49,8 +52,10 @@ def _next_backend() -> str:
 
 @asynccontextmanager
 async def lifespan(app):
-    global _client
+    global _client, _resume_event
     _client = httpx.AsyncClient(timeout=httpx.Timeout(300, connect=10))
+    _resume_event = asyncio.Event()
+    _resume_event.set()  # start unpaused
     yield
     await _client.aclose()
 
@@ -79,7 +84,7 @@ async def generate(request: Request):
     """Translate atropos /generate -> /v1/completions, translate response back."""
     global _in_flight
     if _paused:
-        return Response(status_code=503)
+        await _resume_event.wait()
     _in_flight += 1
     try:
         data = await request.json()
@@ -145,7 +150,7 @@ async def v1_completions(request: Request):
     """Forward OpenAI-format completions requests with model name override."""
     global _in_flight
     if _paused:
-        return Response(status_code=503)
+        await _resume_event.wait()
     _in_flight += 1
     try:
         data = await request.json()
@@ -170,7 +175,7 @@ async def v1_chat_completions(request: Request):
     """
     global _in_flight
     if _paused:
-        return Response(status_code=503)
+        await _resume_event.wait()
     _in_flight += 1
     try:
         data = await request.json()
@@ -193,9 +198,14 @@ async def pause():
     """
     global _paused
     _paused = True
+    _resume_event.clear()
     deadline = asyncio.get_running_loop().time() + _DRAIN_TIMEOUT
     while _in_flight > 0:
         if asyncio.get_running_loop().time() > deadline:
+            # self-recover so the proxy doesn't stay permanently paused
+            # if the trainer crashes after receiving the 504
+            _paused = False
+            _resume_event.set()
             return JSONResponse(
                 {"status": "timeout", "in_flight": _in_flight},
                 status_code=504,
@@ -209,6 +219,7 @@ async def resume():
     """Resume accepting requests. Called by the trainer after update_weights()."""
     global _paused
     _paused = False
+    _resume_event.set()
     return JSONResponse({"status": "resumed"})
 
 
