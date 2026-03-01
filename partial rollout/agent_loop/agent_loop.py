@@ -307,13 +307,13 @@ class PRv3AgentLoopManager(AgentLoopManager):
         if self.reward_model_manager:
             self.reward_model_manager.wake_up()
 
-        chunkes = prompts.chunk(len(self.agent_loop_workers))
+        chunks = prompts.chunk(len(self.agent_loop_workers))
         if prompts.meta_info.get("validate", False):
             self.resume()
             outputs = ray.get(
                 [
                     worker.generate_sequences.remote(chunk)
-                    for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
+                    for worker, chunk in zip(self.agent_loop_workers, chunks, strict=True)
                 ]
             )
             # In sync rollout mode, no need to call cancel()
@@ -325,7 +325,7 @@ class PRv3AgentLoopManager(AgentLoopManager):
             # 2. Launch all AgentLoopWorker's generate_sequences_async task
             worker_tasks = [
                 worker.generate_sequences_async.remote(chunk)
-                for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
+                for worker, chunk in zip(self.agent_loop_workers, chunks, strict=True)
             ]
             # 3. Monitor generation (if cache containing `num_rollout_prompts` or dataloader is exhausted, return)
             while True:

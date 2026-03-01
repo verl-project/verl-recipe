@@ -3,7 +3,7 @@ set -x
 DATE_TIME=$(date +%Y%m%d_%H%M%S)
 
 project_name='verl_exp_partial_rollout_gsm8k'
-exp_name="v070-qwen3-4b-gsm8k-pr-grpo-bs128-${DATE_TIME}"
+exp_name="v070-qwen3-4b-gsm8k-nopr-grpo-bs128-${DATE_TIME}"
 
 # Paths
 RAY_DATA_HOME=/apdcephfs_gy2/share_303055091/allenzpma_tmp
@@ -15,14 +15,10 @@ LOG_PATH="${RAY_DATA_HOME}/partial_rollout/output/logs"
 
 NNODES=1
 NGPUS_PER_NODE=8
-MICRO_BATCH_SIZE_PER_GPU=8
 
 export RAY_DEBUG=1
 export HYDRA_FULL_ERROR=1
 export VERL_LOGGING_LEVEL=INFO
-export http_proxy=http://star-proxy.oa.com:3128
-export https_proxy=http://star-proxy.oa.com:3128
-export SWANLAB_API_KEY=7a3mP8NZpdryp1nldFtWd
 
 # For async rollout mode, dataset should return raw chat.
 rollout_mode="async" # sync or async，async会单独判断
@@ -33,8 +29,8 @@ if [ "$rollout_mode" = "async" ]; then
     return_raw_chat="True"
 fi
 
-python3 -m recipe.partial_rollout.main_ppo \
-    --config-path=../../verl/trainer/config \
+python3 -m verl.trainer.main_ppo \
+    --config-path=config \
     algorithm.adv_estimator=grpo \
     data.train_files="${TRAIN_FILE}" \
     data.val_files="${TEST_FILE}" \

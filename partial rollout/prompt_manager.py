@@ -189,7 +189,6 @@ def assemble_batch_from_rollout_prompts(
 
     except Exception as e:
         logger.error(f"[BatchUtils] Batch assembly failed: {e}")
-        breakpoint()
         raise e
 
     return final_batch
@@ -312,7 +311,6 @@ class RolloutPromptManager:
             self.ongoing_set.remove(rollout_prompt.prompt_id)
         except Exception as e:
             logger.error(f"[RolloutPromptManager] push_done_prompt: {e}")
-            breakpoint()
 
     def pull_pending_prompts(self, num_rollout_prompts: int) -> list[RolloutPrompt]:
         """Pull pending prompts from the rollout prompt manager."""
@@ -341,7 +339,6 @@ class RolloutPromptManager:
 
         except Exception as e:
             logger.error(f"[RolloutPromptManager] pull_pending_prompts: {e}")
-            breakpoint()
 
         return pending_prompts
 
