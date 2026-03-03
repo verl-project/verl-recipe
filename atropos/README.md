@@ -54,7 +54,7 @@ Any Atropos environment that pushes `ScoredData` to the trajectory API works out
 ### Prerequisites
 
 ```bash
-pip install verl httpx
+pip install verl[vllm,atropos]
 pip install git+https://github.com/NousResearch/atropos.git
 ```
 

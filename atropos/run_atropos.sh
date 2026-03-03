@@ -14,7 +14,7 @@
 # weight transfer to internal vLLM every step. zero-copy on naive backend.
 #
 # prerequisites:
-#   pip install verl httpx git+https://github.com/NousResearch/atropos.git
+#   pip install verl[vllm,atropos] git+https://github.com/NousResearch/atropos.git
 #
 # usage:
 #   bash recipe/atropos/run_atropos.sh
@@ -37,7 +37,7 @@ TOTAL_STEPS="${TOTAL_STEPS:-50}"
 ATROPOS_DIR="${ATROPOS_DIR:-../atropos}"
 READY_FILE="/tmp/verl_atropos_ready"
 TOTAL_SEQS=$((BATCH_SIZE * GROUP_SIZE))
-PPO_MICRO_BATCH_SIZE="${PPO_MICRO_BATCH_SIZE:-${TOTAL_SEQS}}"
+MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-${TOTAL_SEQS}}"
 MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-512}"
 MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-1536}"
 MAX_MODEL_LEN=$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))
@@ -94,10 +94,10 @@ python3 -m recipe.atropos.main_atropos \
     actor_rollout_ref.rollout.gpu_memory_utilization="${GPU_MEM_UTIL}" \
     actor_rollout_ref.rollout.enforce_eager=true \
     actor_rollout_ref.rollout.max_model_len="${MAX_MODEL_LEN}" \
-    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu="${PPO_MICRO_BATCH_SIZE}" \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu="${MICRO_BATCH_SIZE}" \
     actor_rollout_ref.actor.optim.lr="${LR}" \
     actor_rollout_ref.actor.ppo_mini_batch_size="${TOTAL_SEQS}" \
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu="${PPO_MICRO_BATCH_SIZE}" \
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu="${MICRO_BATCH_SIZE}" \
     actor_rollout_ref.actor.fsdp_config.param_offload="${PARAM_OFFLOAD}" \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload="${OPTIMIZER_OFFLOAD}" \
     actor_rollout_ref.actor.grad_clip="${GRAD_CLIP}" \
@@ -112,6 +112,7 @@ python3 -m recipe.atropos.main_atropos \
     atropos.poll_timeout=900 \
     atropos.ready_file="${READY_FILE}" \
     atropos.proxy_url="http://localhost:${PROXY_PORT}" \
+    atropos.proxy_drain_timeout=300 \
     'trainer.logger=["console","wandb"]' \
     trainer.project_name=verl-atropos \
     trainer.experiment_name="${MODEL##*/}_${ATROPOS_ENV}_grpo" > /tmp/trainer.log 2>&1 &
@@ -147,7 +148,9 @@ echo "=== Step 3: Starting generate proxy on port ${PROXY_PORT} ==="
 python3 -m recipe.atropos.generate_proxy \
     --backend-url "${BACKEND_URLS}" \
     --model "${MODEL}" \
-    --port "${PROXY_PORT}" > /tmp/proxy.log 2>&1 &
+    --port "${PROXY_PORT}" \
+    --drain-timeout 300 \
+    --generation-timeout 300 > /tmp/proxy.log 2>&1 &
 PROXY_PID=$!
 PIDS+=($PROXY_PID)
 

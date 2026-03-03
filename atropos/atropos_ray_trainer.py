@@ -154,16 +154,19 @@ class RayAtroposTrainer(RayPPOTrainer):
         api_url = atropos_cfg.get("api_url", "http://localhost:8000")
         poll_timeout = atropos_cfg.get("poll_timeout", 300)
         proxy_url = atropos_cfg.get("proxy_url", None)
+        drain_timeout = atropos_cfg.get("proxy_drain_timeout", 300)
         client = AtroposClient(api_url=api_url)
 
         # sync client for pause/resume calls to the generate proxy.
         # the trainer must drain in-flight requests before sleeping vLLM,
         # otherwise active CUDA operations crash when GPU memory is freed.
+        # httpx timeout = drain_timeout + 10s headroom so the proxy always
+        # responds (with 504 on timeout) before the client gives up.
         _proxy_client = None
         if proxy_url:
             import httpx
 
-            _proxy_client = httpx.Client(timeout=httpx.Timeout(310, connect=10))
+            _proxy_client = httpx.Client(timeout=httpx.Timeout(drain_timeout + 10, connect=10))
 
         max_prompt_length = self.config.data.max_prompt_length
         max_response_length = self.config.data.max_response_length
