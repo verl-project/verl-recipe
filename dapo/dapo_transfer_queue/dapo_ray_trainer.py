@@ -41,21 +41,23 @@ from verl.utils.seqlen_balancing import (
     log_seqlen_unbalance,
 )
 
-from recipe.transfer_queue.ray_trainer import (
+from verl.trainer.ppo.ray_trainer import (
     AdvantageEstimator,
     RayPPOTrainer,
+    ResourcePoolManager,
     apply_kl_penalty,
     compute_advantage,
-    compute_data_metrics_decorated,
-    compute_reward_decorated,
     compute_response_mask,
-    compute_throughout_metrics_decorated,
-    compute_timing_metrics_decorated,
-    compute_val_reward_decorated,
 )
+from verl.trainer.ppo.metric_utils import (
+    compute_data_metrics,
+    compute_throughout_metrics,
+    compute_timing_metrics,
+)
+from verl.trainer.ppo.reward import compute_reward
 
 
-class RayDAPOTrainerTQ(RayPPOTrainer):
+class RayDAPOTrainer(RayPPOTrainer):
     """
     DAPO trainer using TransferQueue: data flow uses BatchMeta and tq_client;
     fit() implements DAPO loop (multiple gen batches per step when filter_groups, etc.).
@@ -278,8 +280,13 @@ class RayDAPOTrainerTQ(RayPPOTrainer):
                                 compute_reward_fields.append(optional_field)
                         compute_reward_meta = batch_meta.select_fields(compute_reward_fields)
 
-                        reward_tensor, reward_extra_infos_dict = compute_reward_decorated(
-                            compute_reward_meta, self.reward_fn
+                        # Get data from BatchMeta for compute_reward
+                        compute_reward_data = self.tq_client.get_data(compute_reward_meta)
+                        compute_reward_proto = DataProto.from_tensordict(
+                            compute_reward_data, meta_info=compute_reward_meta.extra_info.copy()
+                        )
+                        reward_tensor, reward_extra_infos_dict = compute_reward(
+                            compute_reward_proto, self.reward_fn
                         )
                         batch_meta = batch_meta.union(compute_reward_meta)
                         reward_td = TensorDict(
@@ -627,24 +634,30 @@ class RayDAPOTrainerTQ(RayPPOTrainer):
                     prev_step_profile = curr_step_profile
                     curr_step_profile = next_step_profile
 
-                metrics.update(
-                    compute_data_metrics_decorated(batch=update_batch_meta, use_critic=self.use_critic)
+                # Get data from BatchMeta for compute_data_metrics
+                update_batch_data = self.tq_client.get_data(update_batch_meta)
+                update_batch_proto = DataProto.from_tensordict(
+                    update_batch_data, meta_info=update_batch_meta.extra_info.copy()
                 )
                 metrics.update(
-                    compute_timing_metrics_decorated(
-                        batch=update_batch_meta, timing_raw=timing_raw
+                    compute_data_metrics(batch=update_batch_proto, use_critic=self.use_critic)
+                )
+                metrics.update(
+                    compute_timing_metrics(
+                        batch=update_batch_proto, timing_raw=timing_raw
                     )
                 )
                 n_gpus = self.resource_pool_manager.get_n_gpus()
-                compute_throughout_metrics_meta = BatchMeta(
-                    samples=[],
-                    extra_info={
+                # Create a dummy DataProto for compute_throughout_metrics
+                compute_throughout_metrics_proto = DataProto.from_tensordict(
+                    TensorDict({}, batch_size=[]),
+                    meta_info={
                         "global_token_num": update_batch_meta.get_extra_info("global_token_num")
                     },
                 )
                 metrics.update(
-                    compute_throughout_metrics_decorated(
-                        batch=compute_throughout_metrics_meta,
+                    compute_throughout_metrics(
+                        batch=compute_throughout_metrics_proto,
                         timing_raw=timing_raw,
                         n_gpus=n_gpus,
                     )

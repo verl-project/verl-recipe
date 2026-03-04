@@ -13,7 +13,7 @@
 # limitations under the License.
 """
 DAPO with TransferQueue: main entry sets TRANSFER_QUEUE_ENABLE and uses
-RayDAPOTrainerTQ (extends recipe.transfer_queue.ray_trainer.RayPPOTrainer).
+RayDAPOTrainer (extends recipe.transfer_queue.ray_trainer.RayPPOTrainer).
 """
 
 import os
@@ -29,7 +29,7 @@ from verl.utils.config import validate_config
 from verl.utils.device import auto_set_ascend_device_name, is_cuda_available
 from verl.utils.fs import copy_to_local
 
-from .dapo_ray_trainer import RayDAPOTrainerTQ
+from .dapo_ray_trainer import RayDAPOTrainer
 
 @hydra.main(config_path="config", config_name="dapo_transfer_queue_trainer", version_base=None)
 def main(config):
@@ -105,7 +105,7 @@ class TaskRunner:
         else:
             raise NotImplementedError
 
-        from recipe.transfer_queue.ray_trainer import ResourcePoolManager
+        from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 
         role_worker_mapping = {
             Role.ActorRollout: ray.remote(AsyncActorRolloutRefWorker),
@@ -158,7 +158,7 @@ class TaskRunner:
             use_critic=need_critic(config),
         )
 
-        trainer = RayDAPOTrainerTQ(
+        trainer = RayDAPOTrainer(
             config=config,
             tokenizer=tokenizer,
             processor=processor,
