@@ -6,8 +6,8 @@
 
 | 路径 | 说明 |
 |------|------|
-| `main_dapo.py` | 入口：Hydra 加载 `dapo_transfer_queue_trainer`，设置 `TRANSFER_QUEUE_ENABLE=1`，创建 `RayDAPOTrainerTQ` 并执行 `fit()` |
-| `dapo_ray_trainer.py` | `RayDAPOTrainerTQ` 实现：继承 `recipe.transfer_queue.ray_trainer.RayPPOTrainer`，重写 `compute_kl_related_metrics` 与 `fit()` |
+| `main_dapo.py` | 入口：Hydra 加载 `dapo_transfer_queue_trainer`，设置 `TRANSFER_QUEUE_ENABLE=1`，创建 `RayDAPOTrainer` 并执行 `fit()` |
+| `dapo_ray_trainer.py` | `RayDAPOTrainer` 实现：继承 `verl.trainer.ppo.ray_trainer.RayPPOTrainer`，重写 `compute_kl_related_metrics` 与 `fit()` |
 | `config/dapo_transfer_queue_trainer.yaml` | 主配置：继承 `ppo_trainer`，DAPO 数据/奖励/algorithm 配置 + TransferQueue 开关与存储参数 |
 | `config/dapo_transfer_queue_quickstart.yaml` | 快速开始配置：继承 `dapo_transfer_queue_trainer`，少量 step、仅 console 日志 |
 | `30B_megatron_dapo_npu.sh` | 示例脚本：30B Megatron + NPU 上以 `ray job submit` 提交 DAPO+TQ 任务（含 filter_groups、GRPO 等） |
@@ -44,7 +44,7 @@ python3 -m recipe.dapo_transfer_queue.main_dapo \
 
 ## 与 DAPO / TransferQueue 的关系
 
-- **基类**：`RayDAPOTrainerTQ` 继承自 `recipe.transfer_queue.ray_trainer.RayPPOTrainer`（带 TransferQueue 的 PPO Trainer），具备 TQ 的初始化（Controller、Storage、tq_client）、BatchMeta 流转和 tqbridge 等能力。
+- **基类**：`RayDAPOTrainer` 继承自 `verl.trainer.ppo.ray_trainer.RayPPOTrainer`（带 TransferQueue 的 PPO Trainer），具备 TQ 的初始化（Controller、Storage、tq_client）、BatchMeta 流转和 tqbridge 等能力。
 - **覆盖逻辑**：
   - **compute_kl_related_metrics(batch_meta, metrics, timing_raw)**：基于 BatchMeta 和 tq_client 计算 response_mask、old_log_prob、ref_log_prob，返回更新后的 BatchMeta。
   - **fit()**：实现 DAPO 训练循环；每个 dataloader batch 先 put 到 TQ → generate → reward，按需做 KL 相关；若启用 filter_groups 则在 Driver 侧 get_data 后做过滤与累积，满足条件后将合并 batch 再 put 回 TQ 作为“更新用” batch_meta，再做 balance、values、advantage、update_critic、update_actor；步骤结束时对用过的 gen/update batch_meta 做 clear_samples。

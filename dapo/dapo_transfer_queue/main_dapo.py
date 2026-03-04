@@ -13,7 +13,7 @@
 # limitations under the License.
 """
 DAPO with TransferQueue: main entry sets TRANSFER_QUEUE_ENABLE and uses
-RayDAPOTrainer (extends recipe.transfer_queue.ray_trainer.RayPPOTrainer).
+RayDAPOTrainer (extends verl.trainer.ppo.ray_trainer.RayPPOTrainer).
 """
 
 import os
