@@ -93,12 +93,15 @@ rollout_token_veto_threshold=null
 ################################################### start of config ###################################################
 
 FP8=(
-    +actor_rollout_ref.actor.megatron.override_transformer_config.fp8="e4m3"
+    # According to our experiments, hybrid recipe works better than e4m3 and trains more stably
+    +actor_rollout_ref.actor.megatron.override_transformer_config.fp8="hybrid"
     +actor_rollout_ref.actor.megatron.override_transformer_config.fp8_recipe="blockwise"
     +actor_rollout_ref.actor.optim.override_optimizer_config.fp8_recipe="blockwise"
     +actor_rollout_ref.rollout.quantization=fp8
 
-    +actor_rollout_ref.actor.megatron.override_transformer_config.moe_router_dtype=fp32
+    # Since Qwen3 MoE in vLLM uses a bf16 router, we don't set it to fp32 in MCore.
+    # We have tried fp32 routers in both vLLM and MCore; it doesn't seem to bring any accuracy improvement.
+    # +actor_rollout_ref.actor.megatron.override_transformer_config.moe_router_dtype=fp32
     +actor_rollout_ref.actor.megatron.override_transformer_config.attention_dropout=0.0
     +actor_rollout_ref.actor.megatron.override_transformer_config.hidden_dropout=0.0
 )
@@ -199,6 +202,7 @@ TRAINER=(
     trainer.default_local_dir="${CKPTS_DIR}"
     trainer.resume_mode=auto
     trainer.log_val_generations=2
+    trainer.use_legacy_worker_impl="disable"
 )
 
 FORWARD_ONLY_SETS=(

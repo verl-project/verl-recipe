@@ -5,6 +5,9 @@ This directory collects RL training recipes that leverage low-precision (FP8) co
 - **FP8 End-to-End**: Both training and rollout inference run in FP8.
 - **FP8 Rollout Only**: Training in BF16, rollout inference quantized to FP8.
 
+> [!TIP]
+> For detailed implementation notes, benchmark results, and parameter references, see the [verl FP8 documentation](https://verl.readthedocs.io/en/latest/advance/fp8.html).
+
 ## Data Preparation
 
 All scripts in this directory use the same datasets as the DAPO recipe. Please follow the [DAPO data preparation instructions](../dapo/README.md#quickstart) to run `prepare_dapo_data.sh` before launching any training.
@@ -23,7 +26,7 @@ Please refer to the [verl multinode training documentation](https://verl.readthe
 - **Training backend**: Megatron + Megatron-Bridge
 - **Min hardware**: 2 nodes × 8 GPUs (H100), CUDA 12.9+
 - **Docker image**: `verlai/verl:vllm012.latest`
-- **Verified verl commit**: `6f4942b`
+- **Verified verl commit**: `4849643d`
 
 **Required environment variables:**
 
@@ -36,14 +39,14 @@ Please refer to the [verl multinode training documentation](https://verl.readthe
 ```yaml
 # FP8 training via Transformer Engine
 actor_rollout_ref.actor.megatron.override_transformer_config:
-  fp8: "e4m3"            # FP8 in both forward and backward, support hybrid and e4m3
+  fp8: "hybrid"            # FP8 in both forward and backward, support hybrid and e4m3
   fp8_recipe: "blockwise"  # block-wise scaling (requires CUDA 12.9+)
 
 # FP8 optimizer
 actor_rollout_ref.actor.optim.override_optimizer_config:
   fp8_recipe: "blockwise"
 
-# FP8 rollout inference (vLLM)
+# FP8 rollout
 actor_rollout_ref.rollout:
   quantization: fp8
 ```
