@@ -53,6 +53,19 @@ actor_rollout_ref.rollout:
 
 ## FP8 Rollout Only
 
-> Coming soon.
-
 FP8 rollout-only recipes apply FP8 quantization during rollout inference while keeping BF16 for training. This reduces GPU memory usage during generation without modifying the training precision.
+
+### Qwen3-30B-A3B (FSDP)
+
+- **Script**: [run_dapo_qwen3_moe_30b_fsdp_fp8_rollout.sh](./run_dapo_qwen3_moe_30b_fsdp_fp8_rollout.sh)
+- **Training backend**: FSDP
+- **Min hardware**: 2 nodes × 8 GPUs (H100)
+- **Rollout**: vLLM (async, FP8 quantized)
+
+**FP8 configuration highlights:**
+
+```yaml
+# Only rollout uses FP8; training remains BF16
+actor_rollout_ref.rollout:
+  quantization: fp8
+```
