@@ -14,7 +14,8 @@
 # weight transfer to internal vLLM every step. zero-copy on naive backend.
 #
 # prerequisites:
-#   pip install verl[vllm,atropos] git+https://github.com/NousResearch/atropos.git
+#   pip install verl[vllm,atropos]
+#   git clone https://github.com/NousResearch/atropos.git && cd atropos && pip install -e .
 #
 # usage:
 #   bash recipe/atropos/run_atropos.sh

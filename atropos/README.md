@@ -55,10 +55,9 @@ Any Atropos environment that pushes `ScoredData` to the trajectory API works out
 
 ```bash
 pip install verl[vllm,atropos]
-pip install git+https://github.com/NousResearch/atropos.git
+git clone https://github.com/NousResearch/atropos.git
+cd atropos && pip install -e .
 ```
-
-Clone the [Atropos repo](https://github.com/NousResearch/atropos) for the environment servers.
 
 ### Run training
 
@@ -90,7 +89,7 @@ N_GPUS=4 MODEL=Qwen/Qwen3-8B BATCH_SIZE=16 GROUP_SIZE=8 \
 | `GROUP_SIZE` | `4` | Responses per prompt (GRPO group size) |
 | `TOTAL_STEPS` | `50` | Total training steps |
 | `N_GPUS` | `1` | Number of GPUs (data parallel) |
-| `PPO_MICRO_BATCH_SIZE` | `BATCH_SIZE * GROUP_SIZE` | Micro batch size for actor update (defaults to full batch; reduce to avoid OOM) |
+| `MICRO_BATCH_SIZE` | `BATCH_SIZE * GROUP_SIZE` | Micro batch size for actor update (defaults to full batch; reduce to avoid OOM) |
 | `MAX_PROMPT_LENGTH` | `512` | Maximum prompt length in tokens |
 | `MAX_RESPONSE_LENGTH` | `1536` | Maximum response length in tokens |
 | `GPU_MEM_UTIL` | `0.45` | vLLM GPU memory utilization for KV cache |

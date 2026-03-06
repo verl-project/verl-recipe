@@ -24,6 +24,7 @@ atropos:
   poll_timeout: 300                  # Max seconds to wait for a batch
   ready_file: null                   # Writes internal vLLM address when set (for launch scripts)
   proxy_url: null                    # Generate proxy URL — trainer pauses/resumes before sleep/wake
+  proxy_drain_timeout: 300           # Seconds to wait for proxy to drain in-flight requests on pause
 
 # GRPO: group-based advantage estimation, no critic needed
 algorithm:
