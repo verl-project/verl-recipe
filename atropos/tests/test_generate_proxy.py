@@ -153,7 +153,9 @@ async def test_generate_string_prompt(client):
 async def test_generate_waits_when_paused(client):
     """Requests arriving while paused wait for resume instead of failing."""
     mock = _mock_client()
-    mock.post.return_value = httpx.Response(200, json={"choices": [{"text": "ok", "finish_reason": "stop", "logprobs": None}]})
+    mock.post.return_value = httpx.Response(
+        200, json={"choices": [{"text": "ok", "finish_reason": "stop", "logprobs": None}]}
+    )
 
     proxy._paused = True
     proxy._resume_event.clear()
@@ -313,7 +315,9 @@ async def test_chat_completions_waits_when_paused(client):
 async def test_pause_and_resume_lifecycle(client):
     """After POST /pause, requests wait. After POST /resume, they proceed."""
     mock = _mock_client()
-    mock.post.return_value = httpx.Response(200, json={"choices": [{"text": "ok", "finish_reason": "stop", "logprobs": None}]})
+    mock.post.return_value = httpx.Response(
+        200, json={"choices": [{"text": "ok", "finish_reason": "stop", "logprobs": None}]}
+    )
 
     resp = await client.post("/pause")
     assert resp.status_code == 200

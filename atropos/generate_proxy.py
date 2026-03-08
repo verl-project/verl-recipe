@@ -234,8 +234,12 @@ def main():
     parser.add_argument("--model", required=True, help="Model name for /v1/completions model field")
     parser.add_argument("--port", type=int, default=9004)
     parser.add_argument("--host", type=str, default="0.0.0.0")
-    parser.add_argument("--drain-timeout", type=float, default=300.0, help="seconds to wait for in-flight requests to drain on /pause")
-    parser.add_argument("--generation-timeout", type=float, default=300.0, help="seconds to wait for a single generation request to vLLM")
+    parser.add_argument(
+        "--drain-timeout", type=float, default=300.0, help="seconds to wait for in-flight requests to drain on /pause"
+    )
+    parser.add_argument(
+        "--generation-timeout", type=float, default=300.0, help="seconds to wait for a single generation request to vLLM"
+    )
     args = parser.parse_args()
 
     global _backend_urls, _model, _DRAIN_TIMEOUT, _GENERATION_TIMEOUT
