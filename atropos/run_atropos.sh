@@ -36,7 +36,7 @@ BATCH_SIZE="${BATCH_SIZE:-2}"
 GROUP_SIZE="${GROUP_SIZE:-4}"
 TOTAL_STEPS="${TOTAL_STEPS:-50}"
 ATROPOS_DIR="${ATROPOS_DIR:-../atropos}"
-READY_FILE="/tmp/verl_atropos_ready"
+READY_FILE=$(mktemp /tmp/verl_atropos_ready.XXXXXX)
 TOTAL_SEQS=$((BATCH_SIZE * GROUP_SIZE))
 MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-${TOTAL_SEQS}}"
 MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-512}"
@@ -65,7 +65,7 @@ trap cleanup EXIT INT TERM
 
 # kill leftovers
 ray stop 2>/dev/null || true
-pkill -f "vllm.entrypoints|generate_proxy|run-api|main_atropos|environments/.*\.py" 2>/dev/null || true
+pkill -u "$USER" -f "vllm.entrypoints|generate_proxy|run-api|main_atropos|environments/.*\.py" 2>/dev/null || true
 rm -f "$READY_FILE"
 sleep 2
 
