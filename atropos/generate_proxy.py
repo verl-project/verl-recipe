@@ -238,7 +238,10 @@ def main():
         "--drain-timeout", type=float, default=300.0, help="seconds to wait for in-flight requests to drain on /pause"
     )
     parser.add_argument(
-        "--generation-timeout", type=float, default=300.0, help="seconds to wait for a single generation request to vLLM"
+        "--generation-timeout",
+        type=float,
+        default=300.0,
+        help="seconds to wait for a single generation request to vLLM",
     )
     args = parser.parse_args()
 
