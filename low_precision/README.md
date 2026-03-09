@@ -28,11 +28,15 @@ Please refer to the [verl multinode training documentation](https://verl.readthe
 - **Docker image**: `verlai/verl:vllm012.latest`
 - **Verified verl commit**: `4849643d`
 
-**Required environment variables:**
-
-| Variable | Purpose | Scope |
-|----------|---------|-------|
-| `NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1` | Enable FP32 scales for TE block-wise FP8 | All nodes (set in `RUNTIME_ENV` yaml for multi-node) |
+> [!IMPORTANT]
+> **Required environment variables:**
+> ```bash
+> export NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1  # Use FP32 scales for TE block-wise FP8
+> export VLLM_USE_DEEP_GEMM_E8M0=0             # Use FP32 scales for vLLM with DeepGEMM
+> ```
+> When vLLM uses [DeepGEMM](https://github.com/deepseek-ai/DeepGEMM) as its GEMM backend, it defaults to E8M0 scales. Set `VLLM_USE_DEEP_GEMM_E8M0=0` to explicitly use FP32 scales instead.
+>
+> For multi-node setups, these variables must be added to the Ray runtime env yaml (default: `verl/trainer/runtime_env.yaml`) so they propagate to all worker nodes.
 
 **FP8 configuration highlights:**
 
