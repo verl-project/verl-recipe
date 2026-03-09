@@ -151,7 +151,7 @@ RAY_ADDRESS='http://127.0.0.1:8265' ray job submit --runtime-env="${RUNTIME_ENV}
     actor_rollout_ref.ref.fsdp_config.param_offload=${offload} \
     actor_rollout_ref.ref.ulysses_sequence_parallel_size=${sp_size} \
     actor_rollout_ref.actor.fsdp_config.fsdp_size=-1 \
-    reward.reward_manager=dapo \
+    reward.reward_manager.name=dapo \
     reward.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer} \
     reward.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len} \
     reward.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
