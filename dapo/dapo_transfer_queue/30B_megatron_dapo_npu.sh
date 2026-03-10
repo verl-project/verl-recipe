@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -xeuo pipefail
+set -x
 # 0. download the config
 # only need to download the configuration_deepseek.py and config.json
 # remove the `quantization_config` in the `config.json`
@@ -36,8 +36,6 @@ train_prompt_bsz=8 # must be > n_gpus. need to fix
 gen_prompt_bsz=$((train_prompt_bsz * 1))
 n_resp_per_prompt=8
 train_prompt_mini_bsz=8 # mini_bsz * n >= micro_bsz * pp * dp
-
-NNODES=${NNODES:-1}
 
 MODEL_PATH="/workspace/models/Qwen3-30B-A3B"
 MCORE_MODEL_PATH="/workspace/mcore/Qwen3-30B-A3B"
@@ -158,7 +156,7 @@ ray job submit --no-wait \
         trainer.project_name="${project_name}" \
         trainer.experiment_name="${exp_name}" \
         trainer.n_gpus_per_node=16 \
-        trainer.nnodes="${NNODES}" \
+        trainer.nnodes=1 \
         trainer.device=npu \
         trainer.val_before_train=False \
         trainer.test_freq=-1 \
