@@ -1,7 +1,15 @@
-# DAPO trainer config with QAT (Quantization-Aware Training) support
+# DAPO trainer config with QAT (Quantization-Aware Training) support for Megatron backend
+# This config extends ppo_megatron_trainer.yaml with QAT-specific settings
 #
 # QAT Modes:
 #   - w4a16: Weight-only 4-bit quantization (NVFP4)
+#
+# Usage:
+#   python -m recipe.dapo.main_dapo \
+#     --config-path recipe/qat/config \
+#     --config-name dapo_qat_megatron_trainer \
+#     actor_rollout_ref.actor.megatron.qat.mode=w4a16 \
+#     actor_rollout_ref.actor.megatron.qat.quantization_config_path=recipe/qat/config/nvfp4_w4a16_megatron.json
 
 hydra:
   searchpath:
@@ -14,13 +22,16 @@ defaults:
 data:
   gen_batch_size: ${data.train_batch_size}
 
-reward_model:
-  reward_manager: dapo
-  overlong_buffer: 
-    enable: false
-    len: 0
-    penalty_factor: 0.0
-    log: false
+reward:
+  reward_manager:
+    name: dapo
+  reward_kwargs:
+    overlong_buffer_cfg:
+      enable: false
+      len: 0
+      penalty_factor: 0.0
+      log: false
+    max_resp_len: null
 
 algorithm:
   filter_groups:
@@ -32,19 +43,25 @@ algorithm:
 trainer:
   project_name: verl-dapo-qat
 
+# ============================================================
+# QAT Configuration (overrides defaults in engine/megatron.yaml)
+# ============================================================
 actor_rollout_ref:
   actor:
-    qat:
-      # Enable QAT
-      enable: true
-      # Quantization mode: "w4a16" (weight-only)
-      mode: "w4a16"
-      group_size: 16
-      # Layers to skip (not quantized)
-      # Megatron use fnmatch patterns to match layer names
-      ignore_patterns:
-        - "lm_head"
-        - "*mlp.gate"
-
-      activation_observer: null
-      quantization_config_path: null
+    megatron:
+      qat:
+        # Enable QAT
+        enable: true
+        # Quantization mode: "w4a16" (weight-only)
+        mode: "w4a16"
+        # Quantization group size (NVFP4 requires 16)
+        group_size: 16
+        # Layers to skip (not quantized)
+        # Megatron uses fnmatch patterns to match layer names
+        ignore_patterns:
+          - "lm_head"
+          - "*mlp.gate"
+        # Activation observer (W4A4 only)
+        activation_observer: null
+        # vLLM quantization config JSON path (relative to project root)
+        quantization_config_path: null  # Specify in run script

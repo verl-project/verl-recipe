@@ -148,10 +148,10 @@ ACTOR=(
 )
 
 QAT=(
-    actor_rollout_ref.actor.qat.enable=${qat_enable}
-    actor_rollout_ref.actor.qat.mode=${qat_mode}
-    actor_rollout_ref.actor.qat.quantization_config_path="${qat_config_path}"
-    'actor_rollout_ref.actor.qat.ignore_patterns=["lm_head", "*mlp.gate", "*self_attn*"]'
+    actor_rollout_ref.actor.megatron.qat.enable=${qat_enable}
+    actor_rollout_ref.actor.megatron.qat.mode=${qat_mode}
+    actor_rollout_ref.actor.megatron.qat.quantization_config_path="${qat_config_path}"
+    'actor_rollout_ref.actor.megatron.qat.ignore_patterns=["lm_head", "*mlp.gate", "*self_attn*"]'
 )
 
 ROLLOUT=(
@@ -159,6 +159,7 @@ ROLLOUT=(
     actor_rollout_ref.rollout.enforce_eager=True
     actor_rollout_ref.rollout.calculate_log_probs=True
     actor_rollout_ref.rollout.gpu_memory_utilization=0.50
+    actor_rollout_ref.rollout.max_model_len=$(( max_prompt_length + max_response_length ))
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp}
     actor_rollout_ref.rollout.enable_chunked_prefill=True
     actor_rollout_ref.rollout.max_num_batched_tokens=$(( 1024 * 16 ))
@@ -187,12 +188,12 @@ PERF_OPT=(
     +actor_rollout_ref.actor.optim.override_optimizer_config.overlap_cpu_optimizer_d2h_h2d=True
 )
 
-REWARD_MODEL=(
-    reward_model.reward_manager=dapo
-    reward_model.overlong_buffer.enable=${enable_overlong_buffer}
-    reward_model.overlong_buffer.len=${overlong_buffer_len}
-    reward_model.overlong_buffer.penalty_factor=${overlong_penalty_factor}
-    reward_model.overlong_buffer.log=False
+REWARD=(
+    reward.reward_manager.name=dapo
+    reward.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer}
+    reward.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len}
+    reward.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor}
+    reward.reward_kwargs.max_resp_len=${max_response_length}
 )
 
 TRAINER=(
@@ -208,6 +209,7 @@ TRAINER=(
     trainer.total_training_steps=500
     trainer.default_local_dir="${CKPTS_DIR}"
     trainer.resume_mode=auto
+    trainer.use_legacy_worker_impl=disable
 )
 
 FORWARD_ONLY_SETS=(
@@ -228,9 +230,10 @@ FORWARD_ONLY_SETS=(
 ################################################### start script ###################################################
 
 RAY_ADDRESS='http://127.0.0.1:8265' ray job submit --runtime-env=${RUNTIME_ENV} \
-    -- python3 -m verl.trainer.main_ppo \
-    --config-path="${WORKING_DIR}/recipe/qat/config" \
-    --config-name='dapo_qat_megatron_trainer' \
+    --working-dir "${WORKING_DIR}" \
+    -- python3 -m recipe.dapo.main_dapo \
+    --config-path "${WORKING_DIR}/recipe/qat/config" \
+    --config-name dapo_qat_megatron_trainer \
     "${DATA[@]}" \
     "${ALGORITHM[@]}" \
     "${MODEL[@]}" \
@@ -238,6 +241,6 @@ RAY_ADDRESS='http://127.0.0.1:8265' ray job submit --runtime-env=${RUNTIME_ENV} 
     "${QAT[@]}" \
     "${ROLLOUT[@]}" \
     "${PERF_OPT[@]}" \
-    "${REWARD_MODEL[@]}" \
+    "${REWARD[@]}" \
     "${TRAINER[@]}" \
     "${FORWARD_ONLY_SETS[@]}"
