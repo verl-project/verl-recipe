@@ -128,7 +128,6 @@ ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len} \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=4096 \
-    +actor_rollout_ref.rollout.engine_kwargs.vllm.disable_mm_preprocessor_cache=True \
     actor_rollout_ref.actor.strategy=fsdp2 \
     actor_rollout_ref.ref.strategy=fsdp2 \
     critic.strategy=fsdp2 \
