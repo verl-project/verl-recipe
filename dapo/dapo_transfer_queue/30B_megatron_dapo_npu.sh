@@ -75,7 +75,7 @@ actor_ppo_max_token_len=$((actor_ppo_max_token_len / train_cp))
 infer_ppo_max_token_len=$((infer_ppo_max_token_len / train_cp))
 # "dapo_trainer-megatron"
 ray job submit --no-wait \
-    -- python3 -m recipe.transfer_queue.main_dapo \
+    -- python3 -m recipe.dapo.dapo_transfer_queue.main_dapo \
         --config-name="dapo_transfer_queue_trainer" \
         data.train_files="${TRAIN_FILE}" \
         data.val_files="${TEST_FILE}" \

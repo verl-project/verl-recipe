@@ -54,17 +54,22 @@ def run_dapo(config) -> None:
         ray.init(**OmegaConf.to_container(ray_init_kwargs))
 
     try:
+        profiler_steps = OmegaConf.select(config.global_profiler, "steps")
+        has_profiler_steps = profiler_steps is not None and len(profiler_steps) > 0
+
+        # CUDA: Nsight Systems (nsys) 需要 controller 侧 runtime_env 传递 nsight 选项
         if (
             is_cuda_available
             and config.global_profiler.tool == "nsys"
-            and OmegaConf.select(config.global_profiler, "steps") is not None
-            and len(OmegaConf.select(config.global_profiler, "steps")) > 0
+            and has_profiler_steps
         ):
             nsight_options = OmegaConf.to_container(
                 config.global_profiler.global_tool_config.nsys.controller_nsight_options
             )
             runner = TaskRunner.options(runtime_env={"nsight": nsight_options}).remote()
         else:
+            # NPU 上使用昇腾 CANN Profiler 时：设置 global_profiler.tool=npu 与 steps，
+            # worker 侧会通过 config 启用 NPUProfiler，无需 controller 的 runtime_env
             runner = TaskRunner.remote()
         ray.get(runner.run.remote(config))
     finally:

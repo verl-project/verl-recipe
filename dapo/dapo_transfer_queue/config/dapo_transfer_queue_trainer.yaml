@@ -1,9 +1,9 @@
 hydra:
   searchpath:
-    - file://verl/trainer/config
+    - verl/trainer/config
 
 defaults:
-  - ppo_trainer
+  - ppo_megatron_trainer
   - _self_
 
 # DAPO-specific (aligned with recipe/dapo/config/dapo_trainer.yaml)

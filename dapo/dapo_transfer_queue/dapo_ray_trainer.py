@@ -51,7 +51,6 @@ from recipe.transfer_queue.ray_trainer import (
     compute_response_mask,
     compute_throughout_metrics_decorated,
     compute_timing_metrics_decorated,
-    compute_val_reward_decorated,
 )
 
 
@@ -68,7 +67,7 @@ class RayDAPOTrainer(RayPPOTrainer):
             response_mask_output_meta = compute_response_mask(response_mask_meta, self.tq_client)
             batch_meta = batch_meta.union(response_mask_output_meta)
 
-        old_log_prob_fields = [
+        log_prob_fields = [
             "input_ids",
             "attention_mask",
             "position_ids",
@@ -85,7 +84,7 @@ class RayDAPOTrainer(RayPPOTrainer):
             "ability",
         ]
         old_log_prob_meta = batch_meta.select_fields(
-            [f for f in old_log_prob_fields if f in batch_meta.field_names]
+            [f for f in log_prob_fields if f in batch_meta.field_names]
         )
         with marked_timer("old_log_prob", timing_raw, "blue"):
             old_log_prob_output_meta = self.actor_rollout_wg.compute_log_prob(old_log_prob_meta)
@@ -103,25 +102,9 @@ class RayDAPOTrainer(RayPPOTrainer):
         metrics["actor/entropy"] = entropy_agg.detach().item()
 
         if self.use_reference_policy:
-            ref_log_prob_fields = [
-                "input_ids",
-                "attention_mask",
-                "position_ids",
-                "prompts",
-                "responses",
-                "response_mask",
-                "old_log_probs",
-                "data_source",
-                "reward_model",
-                "extra_info",
-                "uid",
-                "index",
-                "tools_kwargs",
-                "interaction_kwargs",
-                "ability",
-            ]
+            log_prob_fields.append("old_log_probs")
             ref_log_prob_meta = batch_meta.select_fields(
-                [f for f in ref_log_prob_fields if f in batch_meta.field_names]
+                [f for f in log_prob_fields if f in batch_meta.field_names]
             )
             with marked_timer("ref", timing_raw, "olive"):
                 if not self.ref_in_actor:
