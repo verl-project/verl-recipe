@@ -28,7 +28,7 @@ This recipe integrates [TransferQueue](https://github.com/TransferQueue/Transfer
 ## 依赖与启用 / Dependencies and Enabling
 
 **中文**
-- **TransferQueue**：需安装，例如 `pip install TransferQueue`（或见项目 `setup.py` 中 `transferqueue` 可选依赖）。
+- **TransferQueue**：需安装，例如 `pip install TransferQueue==0.1.1.dev2`（或见项目 `setup.py` 中 `transferqueue` 可选依赖）。
 - **启用**：使用本 recipe 的 config（`--config-name=dapo_transfer_queue_trainer`）会自动设置 `transfer_queue.enable: True` 并在 Ray 的 `runtime_env` 中设置 `TRANSFER_QUEUE_ENABLE=1`。
 
 **English**
