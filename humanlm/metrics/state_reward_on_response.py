@@ -13,13 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import re, json, asyncio, time
-from typing import Optional
-from recipe.humanlm.utils import parse_messages, extract_json
-import os
+import asyncio
+import json
 
-STATE_PROMPT_BATCHED = '''You are a helpful and meticulous evaluator. \
-Your task is to score how well the generated response matches the ground truth response with respect to each aspect below.
+from recipe.humanlm.utils import extract_json, parse_messages
+
+STATE_PROMPT_BATCHED = """You are a helpful and meticulous evaluator. \
+Your task is to score how well the generated response matches the ground truth response with respect to 
+each aspect below.
 
 Aspects (aspect_i: description_i):
 {state_desc}
@@ -42,7 +43,8 @@ Assign a score in [0, 1] based on how much the aspects of generated response and
 
 For each aspect_i, follow this procedure:
 1. Extract 1-3 key points:
-   - Extract K key points from the ground truth response only about the aspect based on the description (e.g., if evaluating a "stance", pick key points related to the stance like "clearly disagrees with X").
+   - Extract K key points from the ground truth response only about the aspect based on the description 
+   (e.g., if evaluating a "stance", pick key points related to the stance like "clearly disagrees with X").
    - Each key point should be specific and distinct.
 
 2. Score how well the generated response matches each key point:
@@ -53,7 +55,8 @@ For each aspect_i, follow this procedure:
      - [0.1, 0.3]: Very weak reflection.
      - 0.0: Missed, contradicted, or reversed.
 
-3. Compute coverage C = (m_1 + m_2 + ... + m_K) / K, which measures how comprehensive the generated response reflects the ground truth response.
+3. Compute coverage C = (m_1 + m_2 + ... + m_K) / K, which measures how comprehensive the generated 
+    response reflects the ground truth response.
 
 4. Compute penalty P for extra or conflicting content:
    - Examine additional content in the generated response beyond those key points:
@@ -69,7 +72,8 @@ For each aspect_i, follow this procedure:
 5. If you are evaluating generated responses (skip if aspect_i is not response):
    - Length alone does NOT increase the score. Extra length is only ok if it is consistent and not redundant.
    - A generated response that is much longer than the ground truth response should be penalized via P.
-   - The generated response may or may not reuse phrases from the context; however, if the generated response just directly copies previous context, without quoting them, treat that as off-task behavior and give a score of 0.
+   - The generated response may or may not reuse phrases from the context; however, if the generated response just 
+    directly copies previous context, without quoting them, treat that as off-task behavior and give a score of 0.
 
 6. Compute the final score = max(0, min(1, C - P))
 
@@ -80,8 +84,10 @@ Additional considerations:
 
 Output format (JSON):
 {{
-    "<aspect_1>": {{"thought": "<include (1) analysis of key points from ground truth along the aspect_1 dimension; (2) how well the generated response matches each key point; (3) compute the final score>", "score": <score>}},
-    "<aspect_2>": {{"thought": "<include (1) analysis of key points from ground truth along the aspect_2 dimension; (2) how well the generated response matches each key point; (3) compute the final score>", "score": <score>}},
+    "<aspect_1>": {{"thought": "<include (1) analysis of key points from ground truth along the aspect_1 dimension; 
+        (2) how well the generated response matches each key point; (3) compute the final score>", "score": <score>}},
+    "<aspect_2>": {{"thought": "<include (1) analysis of key points from ground truth along the aspect_2 dimension; 
+        (2) how well the generated response matches each key point; (3) compute the final score>", "score": <score>}},
     "<aspect_3>": ...
 }}
 
@@ -94,7 +100,7 @@ Format Notes:
 - You must provide exactly 1 score for each of the aspects: {state_names}.
 
 Your evaluation:
-'''
+"""
 
 
 def extract_usage(resp):
@@ -116,26 +122,25 @@ async def compute_score(data_source, generation, ground_truth, extra_info, confi
     Batched version: scores multiple generations at once.
     Returns a list of floats, one score per generation.
     """
-    
+
     max_retry = kwargs.pop("max_retry", 5)
     num_repeats = kwargs.pop("num_repeats", 1)
     # read json from config_path
 
-    import json
-    state_config = json.load(open(config_path, "r"))
+    state_config = json.load(open(config_path))
     state_names = [h for h in state_config.keys()]
-    state_descs = [v['desc'] for v in state_config.values()]
-    state_dict = {h: d for h, d in zip(state_names, state_descs)}
+    state_descs = [v["desc"] for v in state_config.values()]
+    state_dict = {h: d for h, d in zip(state_names, state_descs, strict=True)}
 
     raw_prompt = json.loads(extra_info["raw_prompt"])
     context = parse_messages(raw_prompt)
-    
+
     # Format all generations as a dict
     generation_text = f"<|The Start of Generated Response|>\n{generation}\n<|The End of Generated Response|>"
-    
+
     other_guidelines = ""
-    if 'other_guidelines' in kwargs:
-        other_guidelines = kwargs.pop('other_guidelines')
+    if "other_guidelines" in kwargs:
+        other_guidelines = kwargs.pop("other_guidelines")
 
     prompt = STATE_PROMPT_BATCHED.format(
         context=context,
@@ -143,23 +148,23 @@ async def compute_score(data_source, generation, ground_truth, extra_info, confi
         generation_text=generation_text,
         other_guidelines=other_guidelines,
         state_names=state_names,
-        state_desc=json.dumps(state_dict, indent=2)
+        state_desc=json.dumps(state_dict, indent=2),
     )
-    
+
     model = kwargs.pop("model", "openai/gpt-5-mini")
     # slight randomness to avoid getting stuck in a loop
     temperature = kwargs.pop("temperature", 0.1)
     max_tokens = kwargs.pop("max_tokens", 4096)
 
-    print(f'state_reward_on_response  model {model} temperature {temperature} max_tokens {max_tokens}')
+    print(f"state_reward_on_response  model {model} temperature {temperature} max_tokens {max_tokens}")
     for repeat in range(num_repeats):
-        scores_list = []
         for attempt in range(max_retry):
             content = None
-            
+
             # Try litellm first
             try:
                 import litellm
+
                 resp = await litellm.acompletion(
                     messages=[{"role": "user", "content": prompt}],
                     model=model,
@@ -169,12 +174,13 @@ async def compute_score(data_source, generation, ground_truth, extra_info, confi
                 )
                 content = resp.choices[0].message.content
             except Exception as e:
-                print(f"[Attempt {attempt+1}] litellm failed: {e}")
-            
+                print(f"[Attempt {attempt + 1}] litellm failed: {e}")
+
             # Fallback to openai
             if content is None:
                 try:
                     import openai
+
                     client = openai.AsyncOpenAI()
                     resp = await client.chat.completions.create(
                         messages=[{"role": "user", "content": prompt}],
@@ -185,20 +191,19 @@ async def compute_score(data_source, generation, ground_truth, extra_info, confi
                     )
                     content = resp.choices[0].message.content
                 except Exception as e:
-                    print(f"[Attempt {attempt+1}] openai failed: {e}")
-            
+                    print(f"[Attempt {attempt + 1}] openai failed: {e}")
+
             if content is None:
                 continue
-            
+
             # Parse response
             try:
-                usage = extract_usage(resp)
                 result = extract_json(content)
                 print(result)
-                
+
                 if not isinstance(result, dict):
                     raise ValueError(f"Expected dict, got {type(result)}")
-                
+
                 # Extract scores
                 score_dict = {}
                 for i, value in result.items():
@@ -209,16 +214,21 @@ async def compute_score(data_source, generation, ground_truth, extra_info, confi
                     score_dict[i] = score
 
                 if len(score_dict) != len(state_names):
-                    raise ValueError(f"[Attempt {attempt+1}] Expected {len(state_names)} scores, got {len(score_dict)}")
-                assert set(score_dict.keys()) == set(state_names), f"Score keys {score_dict.keys()} do not match expected {state_names}"
+                    raise ValueError(
+                        f"[Attempt {attempt + 1}] Expected {len(state_names)} scores, got {len(score_dict)}"
+                    )
+                assert set(score_dict.keys()) == set(state_names), (
+                    f"Score keys {score_dict.keys()} do not match expected {state_names}"
+                )
                 break
-                
+
             except Exception as e:
-                print(f"[Attempt {attempt+1}] Failed to parse response: {e}")
+                print(f"[Attempt {attempt + 1}] Failed to parse response: {e}")
                 import os
+
                 USER = os.getenv("USER", "unknown_user")
                 with open(f"/dfs/project/kgrlm/common/llm_twin/log_state_reward_on_response_{USER}.out", "a") as f:
-                    f.write(f"[Attempt {attempt+1}] Parse error: {e}\n")
+                    f.write(f"[Attempt {attempt + 1}] Parse error: {e}\n")
                     f.write(f"Content: {content}\n")
                     f.write(f"Generations: {generation_text}\n")
                     f.write("-" * 80 + "\n")
@@ -226,9 +236,7 @@ async def compute_score(data_source, generation, ground_truth, extra_info, confi
                 if attempt < max_retry - 1:
                     await asyncio.sleep(1)
                 else:
-                    raise ValueError(f"All {max_retry} attempts failed to get valid scores")
-        
-    score_dict.update({
-        "metrics_info": content
-    })
+                    raise ValueError(f"All {max_retry} attempts failed to get valid scores") from None
+
+    score_dict.update({"metrics_info": content})
     return score_dict

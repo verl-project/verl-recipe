@@ -13,15 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import ray
 import numpy as np
+import ray
 from tensordict import TensorDict
+
+from verl.experimental.agent_loop.agent_loop import AgentLoopManager, AgentLoopWorker
 from verl.protocol import DataProto
-from verl.experimental.agent_loop.agent_loop import AgentLoopWorker, AgentLoopManager
 
 
 class HumanLMAgentLoopWorker(AgentLoopWorker):
-
     async def _compute_score(self, output, prompts, responses, attention_mask, input_ids, position_ids, kwargs):
         if output.reward_score is None and self.reward_loop_worker_handles is not None:
             extra_info = kwargs.get("extra_info", {})
@@ -55,7 +55,6 @@ class HumanLMAgentLoopWorker(AgentLoopWorker):
 
 
 class HumanLMAgentLoopManager(AgentLoopManager):
-
     def __init__(self, *args, **kwargs):
         self.agent_loop_workers_class = ray.remote(HumanLMAgentLoopWorker)
         super().__init__(*args, **kwargs)

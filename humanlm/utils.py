@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import re
 
 # Only match <think>...</think>
@@ -41,6 +42,8 @@ remove any leftover non-response <tag ...> openings
       - Any leading text ending at a non-response </tag> if there's
         no matching <tag> before it
 """
+
+
 def _strip_non_response_tags(text: str) -> str:
     prev = None
     while prev != text:
@@ -51,16 +54,19 @@ def _strip_non_response_tags(text: str) -> str:
 
     return text
 
+
 """
     First remove anything of the form <tag> ... <\tag> where tag is not "response"
     Extract text in <response>...</response>, or just <response>..., or even just ... <\response> fallback to full text
 """
+
+
 def extract_response(text: str) -> str:
     # remove all tags except <response> ... </response>
     text = _strip_non_response_tags(text)
     original_test_no_tag = text
 
-    #get <response> ... </response>
+    # get <response> ... </response>
     pattern = re.compile(
         r"<\s*response\s*>(.*?)</\s*response\s*>",
         re.DOTALL | re.IGNORECASE,
@@ -69,23 +75,22 @@ def extract_response(text: str) -> str:
     if match:
         return match.group(1).strip()
 
-    #<response> but no closing tag, get everything after <response>
+    # <response> but no closing tag, get everything after <response>
     open_pattern = re.compile(r"<\s*response\s*>", re.IGNORECASE)
     open_match = open_pattern.search(text)
     if open_match:
-        if len(text[open_match.end():].strip()) == 0:
+        if len(text[open_match.end() :].strip()) == 0:
             return original_test_no_tag
-        return text[open_match.end():].strip()
+        return text[open_match.end() :].strip()
 
-    #no <response>, but there is </response>, then get everything before </response>
+    # no <response>, but there is </response>, then get everything before </response>
     close_pattern = re.compile(r"</\s*response\s*>", re.IGNORECASE)
     close_match = close_pattern.search(text)
     if close_match:
-        return text[:close_match.start()].strip()
+        return text[: close_match.start()].strip()
     return text.strip()
 
 
-import json
 def parse_messages(messages, strip_sys_prompt=True):
     """
     Args:
@@ -113,7 +118,8 @@ def strip_system_prompt(messages):
             Example: messages = [{'role': 'user', 'content': 'Hello!'},
                                  {'role': 'assistant', 'content': 'Hi!'}, ...]
     """
-    return [msg for msg in messages if msg['role'] != "system"]
+    return [msg for msg in messages if msg["role"] != "system"]
+
 
 def parse_messages_preprocessing(messages, strip_sys_prompt=True):
     """
@@ -138,7 +144,7 @@ def parse_messages_preprocessing(messages, strip_sys_prompt=True):
 
 
 # Should we say "article title" instead?
-# Role is None? 
+# Role is None?
 def parse_messages_title_preprocessing(messages, strip_sys_prompt=True):
     """
     For Medium-style threads:
@@ -180,9 +186,7 @@ def parse_messages_title_preprocessing(messages, strip_sys_prompt=True):
     subtitle = counts.get("subtitle") or meta.get("subtitle") or ""
 
     role = first.get("role", "unknown")
-    lines = [
-        f"Article from {role}: \n'''\nTitle: {title}\nSubtitle: {subtitle}\n'''"
-    ]
+    lines = [f"Article from {role}: \n'''\nTitle: {title}\nSubtitle: {subtitle}\n'''"]
 
     rest = messages[1:]
     if rest:
@@ -229,7 +233,7 @@ def extract_json(s: str):
             else:
                 return int(num_str), pos
         except ValueError:
-            raise ValueError(f"Invalid number at position {start}: {num_str}")
+            raise ValueError(f"Invalid number at position {start}: {num_str}") from None
 
     def skip_whitespace(s, pos):
         while pos < len(s) and s[pos] in " \t\n\r":

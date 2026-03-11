@@ -13,13 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import re, json, asyncio, time
+import asyncio
+import json
 import os
-from typing import Optional
-from recipe.humanlm.utils import parse_messages, extract_json
+import re
 
+from recipe.humanlm.utils import extract_json, parse_messages
 
-STATE_PROMPT_BATCHED = '''You are a helpful and meticulous evaluator. \
+STATE_PROMPT_BATCHED = """You are a helpful and meticulous evaluator. \
 Your task is to score how well the generated {state_name}(s) align with the ground truth user response. \
 Description of {state_name}: {state_desc}.
 
@@ -41,8 +42,11 @@ For each generated {state_name}, assign a score in [0, 1] based on how accuratel
 
 Guidelines:
 1. Extract 1-3 key points:
-   - Extract K key points from the ground truth response along the {state_name} dimension (e.g., if evaluating a "stance", pick key points related to the stance like "clearly disagrees with X", if evaluating a "response", pick key points about the response like "offers a solution to Y").
-   - If {state_name} is different from "a response" (e.g., "stance", "target"), focus on key points only relevant to the {state_name} of the response.
+   - Extract K key points from the ground truth response along the {state_name} dimension (e.g., if evaluating a 
+    "stance", pick key points related to the stance like "clearly disagrees with X", if evaluating a "response", 
+    pick key points about the response like "offers a solution to Y").
+   - If {state_name} is different from "a response" (e.g., "stance", "target"), focus on key points only relevant to 
+    the {state_name} of the response.
    - Each key point should be specific and distinct.
 
 2. Score how well the generated {state_name} matches each key point:
@@ -53,7 +57,8 @@ Guidelines:
      - [0.1, 0.3]: Very weak reflection.
      - 0.0: Missed, contradicted, or reversed.
 
-3. Compute coverage C = (m_1 + m_2 + ... + m_K) / K, which measures how comprehensive the generated {state_name} reflects the ground truth response.
+3. Compute coverage C = (m_1 + m_2 + ... + m_K) / K, which measures how comprehensive the generated {state_name} 
+    reflects the ground truth response.
 
 4. Compute penalty P for extra or conflicting content:
    - Examine additional content in the generated {state_name} beyond those key points:
@@ -69,7 +74,8 @@ Guidelines:
 5. If you are evaluating generated responses (skip if {state_name} is not a response):
    - Length alone does NOT increase the score. Extra length is only ok if it is consistent and not redundant.
    - A generated response that is much longer than the ground truth response should be penalized via P.
-   - The generated response may or may not reuse phrases from the context; however, if the generated response just directly copies previous context, without quoting them, treat that as off-task behavior and give a score of 0.
+   - The generated response may or may not reuse phrases from the context; however, if the generated response just 
+     directly copies previous context, without quoting them, treat that as off-task behavior and give a score of 0.
 
 6. Compute the final score = max(0, min(1, C - P))
 
@@ -81,7 +87,8 @@ Additional considerations:
 Output format (JSON):
 {{
     "key_points": "<analysis of key points from ground truth along {state_name} dimension>",
-    "1": {{"thought": "<how well the 1st generated {state_name} matches each key point and compute the final score>", "score": <score>}},
+    "1": {{"thought": "<how well the 1st generated {state_name} matches each key point and compute the 
+            final score>", "score": <score>}},
     "2": ...
 }}
 
@@ -93,7 +100,7 @@ Format Notes:
 - You must provide exactly {num_generations} scores for the generated {state_name}(s)
 
 Your output:
-'''
+"""
 
 
 def extract_usage(resp):
@@ -110,8 +117,7 @@ def extract_usage(resp):
     return usage or {}
 
 
-INVALID_NAME_CHARS_RE = re.compile(r'[\s<|\\/>]')
-
+INVALID_NAME_CHARS_RE = re.compile(r"[\s<|\\/>]")
 
 
 async def compute_batch_score(data_source, generations, ground_truth, extra_info, **kwargs) -> list[float]:
@@ -120,29 +126,40 @@ async def compute_batch_score(data_source, generations, ground_truth, extra_info
     Returns a list of floats, one score per generation.
     """
 
-    print(f"[state_reward] compute_batch_score called: {len(generations)} generations, model={kwargs.get('model', 'openai/gpt-5-mini')}", flush=True)
-    
+    print(
+        f"[state_reward] compute_batch_score called: {len(generations)} generations, "
+        f"model={kwargs.get('model', 'openai/gpt-5-mini')}",
+        flush=True,
+    )
+
     if not generations:
         return []
 
-    
     max_retry = kwargs.pop("max_retry", 5)
     num_repeats = kwargs.pop("num_repeats", 1)
-    state_name = extra_info['state_name']
+    state_name = extra_info["state_name"]
     state_desc = extra_info["state_desc"]
 
     raw_prompt = json.loads(extra_info["raw_prompt"])
     context = parse_messages(raw_prompt)
-    
+
     # Format all generations as a dict
-    generations_dict = {i+1: gen.strip() for i, gen in enumerate(generations)}
-    generations_text = f"<|The Start of Generated {state_name}s|>\n{json.dumps(generations_dict, indent=2)}\n<|The End of Generated {state_name}s|>"
-    
-    other_guidelines = f"- If a {state_name} contains non-text content, unnecessary wrappers like XML-like markup, or is otherwise malformed, apply a penalty by multiplying its score by 0.5. If there are multiple {state_name}s, you should contrast them against each other to ensure that your evaluations are consistent and assign different scores to different generated {state_name}s."
-    
+    generations_dict = {i + 1: gen.strip() for i, gen in enumerate(generations)}
+    generations_text = (
+        f"<|The Start of Generated {state_name}s|>\n{json.dumps(generations_dict, indent=2)}"
+        f"\n<|The End of Generated {state_name}s|>"
+    )
+
+    other_guidelines = (
+        f"- If a {state_name} contains non-text content, unnecessary wrappers like XML-like markup, or is "
+        f"otherwise malformed, apply a penalty by multiplying its score by 0.5. If there are multiple {state_name}s, "
+        f"you should contrast them against each other to ensure that your evaluations are consistent and assign "
+        f"different scores to different generated {state_name}s."
+    )
+
     # overwrite
-    if 'other_guidelines' in kwargs:
-        other_guidelines = kwargs.pop('other_guidelines')
+    if "other_guidelines" in kwargs:
+        other_guidelines = kwargs.pop("other_guidelines")
 
     prompt = STATE_PROMPT_BATCHED.format(
         context=context,
@@ -151,11 +168,9 @@ async def compute_batch_score(data_source, generations, ground_truth, extra_info
         other_guidelines=other_guidelines,
         state_name=state_name,
         state_desc=state_desc,
-        num_generations=len(generations)
+        num_generations=len(generations),
     )
 
-
-    
     model = kwargs.pop("model", "openai/gpt-5-mini")
     # slight randomness to avoid getting stuck in a loop
     temperature = kwargs.pop("temperature", 1)
@@ -165,10 +180,11 @@ async def compute_batch_score(data_source, generations, ground_truth, extra_info
         scores_list = []
         for attempt in range(max_retry):
             content = None
-            
+
             # Try litellm first
             try:
                 import litellm
+
                 resp = await litellm.acompletion(
                     messages=[{"role": "user", "content": prompt}],
                     model=model,
@@ -178,12 +194,13 @@ async def compute_batch_score(data_source, generations, ground_truth, extra_info
                 )
                 content = resp.choices[0].message.content
             except Exception as e:
-                print(f"[Attempt {attempt+1}] litellm failed: {e}")
-            
+                print(f"[Attempt {attempt + 1}] litellm failed: {e}")
+
             # Fallback to openai
             if content is None:
                 try:
                     import openai
+
                     client = openai.AsyncOpenAI()
                     resp = await client.chat.completions.create(
                         messages=[{"role": "user", "content": prompt}],
@@ -194,23 +211,22 @@ async def compute_batch_score(data_source, generations, ground_truth, extra_info
                     )
                     content = resp.choices[0].message.content
                 except Exception as e:
-                    print(f"[Attempt {attempt+1}] openai failed: {e}")
-            
+                    print(f"[Attempt {attempt + 1}] openai failed: {e}")
+
             if content is None:
                 continue
-            
+
             # Parse response
             try:
-                usage = extract_usage(resp)
                 result = extract_json(content)
                 key_points = result.pop("key_points")
-                
+
                 if not isinstance(result, dict):
                     raise ValueError(f"Expected dict, got {type(result)}")
-                
+
                 if len(result) != len(generations):
-                    raise ValueError(f"[Attempt {attempt+1}] Expected {len(generations)} scores, got {len(result)}")
-                
+                    raise ValueError(f"[Attempt {attempt + 1}] Expected {len(generations)} scores, got {len(result)}")
+
                 # Extract scores
                 scores = []
                 for i, value in result.items():
@@ -219,31 +235,28 @@ async def compute_batch_score(data_source, generations, ground_truth, extra_info
                     score = float(value["score"])
                     scores.append(min(max(score, 0.0), 1.0))
                 break
-                
+
             except Exception as e:
-                print(f"[Attempt {attempt+1}] Failed to parse response: {e} | {content}")
+                print(f"[Attempt {attempt + 1}] Failed to parse response: {e} | {content}")
                 USER = os.getenv("USER", "unknown_user")
                 with open(f"/dfs/project/kgrlm/common/llm_twin/log_state_reward_{USER}.out", "a") as f:
-                    f.write(f"[Attempt {attempt+1}] Parse error: {e}\n")
+                    f.write(f"[Attempt {attempt + 1}] Parse error: {e}\n")
                     f.write(f"Content: {content}\n")
                     f.write(f"Generations: {generations_text}\n")
                     f.write("-" * 80 + "\n")
-                
+
                 if attempt < max_retry - 1:
                     await asyncio.sleep(1)
                 else:
-                    raise ValueError(f"All {max_retry} attempts failed to get valid scores")
-        
+                    raise ValueError(f"All {max_retry} attempts failed to get valid scores") from None
+
         scores_list.append(scores)
-    
+
     if len(scores_list) == 1:
         final_score = scores_list[0]
     final_score = [sum(score[i] for score in scores_list) / len(scores_list) for i in range(len(generations))]
-    
-    return [
-        {
-            "score": s, 
-            "metrics_info": json.dumps({"key_points": key_points, "thought": result[i+1]})
-        } for i, s in enumerate(final_score)
-    ]
 
+    return [
+        {"score": s, "metrics_info": json.dumps({"key_points": key_points, "thought": result[i + 1]})}
+        for i, s in enumerate(final_score)
+    ]
