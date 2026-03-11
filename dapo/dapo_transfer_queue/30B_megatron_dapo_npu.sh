@@ -37,11 +37,11 @@ gen_prompt_bsz=$((train_prompt_bsz * 1))
 n_resp_per_prompt=8
 train_prompt_mini_bsz=8 # mini_bsz * n >= micro_bsz * pp * dp
 
-MODEL_PATH="/workspace/models/Qwen3-30B-A3B"
-MCORE_MODEL_PATH="/workspace/mcore/Qwen3-30B-A3B"
-
-TRAIN_FILE="/workspace/database/dapo-math-17k.parquet"
-TEST_FILE="/workspace/database/dapo-math-17k.parquet"
+# 支持通过环境变量覆盖，例如: export MODEL_PATH=/path/to/model && ./30B_megatron_dapo_npu.sh
+MODEL_PATH="${MODEL_PATH:-/workspace/models/Qwen3-30B-A3B}"
+MCORE_MODEL_PATH="${MCORE_MODEL_PATH:-/workspace/mcore/Qwen3-30B-A3B}"
+TRAIN_FILE="${TRAIN_FILE:-/workspace/database/dapo-math-17k.parquet}"
+TEST_FILE="${TEST_FILE:-/workspace/database/dapo-math-17k.parquet}"
 
 CKPTS_DIR="./ckpts/${project_name}/${exp_name}-$(date +"%Y-%m-%dTime%H.%M.%S")"
 

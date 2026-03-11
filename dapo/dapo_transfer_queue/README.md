@@ -63,8 +63,12 @@ python3 -m recipe.dapo_transfer_queue.main_dapo \
 **中文**  
 更多参数可参考同目录下的 `30B_megatron_dapo_npu.sh` 或 `recipe/dapo/run_dapo_*.sh`；DAPO 使用 async rollout，需保证 rollout 相关配置一致。
 
+> **注意（bsz 与 n_gpus）：** 脚本 `30B_megatron_dapo_npu.sh` 内备注要求 `train_prompt_bsz`（bsz）> `n_gpus`，但脚本中当前写的是 `train_prompt_bsz=8`、`trainer.n_gpus_per_node=16`，即 8 > 16 不成立，二者冲突。实际使用时请按需求二选一调整：要么增大 bsz 使其大于总 GPU 数（如 `nnodes * n_gpus_per_node`），要么减小 `n_gpus_per_node`/节点数以使 n_gpus < bsz，否则可能不符合框架对 batch 与 GPU 数的约束。
+
 **English**  
 For more arguments, see `30B_megatron_dapo_npu.sh` or `recipe/dapo/run_dapo_*.sh`. DAPO uses async rollout; keep rollout-related config consistent.
+
+> **Note (bsz vs n_gpus):** The script `30B_megatron_dapo_npu.sh` comments that `train_prompt_bsz` (bsz) must be > `n_gpus`, but the script currently sets `train_prompt_bsz=8` and `trainer.n_gpus_per_node=16`, so 8 > 16 does not hold—they conflict. When running, adjust one or the other: either increase bsz so it is greater than total GPUs (e.g. `nnodes * n_gpus_per_node`), or reduce `n_gpus_per_node`/node count so that n_gpus < bsz, otherwise the batch vs GPU constraint may not be satisfied.
 
 ---
 
