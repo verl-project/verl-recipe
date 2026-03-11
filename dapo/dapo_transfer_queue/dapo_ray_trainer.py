@@ -215,46 +215,7 @@ class RayDAPOTrainer(RayPPOTrainer):
                         gen_output_meta = self.async_rollout_manager.generate_sequences(gen_meta)
                         timing_raw.update(gen_output_meta.extra_info["timing"])
                         gen_output_meta.extra_info.pop("timing", None)
-                    # if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
-                    #     with marked_timer("gen_max", timing_raw, "red"):
-                    #         gen_baseline_batch = deepcopy(gen_batch)
-                    #         gen_baseline_batch.meta_info["do_sample"] = False
-                    #         gen_baseline_output = self.async_rollout_manager.generate_sequences(gen_baseline_batch)
-
-                    #         new_batch = new_batch.union(gen_baseline_output)
-                    #         # compute reward model score on new_batch
-                    #         rm_scores = None
-                    #         if self.use_rm and "rm_scores" not in new_batch.batch.keys():
-                    #             rm_scores = self.rm_wg.compute_rm_score(new_batch)
-                    #             new_batch = new_batch.union(rm_scores)
-                    #         reward_baseline_tensor, _ = compute_reward(new_batch, self.reward_fn)
-                    #         reward_baseline_tensor = reward_baseline_tensor.sum(dim=-1)
-
-                    #         keys_to_pop = set(gen_baseline_output.batch.keys())
-                    #         if rm_scores is not None:
-                    #             keys_to_pop.update(rm_scores.batch.keys())
-                    #         new_batch.pop(batch_keys=list(keys_to_pop))
-
-                    #         new_batch.batch["reward_baselines"] = reward_baseline_tensor
-
-                    #         del rm_scores, gen_baseline_batch, gen_baseline_output
                     batch_meta: BatchMeta = gen_meta.union(gen_output_meta)
-
-                    # if "response_mask" not in batch_meta.field_names:
-                    #     response_mask_output_meta = compute_response_mask(batch_meta, self.tq_client)
-                    #     batch_meta = batch_meta.union(response_mask_output_meta)
-
-                    # attention_mask_meta = batch_meta.select_fields(["attention_mask"])
-                    # balanced_idx = None
-                    # if self.config.trainer.balance_batch:
-                    #     balanced_idx = self._balance_batch(attention_mask_meta, self.tq_client, metrics=metrics)
-                    #     batch_meta.reorder(balanced_idx)
-
-                    # data = self.tq_client.get_data(attention_mask_meta)
-                    # batch_meta.extra_info["global_token_num"] = torch.sum(data["attention_mask"], dim=-1).tolist()
-
-                    # When use_kl_in_reward: must compute old_log_prob & ref_log_prob *before* reward,
-                    # because apply_kl_penalty needs them. Same order as original DAPO (dapo_ray_trainer.py).
                     if self.config.algorithm.use_kl_in_reward:
                         batch_meta = self.compute_kl_related_metrics(batch_meta, metrics, timing_raw)
 
