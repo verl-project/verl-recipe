@@ -67,6 +67,27 @@ SFT_FEATURES = Dataset.from_list([SFT_TEMPLATE]).features
 RL_FEATURES = Dataset.from_list([RL_TEMPLATE]).features
 
 
+def _parse_example_fields(ex: dict) -> dict:
+    """Parse metadata, prompt, and persona fields from JSON strings if needed."""
+    ex["metadata"] = json.loads(ex["metadata"]) if isinstance(ex["metadata"], str) else ex["metadata"]
+    if isinstance(ex["prompt"], str):
+        ex["prompt"] = json.loads(ex["prompt"])
+    ex["prompt"] = [
+        {
+            "role": p["role"],
+            "content": p["content"],
+            "metadata": json.loads(p["metadata"]) if isinstance(p["metadata"], str) else p["metadata"],
+        }
+        for p in ex["prompt"]
+    ]
+    if isinstance(ex["persona"], str):
+        try:
+            ex["persona"] = json.loads(ex["persona"])
+        except json.JSONDecodeError:
+            pass  # keep as plain string
+    return ex
+
+
 def is_valid_persona_json(persona: dict) -> bool:
     """Check if the persona dict has sufficient information"""
 
@@ -898,23 +919,7 @@ if __name__ == "__main__":
                 if cache_key in thinking_cache and _valid_thinking_trace(thinking_cache.get(cache_key)):
                     continue
 
-                ex["metadata"] = json.loads(ex["metadata"]) if isinstance(ex["metadata"], str) else ex["metadata"]
-                if isinstance(ex["prompt"], str):
-                    ex["prompt"] = json.loads(ex["prompt"])
-                ex["prompt"] = [
-                    {
-                        "role": p["role"],
-                        "content": p["content"],
-                        "metadata": json.loads(p["metadata"]) if isinstance(p["metadata"], str) else p["metadata"],
-                    }
-                    for p in ex["prompt"]
-                ]
-                if isinstance(ex["persona"], str):
-                    # WildChat persona is often a plain string; some datasets use JSON.
-                    try:
-                        ex["persona"] = json.loads(ex["persona"])
-                    except json.JSONDecodeError:
-                        ex["persona"] = ex["persona"]
+                ex = _parse_example_fields(ex)
 
                 persona_str = format_persona(
                     ex["persona"],
@@ -994,22 +999,7 @@ if __name__ == "__main__":
         features = SFT_FEATURES if args.sft else RL_FEATURES
 
         def map_fn_wrap(ex, idx, map_fn=map_fn):
-            ex["metadata"] = json.loads(ex["metadata"]) if isinstance(ex["metadata"], str) else ex["metadata"]
-            if isinstance(ex["prompt"], str):
-                ex["prompt"] = json.loads(ex["prompt"])
-            ex["prompt"] = [
-                {
-                    "role": p["role"],
-                    "content": p["content"],
-                    "metadata": json.loads(p["metadata"]) if isinstance(p["metadata"], str) else p["metadata"],
-                }
-                for p in ex["prompt"]
-            ]
-            if isinstance(ex["persona"], str):
-                try:
-                    ex["persona"] = json.loads(ex["persona"])
-                except json.JSONDecodeError:
-                    ex["persona"] = ex["persona"]
+            ex = _parse_example_fields(ex)
             return map_fn(ex, idx)
 
         mapped_ds = raw.map(

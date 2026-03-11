@@ -15,7 +15,6 @@
 
 import asyncio
 import json
-import os
 import re
 
 from recipe.humanlm.utils import extract_json, parse_messages
@@ -238,12 +237,6 @@ async def compute_batch_score(data_source, generations, ground_truth, extra_info
 
             except Exception as e:
                 print(f"[Attempt {attempt + 1}] Failed to parse response: {e} | {content}")
-                USER = os.getenv("USER", "unknown_user")
-                with open(f"/dfs/project/kgrlm/common/llm_twin/log_state_reward_{USER}.out", "a") as f:
-                    f.write(f"[Attempt {attempt + 1}] Parse error: {e}\n")
-                    f.write(f"Content: {content}\n")
-                    f.write(f"Generations: {generations_text}\n")
-                    f.write("-" * 80 + "\n")
 
                 if attempt < max_retry - 1:
                     await asyncio.sleep(1)

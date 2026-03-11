@@ -6,13 +6,13 @@ set -x
 # SFT Training Script
 ################################################################################
 # Usage:
-#   bash recipe/usim/train_sft.sh <gpu_list> <dataset_name> <thinking_mode> [percent] [model_path] [extra hydra overrides...]
+#   bash recipe/humanlm/train_sft.sh <gpu_list> <dataset_name> <thinking_mode> [percent] [model_path] [extra hydra overrides...]
 #
 # Examples:
-#   bash recipe/usim/train_sft.sh "0,1,2,3,4,5,6,7" amazon no_thinking
-#   bash recipe/usim/train_sft.sh "0,1,2,3,4,5,6,7" amazon thinking
-#   bash recipe/usim/train_sft.sh "0,1,2,3" reddit no_thinking 10
-#   bash recipe/usim/train_sft.sh "0,1,2,3" reddit thinking 5 Qwen/Qwen3-8B optim.lr=2e-5
+#   bash recipe/humanlm/train_sft.sh "0,1,2,3,4,5,6,7" amazon no_thinking
+#   bash recipe/humanlm/train_sft.sh "0,1,2,3,4,5,6,7" amazon thinking
+#   bash recipe/humanlm/train_sft.sh "0,1,2,3" reddit no_thinking 10
+#   bash recipe/humanlm/train_sft.sh "0,1,2,3" reddit thinking 5 Qwen/Qwen3-8B optim.lr=2e-5
 ################################################################################
 
 PROJECT_DIR="$(pwd)"
@@ -73,7 +73,7 @@ PERCENT="${PERCENT%P}"
 # Dataset path + chat template selection
 ################################################################################
 # NOTE: this script is wired to the "dup" processed data layout (dedup datasets)
-DATASET_DIR="//llm_twin/processed_data"
+export DATASET_DIR="$PROJECT_DIR/llm_twin/processed_data"
 DATASET_REPO_DIR="${DATASET_NAME}_processed_dataset_by_post_dedup"
 
 # assert THINKING_MODE in thinking or no_thinking
@@ -92,7 +92,7 @@ else
   ENABLE_THINKING=false
 fi
 
-CHAT_TEMPLATE="recipe/usim/chat_templates/qwen3_multi_role_template_think.jinja"
+CHAT_TEMPLATE="recipe/humanlm/chat_templates/qwen3_multi_role_template_think.jinja"
 DATA_PATH="$DATASET_DIR/$DATASET_REPO_DIR/$MODE_DIR/$STATE_DIR/${PERCENT}p"
 EXP_NAME="sft_${DATASET_NAME}_${THINKING_MODE}_${STATE_DIR}_${PERCENT}p"
 
@@ -163,7 +163,7 @@ python3 -m torch.distributed.run --standalone --nnodes=1 --nproc_per_node="$NUM_
   optim.lr_scheduler=cosine \
   +trainer.val_before_train=true \
   trainer.total_epochs=2 \
-  trainer.project_name=usim \
+  trainer.project_name=humanlm \
   trainer.experiment_name="$EXP_NAME" \
   trainer.default_local_dir="$OUTPUT_DIR" \
   trainer.save_freq=300 \

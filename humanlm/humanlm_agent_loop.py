@@ -156,8 +156,6 @@ class HumanLMAgentLoop(AgentLoopBase):
 
         no_repeat_ngram_size = self.config.actor_rollout_ref.rollout.get("no_repeat_ngram_size", 0)
         if no_repeat_ngram_size > 0:
-            from recipe.humanlm.no_repeat_ngram import NoRepeatNGramLogitsProcessor
-
             sampling_params = {
                 **sampling_params,
                 "logits_processors": [NoRepeatNGramLogitsProcessor(no_repeat_ngram_size)],
@@ -195,6 +193,4 @@ class HumanLMAgentLoop(AgentLoopBase):
                 "global_steps": global_steps,
             }
         )
-
-        output.extra_fields.update({"turn_scores": [], "tool_rewards": []})
         return output

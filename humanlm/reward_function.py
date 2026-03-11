@@ -36,7 +36,7 @@ from verl.utils.reward_score import default_compute_score
 from verl.workers.reward_manager import register
 from verl.workers.reward_manager.registry import REWARD_MANAGER_REGISTRY
 
-METRIC_IMPORT_LOCK = threading.Lock()
+_METRIC_CACHE: dict = {}
 
 
 async def compute_reward(
@@ -48,16 +48,14 @@ async def compute_reward(
     num_retries: int = 10,
 ) -> dict[str, list[float]]:
     """Compute rewards for generations using specified metrics."""
-
-    _METRIC_CACHE = {}
-    _METRIC_LOAD_LOCK = asyncio.Lock()  # asyncio.Lock, not threading.Lock
+    load_lock = asyncio.Lock()
 
     async def load_metric(metric: str):
         if metric in _METRIC_CACHE:
             return _METRIC_CACHE[metric]
 
-        async with _METRIC_LOAD_LOCK:  # yields to event loop while waiting
-            if metric in _METRIC_CACHE:  # double-check after acquiring
+        async with load_lock:
+            if metric in _METRIC_CACHE:
                 return _METRIC_CACHE[metric]
 
             metric_path = Path(__file__).parent / "metrics" / f"{metric}.py"

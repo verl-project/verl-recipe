@@ -224,15 +224,6 @@ async def compute_score(data_source, generation, ground_truth, extra_info, confi
 
             except Exception as e:
                 print(f"[Attempt {attempt + 1}] Failed to parse response: {e}")
-                import os
-
-                USER = os.getenv("USER", "unknown_user")
-                with open(f"/dfs/project/kgrlm/common/llm_twin/log_state_reward_on_response_{USER}.out", "a") as f:
-                    f.write(f"[Attempt {attempt + 1}] Parse error: {e}\n")
-                    f.write(f"Content: {content}\n")
-                    f.write(f"Generations: {generation_text}\n")
-                    f.write("-" * 80 + "\n")
-
                 if attempt < max_retry - 1:
                     await asyncio.sleep(1)
                 else:
