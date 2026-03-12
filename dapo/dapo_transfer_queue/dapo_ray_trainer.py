@@ -99,7 +99,9 @@ class RayDAPOTrainer(RayPPOTrainer):
 
         if self.use_reference_policy:
             ref_log_prob_fields = [*log_prob_fields, "old_log_probs"]
-            ref_log_prob_meta = batch_meta.select_fields([f for f in ref_log_prob_fields if f in batch_meta.field_names])
+            ref_log_prob_meta = batch_meta.select_fields(
+                [f for f in ref_log_prob_fields if f in batch_meta.field_names]
+            )
             with marked_timer("ref", timing_raw, "olive"):
                 if not self.ref_in_actor:
                     ref_log_prob_output_meta = self.ref_policy_wg.compute_ref_log_prob(ref_log_prob_meta)
