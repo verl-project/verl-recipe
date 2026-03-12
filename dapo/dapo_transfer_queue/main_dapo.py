@@ -31,6 +31,7 @@ from verl.utils.fs import copy_to_local
 
 from .dapo_ray_trainer import RayDAPOTrainer
 
+
 @hydra.main(config_path="config", config_name="dapo_transfer_queue_trainer", version_base=None)
 def main(config):
     auto_set_ascend_device_name(config)
@@ -58,11 +59,7 @@ def run_dapo(config) -> None:
         has_profiler_steps = profiler_steps is not None and len(profiler_steps) > 0
 
         # CUDA: Nsight Systems (nsys) 需要 controller 侧 runtime_env 传递 nsight 选项
-        if (
-            is_cuda_available
-            and config.global_profiler.tool == "nsys"
-            and has_profiler_steps
-        ):
+        if is_cuda_available and config.global_profiler.tool == "nsys" and has_profiler_steps:
             nsight_options = OmegaConf.to_container(
                 config.global_profiler.global_tool_config.nsys.controller_nsight_options
             )
