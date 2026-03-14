@@ -1,0 +1,116 @@
+# =============================================================================
+# SWE Agent Loop Configuration for VERL
+# =============================================================================
+# All defaults live in config.py (SWEAgentRuntimeConfig dataclass).
+# This YAML only needs to specify values that DIFFER from those defaults.
+#
+# --- Field Override Mechanism ---
+# 1. Infrastructure fields: Fixed per deployment, shared across all tasks.
+# 2. Data-affine fields (marked [DATA-AFFINE]):
+#    May vary per task/dataset. Values here serve as baseline defaults.
+#    At runtime, per-instance overrides from extra_info take priority:
+#      extra_info > YAML > dataclass defaults
+# =============================================================================
+
+- name: swe_agent
+  _target_: recipe.swe_agent.swe_agent_loop.SWEAgentLoop
+
+  proxy_config:
+    port: 0
+    timeout: 600
+
+  sandbox_config:
+    # --- Docker mode ---
+    # "host" = VERL on bare metal (sandbox uses --network host, proxy at 127.0.0.1)
+    # "dind" = VERL inside Docker. The outer launcher is expected to expose the
+    #            host-side proxy into the sandbox so it remains reachable at 127.0.0.1.
+    #            This mode therefore still keeps api_base on 127.0.0.1 rather than
+    #            switching to host.docker.internal.
+    docker_mode: dind
+
+    # --- Infrastructure ---
+    swe_agent_timeout: 1800
+    execution_timeout: 300
+    max_parallel_tasks_per_worker: 32
+    output_dir: ./swe_agent_outputs
+
+    # --- [DATA-AFFINE] can be overridden per instance via extra_info.sandbox_overrides ---
+    max_model_calls_per_instance: 10
+    docker_image: swerex-python:3.11-preinstalled
+
+  agent:
+    max_requeries: 5
+
+    # [DATA-AFFINE] Templates vary by task type
+    templates:
+      system_template: |-
+        You are a software engineer that can interact with a computer to solve coding tasks.
+
+        IMPORTANT: Every response MUST follow this exact format:
+
+        DISCUSSION
+        Your reasoning about what to do next.
+
+        ```
+        exactly_one_command_here
+        ```
+
+        Rules:
+        - Include EXACTLY ONE code block (``` ```) per response
+        - The code block must be the LAST thing in your response
+        - The code block contains the bash command or tool command to execute
+        - Do NOT put example outputs or other code blocks in your response
+        - You MUST actually edit files to fix the problem before submitting
+        - NEVER run `submit` until you have made at least one code change with `str_replace_editor` or a write command
+        - Running `submit` without making any edits will result in a FAILED submission
+      instance_template: |-
+        <uploaded_files>
+        {{working_dir}}
+        </uploaded_files>
+        I've uploaded a python code repository in the directory {{working_dir}}.
+
+        <pr_description>
+        {{problem_statement}}
+        </pr_description>
+
+        Implement the necessary changes to satisfy the <pr_description>.
+        Do NOT modify any test files.
+
+        You MUST follow these steps IN ORDER:
+        1. Read and understand the existing code with `cat` and `ls`
+        2. Identify exactly what needs to change
+        3. Make the required code changes using `str_replace_editor` or bash commands
+           - `str_replace_editor` requires positional args: <command> <path> (no --path flag)
+           - Example: str_replace_editor str_replace /testbed/file.py --old_str "<exact old>" --new_str "<new>"
+           - Quote arguments carefully when strings contain spaces or newlines
+        4. Verify your changes by reading the modified file
+        5. Run `submit` ONLY AFTER you have made actual code changes
+
+        CRITICAL: Do NOT run `submit` before editing files. Submitting without changes is a guaranteed failure.
+        You MUST make at least one edit before submitting.
+      next_step_template: |-
+        OBSERVATION:
+        {{observation}}
+      next_step_no_output_template: |-
+        Your command ran successfully and did not produce any output.
+
+    tools:
+      env_variables:
+        PAGER: cat
+        MANPAGER: cat
+        LESS: -R
+        PIP_PROGRESS_BAR: 'off'
+        TQDM_DISABLE: '1'
+        GIT_PAGER: cat
+      bundles:
+        - path: tools/registry
+        - path: tools/edit_anthropic
+        - path: tools/review_on_submit_m
+      registry_variables:
+        USE_FILEMAP: 'false'
+      enable_bash_tool: true
+      parse_function:
+        type: thought_action
+    history_processors:
+      - type: cache_control
+        last_n_messages: 2
