@@ -21,7 +21,7 @@ export PYTORCH_NPU_ALLOC_CONF="max_split_size_mb:2048"
 export PYTHONUNBUFFERED=1
 
 # 修改为当前需要跑的用例路径
-DEFAULT_SH="examples/flash_rl/test_qwen3-30b_int8_npu.sh"
+DEFAULT_SH="recipe/flash_rl_ascend/test_qwen3-30b_int8_npu.sh"
 echo "Use $DEFAULT_SH"
 
 ulimit -n 32768
