@@ -427,7 +427,7 @@ class DiffusionActorRolloutWorker(Worker, DistProfilerExtension):
             }
             output = DataProto(meta_info={"metrics": metrics})
             log_gpu_memory_usage(f"After update_actor", logger=logger, level=logging.INFO)
-            return output
+        return output
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):

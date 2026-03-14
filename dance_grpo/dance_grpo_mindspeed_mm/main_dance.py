@@ -298,6 +298,6 @@ def remove_autocast_from_file(filepath):
 if __name__ == "__main__":
     current_dir = os.path.dirname(os.path.abspath(__file__))
     # TODO temporary repair
-    file_to_modify = f"{current_dir}/../../mindspeed_mm/models/common/embeddings/pos_embeddings.py"
+    file_to_modify = f"{current_dir}/../../../mindspeed_mm/models/common/embeddings/pos_embeddings.py"
     remove_autocast_from_file(file_to_modify)
     main()

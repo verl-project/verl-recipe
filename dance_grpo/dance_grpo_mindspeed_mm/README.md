@@ -183,7 +183,7 @@ Modify the following parameters and run the script to generate the args file for
 # source /usr/local/Ascend/cann/set_env.sh
 # cd verl
 
-bash ./recipe/dance_grpo/dance_grpo/dance_grpo_mindspeed_mm/examples/wan2.2/5B/t2v/get_train_args.sh
+bash ./recipe/dance_grpo/dance_grpo_mindspeed_mm/examples/wan2.2/5B/t2v/get_train_args.sh
 
 # Check whether the mindspeed_args.pkl and mm_args.pkl files are generated in ./recipe/dance_grpo_mindspeed_mm/examples/wan2.2/5B/t2v/output_args.
 ```
