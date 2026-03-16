@@ -101,7 +101,11 @@ class RewardRegistry:
 
                 resp = requests.post(
                     f"{self.atropos_url}/score",
-                    json={"solution": solution_str, "ground_truth": ground_truth, "data_source": data_source},
+                    json={
+                        "solution": solution_str,
+                        "ground_truth": ground_truth,
+                        "data_source": data_source,
+                    },
                     timeout=10,
                 )
                 score = resp.json().get("score", 0.0)
