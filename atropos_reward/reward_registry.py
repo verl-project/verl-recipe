@@ -78,6 +78,7 @@ class RewardRegistry:
         # Try verl's built-in first
         try:
             from verl.utils.reward_score import default_compute_score
+
             return default_compute_score(data_source, solution_str, ground_truth, **kwargs)
         except (NotImplementedError, ImportError, ModuleNotFoundError):
             pass
@@ -97,6 +98,7 @@ class RewardRegistry:
         if self.atropos_url:
             try:
                 import requests
+
                 resp = requests.post(
                     f"{self.atropos_url}/score",
                     json={"solution": solution_str, "ground_truth": ground_truth, "data_source": data_source},
@@ -124,3 +126,4 @@ def register_reward(data_source: str, fn: Callable) -> None:
 def compute_score(data_source: str, solution_str: str, ground_truth: str, **kwargs) -> float:
     """Compute score using the default registry."""
     return _default_registry.compute_score(data_source, solution_str, ground_truth, **kwargs)
+
