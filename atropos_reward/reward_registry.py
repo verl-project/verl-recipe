@@ -35,10 +35,12 @@ def _gsm8k_score(solution_str: str, ground_truth: str) -> float:
 
     if final is None:
         return 0.0
+    # Clean both final and ground_truth consistently
+    final = final.strip().replace(",", "").replace("$", "")
     try:
         gt = str(ground_truth).replace(",", "").replace("$", "").strip()
-        return 1.0 if final.strip() == gt else 0.0
-    except Exception:
+        return 1.0 if final == gt else 0.0
+    except (ValueError, AttributeError):
         return 0.0
 
 
@@ -77,7 +79,7 @@ class RewardRegistry:
         try:
             from verl.utils.reward_score import default_compute_score
             return default_compute_score(data_source, solution_str, ground_truth, **kwargs)
-        except NotImplementedError:
+        except (NotImplementedError, ImportError, ModuleNotFoundError):
             pass
         except Exception as e:
             logger.warning(f"[RewardRegistry] verl built-in failed for {data_source}: {e}")
