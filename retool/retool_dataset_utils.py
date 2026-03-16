@@ -29,6 +29,7 @@ def map_fn(row: dict, *, data_source: str = None):
     }
     return data
 
+
 def map_fn2(row: dict):
     content = row["prompt"][0]["content"]
     row["prompt"][0]["content"] = content + answer_format
