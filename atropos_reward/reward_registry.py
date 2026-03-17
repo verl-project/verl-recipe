@@ -9,6 +9,7 @@ Usage:
     registry = RewardRegistry(atropos_url="http://localhost:8000")
     score = registry.compute_score(data_source, solution_str, ground_truth)
 """
+
 import logging
 import re
 from typing import Callable, Optional
@@ -130,4 +131,3 @@ def register_reward(data_source: str, fn: Callable) -> None:
 def compute_score(data_source: str, solution_str: str, ground_truth: str, **kwargs) -> float:
     """Compute score using the default registry."""
     return _default_registry.compute_score(data_source, solution_str, ground_truth, **kwargs)
-
