@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import logging
 import re
 from typing import Any
@@ -20,6 +21,7 @@ from recipe.retool.retool_dataset_utils import map_fn, map_fn2
 
 from verl.tools.base_tool import OpenAIFunctionToolSchema
 from verl.tools.sandbox_fusion_tools import SandboxFusionTool
+from verl.tools.schemas import ToolResponse
 from verl.utils.dataset import RLHFDataset
 from verl.utils.reward_score import math_dapo
 from verl.utils.rollout_trace import rollout_trace_op
@@ -33,7 +35,7 @@ class CustomSandboxFusionTool(SandboxFusionTool):
         self.code_pattern = re.compile(r"```python(.*?)```", re.DOTALL)
 
     @rollout_trace_op
-    async def execute(self, instance_id: str, parameters: dict[str, Any], **kwargs) -> tuple[str, float, dict]:
+    async def execute(self, instance_id: str, parameters: dict[str, Any], **kwargs) -> tuple[ToolResponse, float, dict]:
         code = parameters["code"]
         matches = self.code_pattern.findall(code)
         if matches:
@@ -54,9 +56,20 @@ class CustomSandboxFusionTool(SandboxFusionTool):
         if not isinstance(code, str):
             code = str(code)
 
-        result = await self.execution_pool.execute.remote(self.execute_code, instance_id, code, timeout, language)
-        # sandbox has no score or metrics, use Nones
-        return result, None, None
+        if self.use_ray_execution_pool:
+            result = await self.execution_pool.execute.remote(self.execute_code, instance_id, code, timeout, language)
+        else:
+            self._thread_semaphore.acquire()
+            try:
+                result = await asyncio.get_running_loop().run_in_executor(
+                    None, self.execute_code, instance_id, code, timeout, language
+                )
+            finally:
+                self._thread_semaphore.release()
+
+        if isinstance(result, ToolResponse):
+            return result, None, None
+        return ToolResponse(text=None if result is None else str(result)), None, None
 
 
 class CustomRLHFDataset(RLHFDataset):
