@@ -59,13 +59,10 @@ class CustomSandboxFusionTool(SandboxFusionTool):
         if self.use_ray_execution_pool:
             result = await self.execution_pool.execute.remote(self.execute_code, instance_id, code, timeout, language)
         else:
-            self._thread_semaphore.acquire()
-            try:
+            async with self._async_semaphore:
                 result = await asyncio.get_running_loop().run_in_executor(
                     None, self.execute_code, instance_id, code, timeout, language
                 )
-            finally:
-                self._thread_semaphore.release()
 
         if isinstance(result, ToolResponse):
             return result, None, None
