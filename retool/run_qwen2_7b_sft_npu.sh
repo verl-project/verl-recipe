@@ -14,23 +14,21 @@ SAVE_PATH=PATH/TO/checkpoint/$experiment_name
 
 torchrun --nnodes=$nnodes \
      --nproc_per_node=$nproc_per_node \
-     -m verl.trainer.fsdp_sft_trainer \
+     -m verl.trainer.sft_trainer \
     data.train_files=$TRAIN_DATA \
     data.val_files=$EVAL_DATA \
     data.max_length=16384 \
     data.train_batch_size=64 \
-    data.multiturn.enable=true \
-    data.multiturn.messages_key=messages \
-    data.multiturn.tools_key=tools \
     data.micro_batch_size_per_gpu=8 \
-    model.partial_pretrain=$MODEL_PATH \
-    model.strategy=fsdp \
+    model.path=$MODEL_PATH \
+    engine=fsdp \
     trainer.default_local_dir=$SAVE_PATH \
     trainer.project_name=$project_name \
     trainer.experiment_name=$experiment_name \
+    data.ignore_input_ids_mismatch=True \
     trainer.logger='["console"]' \
     trainer.total_epochs=6 \
-    trainer.save_freq=10 \
+    trainer.save_freq=100 \
     trainer.device=npu \
-    ulysses_sequence_parallel_size=4 \
-    use_remove_padding=true
+    engine.ulysses_sequence_parallel_size=2 \
+    model.use_remove_padding=true
