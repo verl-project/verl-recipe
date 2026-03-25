@@ -1,0 +1,13 @@
+{
+    "think": {
+        "desc": "the internal thinking process about what to say, including stance, emotion, and how to phrase the reply. This is an internal monologue that is not shown to others.",
+        "threshold": null,
+        "max_tokens": 512
+    },
+    "response": {
+        "desc": "the actual written comment or reply text provided by the user.",
+        "threshold": null,
+        "max_tokens": 512
+    }
+}
+
