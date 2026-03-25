@@ -90,11 +90,9 @@ def get_temperature_date(location: str, date: str, unit: str = "celsius"):
 
 
 class TestReactAgentLoop(ReactAgentLoop):
-    @classmethod
-    def init_class(cls, config, tokenizer, **kwargs):
-        # TODO: find better way to configure tools
-        cls.tools = [get_current_temperature, get_temperature_date]
-        super().init_class(config, tokenizer, **kwargs)
+    def __init__(self, *args, **kwargs):
+        self.tools = [get_current_temperature, get_temperature_date]
+        super().__init__(*args, **kwargs)
 
 
 def test_react_agent(init_config):
