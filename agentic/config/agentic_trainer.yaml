@@ -1,0 +1,15 @@
+# Agentic recipe config — extends ppo_trainer with proxy server settings.
+
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+# Proxy server configuration (used by start_proxy_server in the recipe)
+proxy_server:
+  host: "0.0.0.0"
+  port: 0
+  tool_format: "hermes"
