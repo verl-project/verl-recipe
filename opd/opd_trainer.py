@@ -122,19 +122,38 @@ class TeacherClient:
             topk_logps = response["teacher_topk_logprobs"][0]  # (valid_len, k)
             topk_indices = response["teacher_topk_indices"][0]  # (valid_len, k)
 
-            # Extract log prob of actual next token at each response position
+            # Extract log prob of actual next token at each response position.
+            #
+            # Teacher logprob layout: row j of topk_logps gives P(token | ids[0:j+1]),
+            # i.e. the distribution over ids[j+1]. So to get the teacher's prediction
+            # for the t-th response token ids[actual_prompt_len + t], we read from
+            # row (actual_prompt_len - 1 + t).
             actual_prompt_len = int(attention_mask[i][:prompt_length].sum().item())
+
+            # Compute a per-sample fallback for tokens outside teacher's top-k.
+            # Use the remaining probability mass spread uniformly over non-top-k tokens:
+            #   fallback = log((1 - sum(top_k_probs)) / (vocab_size - k))
+            k = topk_logps.shape[1] if topk_logps.dim() == 2 else 1
+            vocab_size = 151936  # Qwen series vocab size; conservative default
+
             for t in range(response_length):
-                src_idx = actual_prompt_len + t
-                if src_idx >= topk_logps.shape[0] or src_idx + 1 >= len(ids):
+                src_idx = actual_prompt_len - 1 + t
+                target_token_pos = actual_prompt_len + t
+                if src_idx < 0 or src_idx >= topk_logps.shape[0] or target_token_pos >= len(ids):
                     break
-                next_token = ids[src_idx + 1]
+                next_token = ids[target_token_pos]
                 match = (topk_indices[src_idx] == next_token).nonzero(as_tuple=True)
                 if len(match[0]) > 0:
                     teacher_log_probs[i, t] = topk_logps[src_idx, match[0][0]].item()
                 else:
-                    # Token not in teacher's top-k; assign a small default log prob
-                    teacher_log_probs[i, t] = -10.0
+                    # Token not in teacher's top-k. Estimate its log-prob from the
+                    # residual probability mass: P_residual = 1 - sum(top_k_probs).
+                    topk_probs = topk_logps[src_idx].exp()
+                    residual_mass = max(1.0 - topk_probs.sum().item(), 1e-10)
+                    remaining_tokens = max(vocab_size - k, 1)
+                    teacher_log_probs[i, t] = torch.tensor(
+                        residual_mass / remaining_tokens
+                    ).log().item()
 
         return teacher_log_probs
 
