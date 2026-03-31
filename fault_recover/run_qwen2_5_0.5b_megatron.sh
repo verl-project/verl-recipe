@@ -1,15 +1,5 @@
 ulimit -n 65535
-set -x
-
-# avoid delayed console log, may impact performance
-export PYTHONUNBUFFERED=1
-
-export CUDA_DEVICE_MAX_CONNECTIONS=1 # For megatron communication/computation overlapping
-export RAY_DEDUP_LOGS=0
-export HYDRA_FULL_ERROR=1
-export RAY_DEBUG=1
-export VLLM_ASCEND_ENABLE_NZ=0
-# export VLLM_USE_V1=1
+set -xeuo pipefail
 
 project_name='GRPO'
 exp_name='Qwen2.5-0.5B-Instruct-megatron-vllm-fault-recover'
