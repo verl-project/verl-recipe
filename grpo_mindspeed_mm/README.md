@@ -33,15 +33,19 @@ cd ..
 # install verl
 git clone https://github.com/volcengine/verl.git
 cd verl
-git checkout ef072aca0b4f615dd3bd4561dde89f3389c50d35
+git checkout 4045d67063052dcb800c918c107b8d5a87046006
 pip install -e .
 cd ..
 
+# Update the recipe directory.
+git clone https://github.com/verl-project/verl-recipe.git
+mkdir verl/recipe/grpo_mindspeed_mm
+cp -rf verl-recipe/grpo_mindspeed_mm verl/recipe/
 
 # install MindSpeed-MM
 git clone https://gitcode.com/Ascend/MindSpeed-MM.git
 cd MindSpeed-MM
-bash scripts/install.sh --msid eb10b92 && bash examples/fsdp2/qwen3_5/install_extensions.sh
+bash scripts/install.sh --msid eb10b92 && bash examples/qwen3_5/install_extensions.sh
 # torch version mismatch detected. Reinstall PyTorch? (y/n) -> n
 # Reinstall torch_npu to match PyTorch version? (y/n) -> n
 cd ..
@@ -53,7 +57,7 @@ git checkout cc7ab9be508ce6ed3637bba9e50367b29b742dc6
 pip install -e .
 cd ..
 
-pip install torch_npu==2.9.0 torchvision==0.24.0  torchaudio==2.9.0
+pip install torch_npu==2.9.0 torchvision==0.24.0  torchaudio==2.9.0 accelerate==1.13.0
 pip install mathruler
 
 # The directory structure after the preparation is as follows:

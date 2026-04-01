@@ -5,17 +5,28 @@ parallel:
     apply_modules:
       - model.visual.blocks.{*}
       - model.visual
+      - model.language_model.layers.{*}.linear_attn
+      - model.language_model.layers.{*}.mlp
       - model.language_model.layers.{*}
       - model.language_model.embed_tokens
+      - model.language_model.norm
+      - model.language_model.rotary_emb
       - model.language_model
       - lm_head
+    hook_modules:
+      - model.language_model.layers.{*}
     param_dtype: bf16
     reduce_dtype: fp32
   recompute: true
   recompute_plan:
       apply_modules:
         - model.language_model.layers.{*}
+        - model.visual.blocks.{*}
   ulysses_parallel_size: 1 # when open ulysses-cp, please set attn_implementation: flash_attention_2
+  expert_parallel_size: 1
+  ep_plan:
+    apply_modules:
+      - model.language_model.layers.{*}.mlp.experts
 
 data:
   dataset_param:
@@ -45,6 +56,7 @@ data:
       enable_thinking: false
       train_on_prompt: false
       mask_history: false
+      # tool_format: null
       dataset_dir: ./data
       dataset: &DATASET_PATH ./data/mllm_format_llava_instruct_data.json
       cache_dir: ./cache_dir/
@@ -65,7 +77,7 @@ data:
       ignore_pad_token_for_loss: true
 
 model:
-  model_id: qwen3_5
+  model_id: qwen3_5_moe
   model_name_or_path: *HF_MODEL_LOAD_PATH
   trust_remote_code: true
   attn_implementation: sdpa
@@ -74,11 +86,12 @@ model:
   loss_cfg:
     loss_type: default   # If you want raw loss in model, loss_type can be set to "raw".
     router_aux_loss_coef: 0.0
-  enable_chunk_loss: false
+  enable_chunk_loss: true
   chunkloss_plan:
     apply_module: lm_head
     chunk_size: 1024
   use_triton_gdn: true
+  use_grouped_expert_matmul: true
 
 training:
   micro_batch_size: 1
@@ -103,7 +116,7 @@ training:
   use_deter_comp: false
   load_rank0_and_broadcast: true
   plugin:
-    - mindspeed_mm/fsdp/models/qwen3_5
+    - mindspeed_mm/fsdp/models/qwen3_5_moe
     - mindspeed_mm/fsdp/data/datasets/huggingface
 
 tools:

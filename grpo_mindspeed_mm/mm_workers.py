@@ -1,18 +1,40 @@
 import logging
 import os
 import warnings
-
 import torch
 from omegaconf import DictConfig
 
+try:
+    # for torch 2.5+
+    from torch.distributed.tensor import DTensor
+except ImportError:
+    from torch.distributed._tensor import DTensor
+
 from verl.models.transformers.monkey_patch import apply_monkey_patch
 from verl.utils import hf_processor, hf_tokenizer
-from verl.utils.fsdp_utils import (
-    get_init_weight_context_manager,
-)
 from verl.utils.profiler import log_gpu_memory_usage
 from verl.workers.config import FSDPEngineConfig
-from verl.workers.fsdp_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker, get_vl_model_vision_tower
+from verl.workers.fsdp_workers import (
+    ActorRolloutRefWorker,
+    AsyncActorRolloutRefWorker,
+    get_vl_model_vision_tower
+)
+from verl.utils.fsdp_utils import (
+    get_init_weight_context_manager,
+    load_fsdp_model_to_gpu,
+    collect_lora_params,
+    replace_lora_wrapper,
+    offload_fsdp_model_to_cpu
+)
+from verl.utils.model import convert_weight_keys
+from verl.utils.device import (
+    get_device_id,
+    get_device_name,
+    get_nccl_backend,
+    get_torch_device,
+    set_expandable_segments,
+)
+from verl.utils.memory_utils import aggressive_empty_cache
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -25,22 +47,136 @@ class MMActorRolloutRefWorker(ActorRolloutRefWorker):
     def _dataloader(self, args=None):
         return None
 
+    async def rollout_mode(self):
+        """Context switch hybridengine to rollout mode."""
+        aggressive_empty_cache(force_sync=True)
+
+        log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
+        if self._is_offload_param:
+            load_fsdp_model_to_gpu(self.actor_module_fsdp)
+        log_gpu_memory_usage("After load_fsdp_model_to_gpu", logger=logger)
+
+        peft_config = None
+        peft_model = getattr(self.actor_module_fsdp, "_fsdp_wrapped_module", self.actor_module_fsdp)
+        if hasattr(peft_model, "peft_config"):
+            peft_config = peft_model.peft_config.get("default", None)
+            params = collect_lora_params(
+                module=self.actor_module_fsdp,
+                layered_summon=self.config.rollout.get("layered_summon", False),
+                base_sync_done=self.base_sync_done,
+            )
+            if not self.base_sync_done:
+                params = {replace_lora_wrapper(k, peft_config): v for k, v in params.items()}
+        else:
+            params = self.actor_module_fsdp.state_dict()
+
+        params = convert_weight_keys(
+            params, getattr(self.actor_module_fsdp, "_fsdp_wrapped_module", self.actor_module_fsdp)
+        )
+
+        for k in list(params.keys()):
+            if "mlp.experts.gate_up_proj" in k or "mlp.experts.down_proj" in k:
+                print(f"--> modify shape {k}")
+                params[k] = params[k].transpose(1, 2).contiguous()
+
+        # Special handling for LoRA with sleep_level=2:
+        # When sleep_level=2, base model weights are destroyed during each sleep cycle.
+        # separately collect and update LoRA weights and base model weights through their respective interfaces.
+        # Here: params contains LoRA weights, base_model_params contains base model weights.
+        # Only needed if the rollout engine actually sleeps/frees weights (free_cache_engine=True).
+        if (
+                peft_config is not None
+                and getattr(self.rollout, "sleep_level", None) == 2
+                and self.config.rollout.free_cache_engine
+        ):
+            base_model_params = collect_lora_params(
+                module=self.actor_module_fsdp,
+                layered_summon=self.layered_summon,
+                base_sync_done=False,
+            )
+            base_model_params = {replace_lora_wrapper(k, peft_config): v for k, v in base_model_params.items()}
+            base_model_params = convert_weight_keys(
+                base_model_params, getattr(self.actor_module_fsdp, "_fsdp_wrapped_module", self.actor_module_fsdp)
+            )
+
+        log_gpu_memory_usage("Before offload_fsdp_model_to_cpu", logger=logger)
+        # breakpoint()
+        if self._is_offload_param:
+            offload_fsdp_model_to_cpu(self.actor_module_fsdp)
+        log_gpu_memory_usage("After offload_fsdp_model_to_cpu", logger=logger)
+
+        set_expandable_segments(False)
+
+        if peft_config is not None and self.base_sync_done:
+            per_tensor_param = params.items() if isinstance(params, dict) else params  # Fixed: handle dict case
+        else:
+            device = get_device_id()  # used when fsdp2 set cpu_offload_policy
+            per_tensor_param = (
+                (name, param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param)
+                for name, param in params.items()
+            )
+
+        # QAT: quantize weights before sending to vLLM
+        if self._qat_enabled:
+            from verl.utils.qat.quantizer import QATQuantizer
+
+            quantizer = QATQuantizer(
+                mode=self.qat_config.mode,
+                group_size=self.qat_config.group_size,
+                ignore_patterns=self.qat_config.ignore_patterns,
+                device=torch.device(get_device_id()),
+                param_dtype=self._param_dtype,
+            )
+            per_tensor_param = quantizer.quantize_with_fusion(
+                per_tensor_param,
+                target_device=torch.device("cpu"),
+            )
+            aggressive_empty_cache(force_sync=True)
+
+        if self.config.rollout.free_cache_engine:
+            await self.rollout.resume(tags=["weights"])
+        log_gpu_memory_usage("After resume weights", logger=logger)
+
+        if (
+                peft_config is not None
+                and getattr(self.rollout, "sleep_level", None) == 2
+                and self.config.rollout.free_cache_engine
+        ):
+            per_tensor_base_params = (
+                (name, param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param)
+                for name, param in base_model_params.items()
+            )
+            await self.rollout.update_weights(per_tensor_base_params, base_sync_done=False)
+            del base_model_params, per_tensor_base_params
+
+        await self.rollout.update_weights(per_tensor_param, peft_config=peft_config,
+                                          base_sync_done=self.base_sync_done)  # qxm
+        log_gpu_memory_usage("After update_weights", logger=logger)
+        del params, per_tensor_param
+        aggressive_empty_cache(force_sync=True)
+        if self.config.rollout.free_cache_engine:
+            await self.rollout.resume(tags=["kv_cache"])
+        log_gpu_memory_usage("After resume kv_cache", logger=logger)
+
+        self.base_sync_done = True
+        set_expandable_segments(True)
+
     def _build_model_optimizer(
-        self,
-        model_path,
-        fsdp_config: FSDPEngineConfig,
-        optim_config,
-        override_model_config,
-        use_remove_padding=False,
-        use_fused_kernels=False,
-        enable_gradient_checkpointing=False,
-        trust_remote_code=False,
-        use_liger=False,
-        role="actor",
-        enable_activation_offload=False,
-        use_prefix_grouper=False,
-        use_tiled_mlp=False,
-        tiled_mlp_shards=4,
+            self,
+            model_path,
+            fsdp_config: FSDPEngineConfig,
+            optim_config,
+            override_model_config,
+            use_remove_padding=False,
+            use_fused_kernels=False,
+            enable_gradient_checkpointing=False,
+            trust_remote_code=False,
+            use_liger=False,
+            role="actor",
+            enable_activation_offload=False,
+            use_prefix_grouper=False,
+            use_tiled_mlp=False,
+            tiled_mlp_shards=4,
     ):
         from transformers import AutoConfig
 
@@ -97,9 +233,9 @@ class MMActorRolloutRefWorker(ActorRolloutRefWorker):
         # patch for qwen2.5-vl: when using flash_attention_3, set vision tower to use flash_attention_2
         # because the vision tower does not support flash_attention_3
         if (
-            getattr(actor_model_config, "model_type", None) == "qwen2_5_vl"
-            and attn_implementation == "flash_attention_3"
-            and hasattr(actor_model_config, "vision_config")
+                getattr(actor_model_config, "model_type", None) == "qwen2_5_vl"
+                and attn_implementation == "flash_attention_3"
+                and hasattr(actor_model_config, "vision_config")
         ):
             actor_model_config.vision_config._attn_implementation = "flash_attention_2"
 
