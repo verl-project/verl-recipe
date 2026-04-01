@@ -1,0 +1,146 @@
+parallel:
+  tensor_parallel_size: 1
+  fully_shard_parallel_size: auto
+  fsdp_plan:
+    apply_modules:
+      - model.visual.blocks.{*}
+      - model.visual
+      - model.language_model.layers.{*}.linear_attn
+      - model.language_model.layers.{*}.mlp
+      - model.language_model.layers.{*}
+      - model.language_model.embed_tokens
+      - model.language_model.norm
+      - model.language_model.rotary_emb
+      - model.language_model
+      - lm_head
+    hook_modules:
+      - model.language_model.layers.{*}
+    param_dtype: bf16
+    reduce_dtype: fp32
+  recompute: true
+  recompute_plan:
+      apply_modules:
+        - model.language_model.layers.{*}
+        - model.visual.blocks.{*}
+  ulysses_parallel_size: 1 # when open ulysses-cp, please set attn_implementation: flash_attention_2
+  expert_parallel_size: 1
+  ep_plan:
+    apply_modules:
+      - model.language_model.layers.{*}.mlp.experts
+
+data:
+  dataset_param:
+    dataset_type: huggingface
+    attr:
+      images: images
+      messages: messages
+      role_tag: role
+      content_tag: content
+      user_tag: user
+      assistant_tag: assistant
+
+    preprocess_parameters:
+      model_name_or_path: &HF_MODEL_LOAD_PATH ./ckpt/hf_path/Qwen35-xxB
+      use_fast_tokenizer: true
+      split_special_tokens: false
+      image_max_pixels: 262144
+      image_min_pixels: 1024
+      video_max_pixels: 16384
+      video_min_pixels: 0
+      video_fps: 2.0
+      video_maxlen: 64
+
+    basic_parameters:
+      cutoff_len: 1024
+      template: qwen3_vl_nothink
+      enable_thinking: false
+      train_on_prompt: false
+      mask_history: false
+      # tool_format: null
+      dataset_dir: ./data
+      dataset: &DATASET_PATH ./data/mllm_format_llava_instruct_data.json
+      cache_dir: ./cache_dir/
+      overwrite_cache: false
+      preprocessing_batch_size: 1000
+      preprocessing_num_workers: 16
+      max_samples: null
+
+  dataloader_param:
+    pin_memory: true
+    shuffle: false
+    dataloader_mode: sampler
+    drop_last: true
+    sampler_type: BaseRandomBatchSampler
+    num_workers: 8
+    collate_param:
+      model_name: qwen3vl
+      ignore_pad_token_for_loss: true
+
+model:
+  model_id: qwen3_5_moe
+  model_name_or_path: *HF_MODEL_LOAD_PATH
+  trust_remote_code: true
+  attn_implementation: sdpa
+  freeze:
+    - model.visual
+  loss_cfg:
+    loss_type: default   # If you want raw loss in model, loss_type can be set to "raw".
+    router_aux_loss_coef: 0.0
+  enable_chunk_loss: true
+  chunkloss_plan:
+    apply_module: lm_head
+    chunk_size: 1024
+  use_triton_gdn: true
+  use_grouped_expert_matmul: true
+
+training:
+  micro_batch_size: 1
+  gradient_accumulation_steps: 1
+  seed: 42
+  lr: 1.0e-5
+  lr_decay_style: cosine
+  lr_warmup_ratio: 0.1
+  weight_decay: 0
+  train_iters: 10000
+  clip_grad: 0.0
+  init_model_with_meta_device: true
+  optimizer: adamw
+  adam_fused: true
+  save_interval: 10000
+  no_load_optim: true  # Do not load optimizer state; remove if loading is needed.
+  no_load_rng: true  # Do not load RNG state; remove if loading is needed.
+  no_save_optim: true  # Do not save optimizer state; remove if saving is needed.
+  no_save_rng: true  # Do not save RNG state; remove if saving is needed.
+  load: ./ckpt/hf_path/Qwen35-xxB-dcp
+  save: ./save_path
+  use_deter_comp: false
+  load_rank0_and_broadcast: true
+  plugin:
+    - mindspeed_mm/fsdp/models/qwen3_5_moe
+    - mindspeed_mm/fsdp/data/datasets/huggingface
+
+tools:
+  profile:
+    enable: false
+    profile_type: static
+    ranks: [0]
+    static_param:
+      level: level1
+      with_stack: false
+      with_memory: false
+      record_shapes: false
+      with_cpu: true
+      save_path: ./profiling
+      start_step: 10
+      end_step: 11
+      data_simplification: false
+      aic_metrics_type: PipeUtilization
+  memory_profile:
+      enable: false
+      start_step: 1
+      end_step: 2
+      save_path: ./memory_snapshot
+      dump_ranks: [0]
+      stacks: all
+      max_entries: null
+      mem_info: false
