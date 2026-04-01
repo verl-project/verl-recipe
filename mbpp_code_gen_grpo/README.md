@@ -14,6 +14,10 @@ This recipe demonstrates **RLVR (RL with Verifiable Rewards)** for Python code g
   <em>Figure 1: Training (left) and Validation (right) reward across 25 epochs of GRPO training.</em>
 </p>
 
+## Requirements
+
+- **verl**: `>=0.6.0` (validated with `verl@main` as of 2026-04-01)
+
 ## Dataset and training task
 
 We used the [MBPP (sanitized)](https://huggingface.co/datasets/google-research-datasets/mbpp) benchmark dataset, which contains 420 python code generation tasks (120 for training, 257 for test, and 43 for validation) with natural-language task descriptions and, more importantly, **test cases for objective evaluation of any solution**. 
