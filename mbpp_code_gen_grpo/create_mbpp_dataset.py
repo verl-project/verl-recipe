@@ -53,7 +53,7 @@ DEFAULT_SPLITS = ("train", "test")
 
 CODE_FORMAT_INSTRUCTION = (
     "Write your complete solution in a single markdown fenced code block "
-    'using the language tag ```python (open with ```python on its own line, close with ```).'
+    "using the language tag ```python (open with ```python on its own line, close with ```)."
 )
 
 
@@ -96,7 +96,10 @@ def example_to_rl_row(
         mbpp_prompt,
         global_suffix=global_suffix,
         tests_to_show=rl_hint_tests,
-        tests_label="Your implementation should pass tests like the following (more tests will be used for evaluation):",
+        tests_label=(
+            "Your implementation should pass tests like the following "
+            "(more tests will be used for evaluation):"
+        ),
     )
 
     extra_info: dict[str, Any] = {
