@@ -56,6 +56,8 @@ CODE_FORMAT_INSTRUCTION = (
     "using the language tag ```python (open with ```python on its own line, close with ```)."
 )
 
+TESTS_HINT = "Your implementation should pass tests like the following (more tests will be used for evaluation):"
+
 
 def format_test_block(tests: list[str]) -> str:
     """Format a list of assert strings as a fenced code block."""
@@ -96,10 +98,7 @@ def example_to_rl_row(
         mbpp_prompt,
         global_suffix=global_suffix,
         tests_to_show=rl_hint_tests,
-        tests_label=(
-            "Your implementation should pass tests like the following "
-            "(more tests will be used for evaluation):"
-        ),
+        tests_label=TESTS_HINT,
     )
 
     extra_info: dict[str, Any] = {
