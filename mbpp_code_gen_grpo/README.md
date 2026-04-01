@@ -117,4 +117,4 @@ Running model-generated Python via `exec()` in the training process is dangerous
 
 ### Prompt Design — Test Hints
 
-MBPP test cases call specific function names (e.g. `assert remove_occ("hello", "l") == "heo"`). The model must generate matching names. RL prompts include `floor(N/2)` of the test cases as hints to expose the expected interface without leaking the full evaluation suite. These tests are removed from the reward evaluation to avoid leakage.
+MBPP test cases call specific function names (e.g. `assert remove_occ("hello", "l") == "heo"`). The model must generate matching names. RL prompts include `floor(N/2)` of the test cases as hints to expose the expected interface without leaking the full evaluation suite. The full test suite is still used for reward evaluation to provide a dense reward signal.
