@@ -1,8 +1,8 @@
 # NVFP4 QAT (Quantization-Aware Training)
 
-This module provides **NVFP4 W4A16 Quantization-Aware Training (QAT)**, enabling seamless integration between FSDP distributed training and vLLM inference engine. This allows **NVFP4 quantized** inference during training without causing KL divergence explosion.
+This module provides **NVFP4 W4A16 Quantization-Aware Training (QAT)**, enabling seamless integration between distributed training and vLLM inference engine. This allows **NVFP4 quantized** inference during training without causing KL divergence explosion.
 
-**Dependency**: Requires `vllm==0.15.0`.
+Two training backends are supported: **FSDP** and **Megatron**.
 
 ---
 
@@ -16,39 +16,46 @@ bash recipe/dapo/prepare_dapo_data.sh
 
 ---
 
-## Quick Start
+## FSDP Backend
 
-### Qwen3-30B-A3B-Base W4A16 Full Quantization
+### Environment
+
+```bash
+# Docker image
+docker pull vllm/vllm-openai:v0.15.0
+
+# Install verl dependencies inside the container
+pip install codetiming pylatexenc pybind11 dill tensorboard pandas accelerate wandb hydra-core peft torchdata tensordict datasets
+pip install flash-attn --no-build-isolation --no-cache-dir
+```
+
+### Quick Start
+
+**Qwen3-30B-A3B-Base W4A16 Full Quantization**:
 
 ```bash
 bash recipe/qat/run_qwen3_30b_w4a16.sh
 ```
 
-### Qwen3-30B-A3B-Base W4A16 FFN-only Quantization
+**Qwen3-30B-A3B-Base W4A16 FFN-only Quantization**:
 
 ```bash
 bash recipe/qat/run_qwen3_30b_w4a16_FFN_only.sh
 ```
 
----
+### Configuration
 
-## Key Parameters
-
-### QAT Configuration
-
-QAT is configured under `actor_rollout_ref.actor.fsdp_config.qat`:
+Configured under `actor_rollout_ref.actor.fsdp_config.qat`:
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `fsdp_config.qat.enable` | Enable QAT | `False` |
 | `fsdp_config.qat.mode` | Quantization mode | `"w4a16"` |
 | `fsdp_config.qat.group_size` | Quantization group size | `16` |
-| `fsdp_config.qat.ignore_patterns` | Layer name patterns to ignore (supports regex) | `["lm_head", "embed_tokens", "re:.*mlp.gate$"]` |
+| `fsdp_config.qat.ignore_patterns` | Layers to skip. Supports `re:` prefix for regex, otherwise substring match | `["lm_head", "embed_tokens", "re:.*mlp.gate$"]` |
 | `fsdp_config.qat.quantization_config_path` | vLLM quantization config JSON path | `recipe/qat/config/nvfp4_w4a16.json` |
 
-### YAML Configuration Examples
-
-**Full Quantization**:
+**YAML example (Full Quantization)**:
 
 ```yaml
 actor_rollout_ref:
@@ -65,7 +72,7 @@ actor_rollout_ref:
         quantization_config_path: "recipe/qat/config/nvfp4_w4a16.json"
 ```
 
-**FFN-only Quantization** (exclude Attention Linear layers):
+**YAML example (FFN-only Quantization)**:
 
 ```yaml
 actor_rollout_ref:
@@ -85,62 +92,85 @@ actor_rollout_ref:
 
 ---
 
+## Megatron Backend
+
+### Environment
+
+```bash
+# Docker image
+docker pull verlai/verl:vllm012.latest
+
+# Megatron-Bridge needs to be installed manually inside the container
+pip install --no-deps git+https://github.com/NVIDIA-NeMo/Megatron-Bridge@e940d997d7bdb7810f621f5b32bf70255b5aa2d9
+```
+
+### Quick Start
+
+**Qwen3-30B-A3B-Base W4A16 Full Quantization**:
+
+```bash
+bash recipe/qat/run_qwen3_30b_w4a16_megatron.sh
+```
+
+**Qwen3-30B-A3B-Base W4A16 FFN-only Quantization**:
+
+```bash
+bash recipe/qat/run_qwen3_30b_w4a16_megatron_FFN_only.sh
+```
+
+### Configuration
+
+Configured under `actor_rollout_ref.actor.megatron.qat`. The parameters are the same as FSDP, with the following differences:
+
+- `ignore_patterns` uses **fnmatch** glob syntax (e.g., `*mlp.gate`) instead of `re:` regex (e.g., `re:.*mlp.gate$`)
+- Uses `nvfp4_w4a16_megatron.json` (quant_method: `modelopt`) instead of `nvfp4_w4a16.json` (quant_method: `compressed-tensors`)
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `megatron.qat.enable` | Enable QAT | `False` |
+| `megatron.qat.mode` | Quantization mode | `"w4a16"` |
+| `megatron.qat.group_size` | Quantization group size | `16` |
+| `megatron.qat.ignore_patterns` | Layers to skip. Uses `fnmatch` (shell glob patterns) | `["lm_head", "*mlp.gate"]` |
+| `megatron.qat.quantization_config_path` | vLLM quantization config JSON path | `recipe/qat/config/nvfp4_w4a16_megatron.json` |
+
+**YAML example**:
+
+```yaml
+actor_rollout_ref:
+  actor:
+    megatron:
+      qat:
+        enable: true
+        mode: "w4a16"
+        group_size: 16
+        ignore_patterns:
+          - "lm_head"
+          - "*mlp.gate"
+        quantization_config_path: "recipe/qat/config/nvfp4_w4a16_megatron.json"
+```
+
+---
+
 ## Implementation Overview
 
-### Module Structure
+QAT keeps weights in **BF16 during training** while injecting fake quantization noise (quantize then dequantize) in the forward pass, so the model learns to tolerate quantization error. Gradients pass through the non-differentiable quantization step via Straight-Through Estimator (STE). At **rollout time**, weights are packed into real NVFP4 format and loaded into vLLM for low-precision inference. This closes the precision gap between training and inference, preventing KL divergence explosion.
 
 ```
-verl/utils/qat/
-├── __init__.py      # Module entry point
-├── core.py          # Replaces nn.Linear → QATLinear, sets up scale fusion
-├── linear.py        # Defines QATLinear (fake quantization layer with Triton FP4 kernels)
-├── quantizer.py     # Packs weights to NVFP4 format for vLLM rollout
-└── vllm_patch.py    # vLLM dynamic weight loading patches
+┌──────────────────────────────┐      ┌──────────────────────────────┐
+│       Training (BF16)        │      │      Rollout (NVFP4)         │
+├──────────────────────────────┤      ├──────────────────────────────┤
+│ 1. forward: fake quantize    │      │ 1. Gather full params        │
+│    (weight → FP4 → BF16)    │      │ 2. Pack weights to NVFP4     │
+│ 2. backward: STE             │  ──► │ 3. Load into vLLM            │
+│ 3. optimizer.step() on BF16  │      │ 4. Inference (Marlin kernel) │
+└──────────────────────────────┘      └──────────────────────────────┘
 ```
 
-### QATLinear
-
-`QATLinear` is the core fake-quantized linear layer:
-
-- Inherits from `nn.Linear`, fully compatible with FSDP
-- Uses high-performance Triton kernels for FP4 E2M1 quantization
-- Supports STE (Straight-Through Estimator) for backpropagation
-
-```
-Forward:
-  1. weight_fq = fake_quantize(weight)  # Triton FP4 quantize → dequantize
-  2. output = F.linear(x, weight_fq, bias)
-
-Backward:
-  1. grad passes directly to original weight (STE)
-```
-
-### Scale Fusion
-
-To match vLLM's inference optimization, scales of related layers need to be fused:
-
-- **QKV Fusion**: `q_proj`, `k_proj`, `v_proj` share the same `global_scale`
-- **Gate/Up Fusion**: `gate_proj`, `up_proj` share the same `global_scale`
-
-Fusion is implemented via `_fusion_siblings_ref` weak references, automatically handled in `_fake_quantize_weight()`.
-
-### vLLM Dynamic Weight Loading Patches
-
-PPO training requires multiple weight updates to vLLM. Native vLLM does not support repeated loading of quantized weights.
-
-### Data Flow
-
-```
-┌─────────────────────────┐      ┌─────────────────────────┐
-│     Training Phase      │      │     Rollout Phase       │
-│    (FSDP + QATLinear)   │      │   (vLLM + NVFP4)        │
-├─────────────────────────┤      ├─────────────────────────┤
-│ • forward: fake_quant   │      │ 1. Get FSDP full params │
-│ • backward: STE         │      │ 2. QATQuantizer quant   │
-│ • optimizer.step()      │  ──► │ 3. load_weights()       │
-│                         │      │ 4. vLLM Marlin inference│
-└─────────────────────────┘      └─────────────────────────┘
-```
+| | FSDP | Megatron |
+|---|---|---|
+| Fake Quantization | Custom QATLinear + Triton kernels | NVIDIA ModelOpt |
+| Weight Packing | `compressed-tensors` | `modelopt` |
+| Code | `verl/utils/qat/` | `verl/utils/modelopt/` |
 
 ---
 
@@ -212,7 +242,7 @@ Config: vLLM rollout settings with `gpu_memory_utilization=0.90`, `max_num_batch
 
 ---
 
-## Future Improvements
+## Notes
 
-- **W4A4 Mode**: W4A4 logic is included in the code, but currently has KL divergence issues and is not usable
-- **Large-scale Models**: Due to VeRL FSDP design limitations, QAT experiments on Qwen-235B and other very large models are not yet supported
+- **FSDP Scalability**: FSDP backend has scalability limitations for very large models (e.g., Qwen-235B). For large-scale training, use the **Megatron backend** instead.
+- **W4A4 Mode**: W4A4 logic is included in the code (FSDP only), but currently has KL divergence issues and is not usable.
