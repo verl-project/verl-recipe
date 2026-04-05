@@ -16,9 +16,9 @@ GPUS_PER_NODE=8
 
 source "${SLURM_SUBMIT_DIR}/config.env"
 
-MODEL_PATH="${HF_HOME}/hub/models--Qwen--Qwen3-4B-Instruct-2507/snapshots/cdbee75f17c01a7cc42f958dc650907174af0554"
-TRAIN_FILE="${DATA_ROOT}/workplace_assistant/train.jsonl"
-TEST_FILE="${DATA_ROOT}/workplace_assistant/validation.jsonl"
+MODEL_PATH="/path/to/Qwen3-4B-Instruct"
+TRAIN_FILE="/path/to/workplace_assistant/train.jsonl"
+TEST_FILE="/path/to/workplace_assistant/validation.jsonl"
 CKPTS_DIR="${RESULTS_ROOT}/dapo-qwen3-4b-workplace"
 
 CONTAINER="verlai/verl:vllm017.latest"
@@ -143,9 +143,9 @@ PYTHONUNBUFFERED=1 srun --overlap --nodes=1 --ntasks=1 -w "${head_node}" \
             actor_rollout_ref.rollout.val_kwargs.do_sample=True \
             actor_rollout_ref.rollout.val_kwargs.n=1 \
             actor_rollout_ref.rollout.name=vllm \
+            # TODO: hermes may hit "already borrowed" tokenizer errors under concurrent load
             '+actor_rollout_ref.rollout.engine_kwargs.vllm.enable-auto-tool-choice=true' \
-            '+actor_rollout_ref.rollout.engine_kwargs.vllm.tool-call-parser=hermes_patched' \
-            "+actor_rollout_ref.rollout.engine_kwargs.vllm.tool-parser-plugin=${VERL_ROOT}/verl/experimental/tool_parsers/hermes_tool_parser_patched.py" \
+            '+actor_rollout_ref.rollout.engine_kwargs.vllm.tool-call-parser=hermes' \
             '+actor_rollout_ref.rollout.engine_kwargs.vllm.max-model-len=32768' \
             actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=2 \
             actor_rollout_ref.ref.megatron.tensor_model_parallel_size=4 \

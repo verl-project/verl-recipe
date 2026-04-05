@@ -1,6 +1,6 @@
 #!/bin/bash
-#SBATCH --job-name=verl-nemogym-dapo-7b-math
-#SBATCH --nodes=4
+#SBATCH --job-name=verl-nemogym-dapo-multienv
+#SBATCH --nodes=16
 #SBATCH --ntasks-per-node=1
 #SBATCH --partition=your_partition
 #SBATCH --account=your_account
@@ -17,14 +17,15 @@ GPUS_PER_NODE=8
 source "${SLURM_SUBMIT_DIR}/config.env"
 
 MODEL_PATH="/path/to/Qwen3-4B-Instruct"
-TRAIN_FILE="/path/to/math_with_judge/dapo17k_bytedtsinghua_train_nrl.jsonl"
-TEST_FILE="/path/to/math_with_judge/aime24_bytedtsinghua_validation_nrl.jsonl"
-CKPTS_DIR="${RESULTS_ROOT}/DAPO-Qwen2.5-7b-MATH-megatron"
+TRAIN_FILE="/path/to/multienv/train.jsonl"
+TEST_FILE="/path/to/multienv/validation.jsonl"
+CKPTS_DIR="${RESULTS_ROOT}/dapo-qwen3-4b-multienv"
+ROLLOUT_DIR="${RESULTS_ROOT}/dapo-qwen3-4b-multienv-rollouts"
 
 CONTAINER="verlai/verl:vllm017.latest"
 MOUNTS="/lustre:/lustre"
 
-mkdir -p "${CKPTS_DIR}"
+mkdir -p "${CKPTS_DIR}" "${ROLLOUT_DIR}"
 
 nodes=$(scontrol show hostnames "$SLURM_JOB_NODELIST")
 nodes_array=($nodes)
@@ -39,7 +40,10 @@ SRUN_ARGS="--no-container-mount-home --container-image=${CONTAINER} --container-
 
 echo "Starting Ray head on ${head_node}..."
 srun --nodes=1 --ntasks=1 -w "${head_node}" ${SRUN_ARGS} --container-name=ray-head \
-    env -u ROCR_VISIBLE_DEVICES WANDB_API_KEY="${WANDB_API_KEY}" ray start --head \
+    env -u ROCR_VISIBLE_DEVICES WANDB_API_KEY="${WANDB_API_KEY}" \
+        NEMO_GYM_ROOT="${NEMO_GYM_ROOT}" \
+        PYTHONPATH="${NEMO_GYM_ROOT}:${VERL_ROOT}" \
+    ray start --head \
         --node-ip-address="${head_node_ip}" \
         --port=${RAY_PORT} \
         --num-gpus="${GPUS_PER_NODE}" \
@@ -51,7 +55,10 @@ for ((i = 1; i <= worker_num; i++)); do
     node_i=${nodes_array[$i]}
     echo "Starting Ray worker ${i} on ${node_i}..."
     srun --nodes=1 --ntasks=1 -w "${node_i}" ${SRUN_ARGS} \
-        env -u ROCR_VISIBLE_DEVICES WANDB_API_KEY="${WANDB_API_KEY}" ray start \
+        env -u ROCR_VISIBLE_DEVICES WANDB_API_KEY="${WANDB_API_KEY}" \
+            NEMO_GYM_ROOT="${NEMO_GYM_ROOT}" \
+            PYTHONPATH="${NEMO_GYM_ROOT}:${VERL_ROOT}" \
+        ray start \
             --address="${ip_head}" \
             --num-gpus="${GPUS_PER_NODE}" \
             --block &
@@ -76,7 +83,7 @@ echo "Installing nemo-gym..."
 srun --overlap --nodes=1 --ntasks=1 -w "${head_node}" \
     --no-container-mount-home --container-mounts=${MOUNTS} \
     --container-name=ray-head \
-    bash -c "touch ${NEMO_GYM_ROOT}/scripts/__init__.py && pip install -q uv && echo 'blinker==1.4' > /tmp/constraints.txt && pip install -q -e ${NEMO_GYM_ROOT} -c /tmp/constraints.txt"
+    bash -c "PYTHONPATH= touch ${NEMO_GYM_ROOT}/scripts/__init__.py && pip install -q uv && echo 'blinker==1.4' > /tmp/constraints.txt && pip install -q -e ${NEMO_GYM_ROOT} -c /tmp/constraints.txt"
 
 echo "Launching training on ${head_node}..."
 PYTHONUNBUFFERED=1 srun --overlap --nodes=1 --ntasks=1 -w "${head_node}" \
@@ -91,6 +98,7 @@ PYTHONUNBUFFERED=1 srun --overlap --nodes=1 --ntasks=1 -w "${head_node}" \
         TORCH_NCCL_AVOID_RECORD_STREAMS=1 \
         NEMO_GYM_ROOT="${NEMO_GYM_ROOT}" \
         PYTHONPATH="${NEMO_GYM_ROOT}:${VERL_ROOT}" \
+        VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
         RAY_grpc_keepalive_time_ms=60000 \
         RAY_grpc_keepalive_timeout_ms=600000 \
         RAY_grpc_client_keepalive_time_ms=60000 \
@@ -103,9 +111,7 @@ PYTHONUNBUFFERED=1 srun --overlap --nodes=1 --ntasks=1 -w "${head_node}" \
             +data.custom_cls.path="${VERL_ROOT}/recipe/nemo_gym/dataset.py" \
             +data.custom_cls.name=NemoGymJSONLDataset \
             data.truncation=left \
-            data.max_prompt_length=2048 \
-            data.max_response_length=8192 \
-            data.train_batch_size=512 \
+            data.train_batch_size=32 \
             actor_rollout_ref.rollout.n=16 \
             algorithm.adv_estimator=grpo \
             algorithm.use_kl_in_reward=False \
@@ -115,9 +121,9 @@ PYTHONUNBUFFERED=1 srun --overlap --nodes=1 --ntasks=1 -w "${head_node}" \
             actor_rollout_ref.actor.clip_ratio_low=0.2 \
             actor_rollout_ref.actor.clip_ratio_high=0.28 \
             actor_rollout_ref.actor.clip_ratio_c=10.0 \
-            actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2 \
-            actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 \
-            actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4 \
+            actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
+            actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=2 \
+            actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=2 \
             actor_rollout_ref.model.path="${MODEL_PATH}" \
             actor_rollout_ref.actor.optim.lr=1e-6 \
             actor_rollout_ref.actor.optim.lr_warmup_steps=10 \
@@ -144,27 +150,28 @@ PYTHONUNBUFFERED=1 srun --overlap --nodes=1 --ntasks=1 -w "${head_node}" \
             actor_rollout_ref.rollout.val_kwargs.do_sample=True \
             actor_rollout_ref.rollout.val_kwargs.n=1 \
             actor_rollout_ref.rollout.name=vllm \
+            # TODO: hermes may hit "already borrowed" tokenizer errors under concurrent load
+            '+actor_rollout_ref.rollout.engine_kwargs.vllm.enable-auto-tool-choice=true' \
+            '+actor_rollout_ref.rollout.engine_kwargs.vllm.tool-call-parser=hermes'  \
+            '+actor_rollout_ref.rollout.engine_kwargs.vllm.max-model-len=32768' \
             actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=2 \
             actor_rollout_ref.ref.megatron.tensor_model_parallel_size=4 \
             actor_rollout_ref.ref.megatron.param_offload=True \
             reward_model.reward_manager=dapo \
-            +reward_model.reward_kwargs.overlong_buffer_cfg.enable=True \
-            +reward_model.reward_kwargs.overlong_buffer_cfg.len=4096 \
-            +reward_model.reward_kwargs.overlong_buffer_cfg.penalty_factor=1.0 \
-            +reward_model.reward_kwargs.overlong_buffer_cfg.log=False \
-            +reward_model.reward_kwargs.max_resp_len=8192 \
+            +reward_model.reward_kwargs.max_resp_len=32768 \
             'trainer.logger=["console","wandb"]' \
             trainer.project_name=${WANDB_USERNAME}-verl-nemogym-int \
-            trainer.experiment_name=dapo-7b-nemogym \
+            trainer.experiment_name=dapo-qwen3-4b-multienv \
             trainer.n_gpus_per_node=${GPUS_PER_NODE} \
             trainer.nnodes=${SLURM_JOB_NUM_NODES} \
             trainer.val_before_train=False \
             trainer.test_freq=10 \
-            trainer.save_freq=10 \
+            trainer.save_freq=-1 \
             trainer.total_epochs=10 \
             trainer.default_local_dir="${CKPTS_DIR}" \
-            trainer.resume_mode=auto \
+            trainer.resume_mode=disable \
             trainer.log_val_generations=10 \
+            +trainer.rollout_data_dir="${ROLLOUT_DIR}" \
             +actor_rollout_ref.rollout.agent.agent_loop_manager_class='recipe.nemo_gym.agent_loop.NemoGymAgentLoopManager' \
-            +actor_rollout_ref.rollout.agent.agent_loop_config_path="${VERL_ROOT}/recipe/nemo_gym/configs/math.yaml" \
+            +actor_rollout_ref.rollout.agent.agent_loop_config_path="${VERL_ROOT}/recipe/nemo_gym/configs/multienv.yaml" \
     2>&1

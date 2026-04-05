@@ -22,22 +22,21 @@ import threading
 from collections import defaultdict
 from pathlib import Path
 
-# nemo_gym.hf_utils imports scripts.update_resource_servers at module level.
-# VERL_ROOT/scripts/ can shadow gym-ref/scripts/ if it appears first in sys.path.
-# Insert gym-ref/ at position 0 before any nemo_gym import happens.
-_ngr = os.environ.get("NEMO_GYM_ROOT")
-if not _ngr:
+# TODO: remove in next nemo gym release
+_nemo_gym_path = os.environ.get("NEMO_GYM_ROOT")
+if not _nemo_gym_path:
     _spec = _ilu.find_spec("nemo_gym")
     if _spec and _spec.origin:
-        _ngr = str(Path(_spec.origin).parent.parent)
-if _ngr:
-    sys.path.insert(0, _ngr)
+        _nemo_gym_path = str(Path(_spec.origin).parent.parent)
+if _nemo_gym_path:
+    sys.path.insert(0, _nemo_gym_path)
 
 # ruff: noqa: E402
 from typing import Optional
 
 import ray
 import torch
+from omegaconf import DictConfig, OmegaConf
 
 from verl.experimental.agent_loop.agent_loop import (
     AgentLoopManager,
@@ -48,6 +47,7 @@ from verl.experimental.agent_loop.agent_loop import (
     AgentLoopWorker as _AgentLoopWorker,
 )
 from verl.protocol import DataProto
+from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.model import compute_position_id_with_mask
 from verl.utils.ray_utils import auto_await
 
@@ -86,8 +86,6 @@ class NemoGymAgentLoopManager(AgentLoopManager):
         await asyncio.get_event_loop().run_in_executor(None, ray.get, futs)
 
     async def _init_nemo_gym(self) -> None:
-        from omegaconf import OmegaConf
-
         # read nemo_gym config from agent_loop_config_path YAML under a "nemo_gym" key
         # uses os.path.expandvars to resolve $NEMO_GYM_ROOT in the YAML
         nemo_gym_cfg = {}
@@ -101,8 +99,6 @@ class NemoGymAgentLoopManager(AgentLoopManager):
         _raw = nemo_gym_cfg.get("nemo_gym_root") or ""
         nemo_gym_root = _raw if (_raw and not _raw.startswith("$")) else os.environ.get("NEMO_GYM_ROOT")
 
-        from omegaconf import DictConfig
-
         try:
             from nemo_gym.cli import GlobalConfigDictParserConfig, RunHelper
             from nemo_gym.rollout_collection import RolloutCollectionHelper
@@ -110,7 +106,16 @@ class NemoGymAgentLoopManager(AgentLoopManager):
         except ModuleNotFoundError as e:
             raise ImportError("nemo-gym not found. Install it with: pip install -e /path/to/gym-ref") from e
 
-        config_paths = list(nemo_gym_cfg.get("config_paths") or [])
+        # resolve nemo_gym_root here if not yet known — nemo_gym is importable now
+        if not nemo_gym_root:
+            spec = _ilu.find_spec("nemo_gym")
+            if spec and spec.origin:
+                nemo_gym_root = str(Path(spec.origin).parent.parent)
+
+        config_paths = [
+            p.replace("$NEMO_GYM_ROOT", str(nemo_gym_root)) if nemo_gym_root else p
+            for p in (nemo_gym_cfg.get("config_paths") or [])
+        ]
         initial_global_cfg = {"config_paths": config_paths} if config_paths else {}
 
         uses_reasoning_parser = nemo_gym_cfg.get("uses_reasoning_parser", False)
@@ -160,8 +165,6 @@ class NemoGymAgentLoopManager(AgentLoopManager):
         )
 
         self._rch = RolloutCollectionHelper()
-
-        from verl.utils.config import omega_conf_to_dataclass
 
         self._tokenizer = omega_conf_to_dataclass(self.model_config).tokenizer
         self.distillation_enabled = False
@@ -355,9 +358,6 @@ def _postprocess_nemo_gym_result(nemo_gym_result: dict, tokenizer) -> dict:
 
 
 def _empty_result(nemo_gym_row: dict, tokenizer) -> dict:
-    """empty result for overlong samples
-    TODO: should we truncate or something else? what is best practice here?"""
-
     messages = nemo_gym_row.get("responses_create_params", {}).get("input", [])
     raw_prompt = [{"role": m.get("role", "user"), "content": m.get("content", "")} for m in messages]
     prompt_ids = tokenizer.apply_chat_template(raw_prompt, tokenize=True, add_generation_prompt=False)[-1:]
@@ -378,7 +378,7 @@ def _nemo_gym_result_to_verl(
     prompt_length: int,
     response_length: int,
 ) -> _InternalAgentLoopOutput:
-    """Pack message_log into padded tensors for verl and mask non assistant messages"""
+    """Pack message_log into padded tensors and mask non assistant messages"""
     message_log = result["message_log"]
     input_message_log = result["input_message_log"]
 

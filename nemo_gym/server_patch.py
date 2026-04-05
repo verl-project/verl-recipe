@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 def _replace_prefix_tokens(model_prefix, template_prefix, template_ids, tok):
-    # matches nemo-rl's implementation
+    # matches NeMo-RL implementation
     if not model_prefix:
         return template_ids
     eos = tok.eos_token_id
@@ -63,95 +63,66 @@ def _make_patched_preprocess_chat(original):
                     required_prefix = list(msg.prompt_token_ids) + list(msg.generation_token_ids)
                     break
 
-        res = await original(
-            self,
-            request,
-            messages,
-            default_template,
-            default_template_content_format,
-            default_template_kwargs,
-            tool_dicts=tool_dicts,
-            tool_parser=tool_parser,
-        )
+        try:
+            res = await original(
+                self,
+                request,
+                messages,
+                default_template,
+                default_template_content_format,
+                default_template_kwargs,
+                tool_dicts=tool_dicts,
+                tool_parser=tool_parser,
+            )
+        except ValueError as e:
+            if "maximum context length" in str(e):
+                logger.warning("Prompt exceeds max_model_len: %s", e)
+            raise
 
         if required_prefix is None:
             return res
 
-        try:
-            # call _preprocess_chat on messages up to last assistant turn (no gen prompt)
-            # to get template_prefix_ids for _replace_prefix_tokens
-            last_asst = next(
-                (
-                    i
-                    for i in reversed(range(len(messages)))
-                    if (
-                        messages[i].get("role") if isinstance(messages[i], dict) else getattr(messages[i], "role", None)
-                    )
-                    == "assistant"
-                ),
-                None,
-            )
-            prefix_msgs = messages[: last_asst + 1] if last_asst is not None else messages
-            prefix_res = await original(
-                self,
-                request,
-                prefix_msgs,
-                default_template,
-                default_template_content_format,
-                {**(default_template_kwargs or {}), "add_generation_prompt": False},
-                tool_dicts=tool_dicts,
-                tool_parser=tool_parser,
-            )
-            template_prefix_ids = prefix_res[1][0]["prompt_token_ids"]
+        last_asst = next(
+            (
+                i
+                for i in reversed(range(len(messages)))
+                if (messages[i].get("role") if isinstance(messages[i], dict) else getattr(messages[i], "role", None))
+                == "assistant"
+            ),
+            None,
+        )
+        prefix_msgs = messages[: last_asst + 1] if last_asst is not None else messages
+        prefix_res = await original(
+            self,
+            request,
+            prefix_msgs,
+            default_template,
+            default_template_content_format,
+            {**(default_template_kwargs or {}), "add_generation_prompt": False},
+            tool_dicts=tool_dicts,
+            tool_parser=tool_parser,
+        )
+        # tested on vLLM 0.17.0. other versions may error
+        template_prefix_ids = prefix_res[1][0]["prompt_token_ids"]
 
-            tok = self.renderer.get_tokenizer()
-            engine_prompt = res[1][0]
-            engine_prompt["prompt_token_ids"] = _replace_prefix_tokens(
-                required_prefix,
-                template_prefix_ids,
-                engine_prompt["prompt_token_ids"],
-                tok,
-            )
-        except Exception as e:
-            logger.warning(f"[nemo-gym] retokenization patch failed, skipping: {e}")
+        tok = self.renderer.get_tokenizer()
+        engine_prompt = res[1][0]
+        engine_prompt["prompt_token_ids"] = _replace_prefix_tokens(
+            required_prefix,
+            template_prefix_ids,
+            engine_prompt["prompt_token_ids"],
+            tok,
+        )
         return res
 
     return _patched
 
 
 def patch_serving_chat_for_nemo_gym() -> None:
-    import importlib
+    # vLLM 0.17.0 module paths
+    from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+    from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
 
-    targets = {
-        "OpenAIServingChat": (
-            "vllm.entrypoints.openai.chat_completion.serving",
-            "vllm.entrypoints.openai.chat_completion",
-            "vllm.entrypoints.openai.api_server",
-            "vllm.entrypoints.openai.serving_chat",
-        ),
-        "OpenAIServingTokenization": (
-            "vllm.entrypoints.openai.api_server",
-            "vllm.entrypoints.serve.tokenize.serving",
-        ),
-    }
-
-    patched_any = False
-    for cls_name, mods in targets.items():
-        cls = None
-        for mod in mods:
-            try:
-                m = importlib.import_module(mod)
-                if hasattr(m, cls_name):
-                    cls = getattr(m, cls_name)
-                    break
-            except ImportError:
-                continue
-        if cls is None:
-            logger.warning(f"[nemo-gym] could not find {cls_name}; skipping.")
-            continue
+    for cls in (OpenAIServingChat, OpenAIServingTokenization):
         cls._preprocess_chat = _make_patched_preprocess_chat(cls._preprocess_chat)
-        logger.warning(f"[nemo-gym] applied retokenization patch to {cls_name}.")
-        patched_any = True
-
-    if not patched_any:
-        logger.warning("[nemo-gym] retokenization patch not applied to any serving class.")
+        logger.warning(f"[nemo-gym] applied retokenization patch to {cls.__name__}.")
