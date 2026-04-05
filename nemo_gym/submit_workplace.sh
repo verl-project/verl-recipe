@@ -78,6 +78,9 @@ srun --overlap --nodes=1 --ntasks=1 -w "${head_node}" \
     --container-name=ray-head \
     bash -c "PYTHONPATH= touch ${NEMO_GYM_ROOT}/scripts/__init__.py && pip install -q uv && echo 'blinker==1.4' > /tmp/constraints.txt && pip install -q -e ${NEMO_GYM_ROOT} -c /tmp/constraints.txt"
 
+# TODO: test if hermes tool parser still hits "already borrowed" tokenizer errors under concurrent load
+# if so, point to or provide the patch here, or use a different model+tool parser
+
 echo "Launching training on ${head_node}..."
 PYTHONUNBUFFERED=1 srun --overlap --nodes=1 --ntasks=1 -w "${head_node}" \
     --no-container-mount-home --container-mounts=${MOUNTS} \
@@ -143,7 +146,6 @@ PYTHONUNBUFFERED=1 srun --overlap --nodes=1 --ntasks=1 -w "${head_node}" \
             actor_rollout_ref.rollout.val_kwargs.do_sample=True \
             actor_rollout_ref.rollout.val_kwargs.n=1 \
             actor_rollout_ref.rollout.name=vllm \
-            # TODO: hermes may hit "already borrowed" tokenizer errors under concurrent load
             '+actor_rollout_ref.rollout.engine_kwargs.vllm.enable-auto-tool-choice=true' \
             '+actor_rollout_ref.rollout.engine_kwargs.vllm.tool-call-parser=hermes' \
             '+actor_rollout_ref.rollout.engine_kwargs.vllm.max-model-len=32768' \

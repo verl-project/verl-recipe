@@ -106,7 +106,6 @@ class NemoGymAgentLoopManager(AgentLoopManager):
         except ModuleNotFoundError as e:
             raise ImportError("nemo-gym not found. Install it with: pip install -e /path/to/gym-ref") from e
 
-        # resolve nemo_gym_root here if not yet known — nemo_gym is importable now
         if not nemo_gym_root:
             spec = _ilu.find_spec("nemo_gym")
             if spec and spec.origin:
