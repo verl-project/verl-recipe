@@ -107,7 +107,7 @@ PYTHONUNBUFFERED=1 srun --overlap --nodes=1 --ntasks=1 -w "${head_node}" \
             +data.custom_cls.path="${VERL_ROOT}/recipe/nemo_gym/dataset.py" \
             +data.custom_cls.name=NemoGymJSONLDataset \
             data.truncation=left \
-            data.train_batch_size=512 \
+            data.train_batch_size=32 \
             actor_rollout_ref.rollout.n=16 \
             algorithm.adv_estimator=grpo \
             algorithm.use_kl_in_reward=False \
@@ -153,11 +153,7 @@ PYTHONUNBUFFERED=1 srun --overlap --nodes=1 --ntasks=1 -w "${head_node}" \
             actor_rollout_ref.ref.megatron.tensor_model_parallel_size=4 \
             actor_rollout_ref.ref.megatron.param_offload=True \
             reward_model.reward_manager=dapo \
-            +reward_model.reward_kwargs.overlong_buffer_cfg.enable=True \
-            +reward_model.reward_kwargs.overlong_buffer_cfg.len=4096 \
-            +reward_model.reward_kwargs.overlong_buffer_cfg.penalty_factor=1.0 \
-            +reward_model.reward_kwargs.overlong_buffer_cfg.log=False \
-            +reward_model.reward_kwargs.max_resp_len=8192 \
+            +reward_model.reward_kwargs.max_resp_len=32768 \
             'trainer.logger=["console","wandb"]' \
             trainer.project_name=${WANDB_USERNAME}-verl-nemogym-int \
             trainer.experiment_name=dapo-qwen3-4b-workplace \
@@ -165,10 +161,10 @@ PYTHONUNBUFFERED=1 srun --overlap --nodes=1 --ntasks=1 -w "${head_node}" \
             trainer.nnodes=${SLURM_JOB_NUM_NODES} \
             trainer.val_before_train=False \
             trainer.test_freq=10 \
-            trainer.save_freq=10 \
+            trainer.save_freq=-1 \
             trainer.total_epochs=10 \
             trainer.default_local_dir="${CKPTS_DIR}" \
-            trainer.resume_mode=auto \
+            trainer.resume_mode=disable \
             trainer.log_val_generations=10 \
             +actor_rollout_ref.rollout.agent.agent_loop_manager_class='recipe.nemo_gym.agent_loop.NemoGymAgentLoopManager' \
             +actor_rollout_ref.rollout.agent.agent_loop_config_path="${VERL_ROOT}/recipe/nemo_gym/configs/workplace.yaml" \
