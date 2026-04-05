@@ -10,6 +10,9 @@ training on math and agentic workplace tasks with DAPO.
 Quickstart
 ----------
 
+Local Rollout Collection
+~~~~~~~~~~~~~~~~~~~~~~~~
+
 **1. Clone repositories**
 
 .. code-block:: bash
@@ -80,6 +83,9 @@ In a separate terminal:
         +data_source=huggingface
 
 Check that each row has an ``agent_ref`` field. This is required for training.
+
+Training
+~~~~~~~~
 
 **7. Launch training**
 
