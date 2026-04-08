@@ -1,33 +1,36 @@
-"""LLM Proxy server -- a Ray singleton that bridges OpenAI-compatible HTTP
-requests to verl's vLLM rollout servers via their Ray actor handles.
+"""LLM Proxy server — a **framework-agnostic** relay service that bridges
+OpenAI-compatible HTTP requests to backend inference workers over WebSocket.
 
-Architecture
-~~~~~~~~~~~~
+The proxy supports two operating modes:
 
-::
+**Relay mode** (default / standalone deployment)
+    The proxy starts an :class:`InferenceRelay` that accepts WebSocket
+    connections from framework-side inference workers.  Agent HTTP
+    requests are forwarded to connected workers over WebSocket and the
+    responses are relayed back.  No framework-specific code is needed.
+
+**Local mode** (injected completion handler)
+    A framework-specific ``completion_handler`` is injected at init time.
+    The proxy routes agent requests directly to this handler without
+    using WebSocket relay.  This is useful when the proxy runs in the
+    same process/cluster as the inference engine.
+
+Architecture (relay mode)::
 
     Third-party Agent
          |  (OpenAI /v1/chat/completions)
          v
+    +----------------------------------+       WebSocket        +--------------------+
+    |  LLMProxyServer (standalone)     | <-------------------> | Inference Worker   |
+    |  - FastAPI HTTP + WS server      |  completion_request   | (framework-side)   |
+    |  - InferenceRelay                |  completion_response  | - any LLM backend  |
+    |  - SessionRecorder per trial_id  |                       +--------------------+
     +----------------------------------+
-    |  LLMProxyServer  (Ray singleton) |
-    |  - FastAPI HTTP server           |
-    |  - VLLMRayProvider (LiteLLM)     |
-    |  - SessionRecorder per trial_id  |
-    +---------------+------------------+
-                    |  server.generate.remote(prompt_ids, ...)
-                    v
-             vLLM rollout servers
 
-Each agent loop registers a *trial_id* with the proxy.  The agent is
-given a URL of the form ``http://host:port/{trial_id}/v1`` so that
+Each caller registers a *session_id* with the proxy.  The agent is
+given a URL of the form ``http://host:port/{session_id}/v1`` so that
 standard OpenAI SDK calls resolve to
-``POST http://host:port/{trial_id}/v1/chat/completions``.
-
-The actual vLLM interaction is handled by :class:`VLLMRayProvider`, a
-LiteLLM ``CustomLLM`` provider that calls vLLM via Ray actor handles.
-LiteLLM takes care of OpenAI response formatting, SSE streaming, and
-logprobs construction.
+``POST http://host:port/{session_id}/v1/chat/completions``.
 """
 
 from __future__ import annotations
@@ -36,21 +39,23 @@ import asyncio
 import json
 import logging
 import socket
-from typing import Any
+from typing import Any, Callable, Coroutine
 from uuid import uuid4
 
-import litellm
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.responses import JSONResponse, StreamingResponse
-from transformers import AutoTokenizer
-
-from verl.experimental.agent_loop.tool_parser import ToolParser
 
 from .recorder import SessionRecorder
-from .vllm_provider import VLLMRayProvider
 
 logger = logging.getLogger(__name__)
+
+# Type alias for the local completion handler that frameworks can inject.
+# Signature: async (proxy, session_id, messages, body, is_streaming) -> Response
+CompletionHandler = Callable[
+    ["LLMProxyServer", str, list, dict, bool],
+    Coroutine[Any, Any, Any],
+]
 
 
 # ---------------------------------------------------------------------------
@@ -61,11 +66,14 @@ logger = logging.getLogger(__name__)
 def _build_app(proxy: "LLMProxyServer") -> FastAPI:
     """Build the FastAPI application that serves as the OpenAI proxy."""
 
-    app = FastAPI(title="LLM Proxy", version="0.3.0")
+    app = FastAPI(title="LLM Proxy", version="0.5.0")
 
     @app.get("/health")
     async def health():
-        return {"status": "ok"}
+        info: dict[str, Any] = {"status": "ok", "mode": proxy.mode}
+        if proxy.mode == "relay" and proxy.relay is not None:
+            info["connected_workers"] = proxy.relay.num_workers
+        return info
 
     # ---- session management ----------------------------------------------
 
@@ -94,247 +102,226 @@ def _build_app(proxy: "LLMProxyServer") -> FastAPI:
     # ---- OpenAI-compatible chat completions ------------------------------
     # Two URL patterns so the proxy works with both:
     #   1. Agents that call a fully custom endpoint
-    #   2. Standard OpenAI SDK where base_url = http://host:port/{trial_id}/v1
+    #   2. Standard OpenAI SDK where base_url = http://host:port/{session_id}/v1
 
-    @app.post("/v1/chat/completions/{trial_id}")
-    @app.post("/{trial_id}/v1/chat/completions")
-    async def chat_completions(trial_id: str, request: Request):
-        """Generate a chat completion via LiteLLM+vLLM and record data."""
+    @app.post("/v1/chat/completions/{session_id}")
+    @app.post("/{session_id}/v1/chat/completions")
+    async def chat_completions(session_id: str, request: Request):
+        """Generate a chat completion and record data.
+
+        Routes to either the injected local handler or the WebSocket
+        relay depending on the proxy's operating mode.
+        """
         body = await request.json()
         messages: list[dict[str, Any]] = body.get("messages", [])
         is_streaming: bool = body.get("stream", False)
 
-        # Build kwargs for litellm.acompletion via the custom provider
-        completion_kwargs: dict[str, Any] = {
-            "model": "verl-vllm/default",
-            "messages": messages,
-            "temperature": body.get("temperature", 1.0),
-            "top_p": body.get("top_p", 1.0),
-            "max_tokens": body.get("max_tokens", 2048),
-            "stream": is_streaming,
-            "extra_body": {"session_id": trial_id},
-        }
-        if body.get("tools"):
-            completion_kwargs["tools"] = body["tools"]
-        if "stop" in body:
-            completion_kwargs["stop"] = body["stop"]
-        if "repetition_penalty" in body:
-            completion_kwargs["repetition_penalty"] = body["repetition_penalty"]
-
-        try:
-            response = await litellm.acompletion(**completion_kwargs)
-        except Exception as e:
-            logger.error("Generate failed for trial %s: %s", trial_id, e)
-            return JSONResponse(
-                status_code=500, content={"error": str(e)}
+        if proxy.mode == "local" and proxy._completion_handler is not None:
+            return await proxy._completion_handler(
+                proxy, session_id, messages, body, is_streaming
+            )
+        else:
+            return await _handle_relay_completion(
+                proxy, session_id, messages, body, is_streaming
             )
 
-        if is_streaming:
-            return StreamingResponse(
-                _stream_and_record(proxy, trial_id, messages, response),
-                media_type="text/event-stream",
-                headers={
-                    "Cache-Control": "no-cache",
-                    "Connection": "keep-alive",
-                    "X-Accel-Buffering": "no",
-                },
-            )
+    # ---- WebSocket endpoint for inference workers (relay mode) -----------
 
-        # Non-streaming: record and return
-        _record_from_response(proxy, trial_id, messages, response)
-        return JSONResponse(content=response.model_dump())
+    @app.websocket("/ws/worker")
+    async def worker_websocket(ws: WebSocket):
+        """WebSocket endpoint for framework-side inference workers.
+
+        Only functional in relay mode.  Workers connect here, send a
+        ``worker_hello`` handshake, and then receive inference requests
+        pushed by the proxy.
+        """
+        if proxy.relay is None:
+            await ws.close(
+                code=4002,
+                reason="Proxy is not in relay mode",
+            )
+            return
+        await proxy.relay.handle_worker_ws(ws)
 
     return app
 
 
 # ---------------------------------------------------------------------------
-# Helpers for session recording
+# Relay mode completion handler (forward to worker via WebSocket)
 # ---------------------------------------------------------------------------
 
 
-def _record_from_response(
+async def _handle_relay_completion(
     proxy: "LLMProxyServer",
-    trial_id: str,
+    session_id: str,
     messages: list[dict[str, Any]],
-    response: Any,
-) -> None:
-    """Extract token_ids/logprobs from a LiteLLM ModelResponse and record."""
-    choice = response.choices[0]
+    body: dict[str, Any],
+    is_streaming: bool,
+):
+    """Handle a completion request by relaying to a connected worker."""
+    try:
+        result = await proxy.relay.dispatch(
+            session_id=session_id,
+            messages=messages,
+            temperature=body.get("temperature", 1.0),
+            top_p=body.get("top_p", 1.0),
+            max_tokens=body.get("max_tokens", 2048),
+            stop=body.get("stop"),
+            tools=body.get("tools"),
+            repetition_penalty=body.get("repetition_penalty"),
+            stream=is_streaming,
+        )
+    except RuntimeError as e:
+        logger.error("Relay failed for session %s: %s", session_id, e)
+        return JSONResponse(status_code=503, content={"error": str(e)})
+    except Exception as e:
+        logger.error("Relay error for session %s: %s", session_id, e)
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
-    # token_ids via provider_specific_fields
-    psf = getattr(choice, "provider_specific_fields", None) or {}
-    token_ids = psf.get("token_ids", [])
+    if result.get("error"):
+        return JSONResponse(
+            status_code=500, content={"error": result["error"]}
+        )
 
-    # logprobs from standard ChoiceLogprobs
-    logprobs_list: list[float] = []
-    choice_logprobs = getattr(choice, "logprobs", None)
-    if choice_logprobs and hasattr(choice_logprobs, "content") and choice_logprobs.content:
-        logprobs_list = [t.logprob for t in choice_logprobs.content]
-
-    # tool_calls
-    tool_calls = None
-    msg = choice.message
-    if hasattr(msg, "tool_calls") and msg.tool_calls:
-        tool_calls = [
-            tc.model_dump() if hasattr(tc, "model_dump") else tc
-            for tc in msg.tool_calls
-        ]
-
-    content = ""
-    if hasattr(msg, "content") and msg.content:
-        content = msg.content
+    # Record the completion from the relay result
+    token_ids = result.get("token_ids", [])
+    log_probs = result.get("log_probs", [])
+    content_text = result.get("content_text", "")
+    tool_calls = result.get("tool_calls")
+    finish_reason = result.get("finish_reason", "stop")
 
     proxy.recorder.record_completion(
-        session_id=trial_id,
+        session_id=session_id,
         messages=messages,
-        completion_text=content,
+        completion_text=content_text,
         token_ids=token_ids,
-        logprobs=logprobs_list,
-        finish_reason=getattr(choice, "finish_reason", "stop") or "stop",
+        logprobs=log_probs,
+        finish_reason=finish_reason,
         tool_calls=tool_calls,
     )
 
-
-async def _stream_and_record(
-    proxy: "LLMProxyServer",
-    trial_id: str,
-    messages: list[dict[str, Any]],
-    stream,
-) -> Any:
-    """Iterate a LiteLLM streaming response, yield SSE chunks, and record.
-
-    We accumulate token_ids and logprobs from the stream, then record the
-    full completion once streaming finishes.
-
-    Recording is placed in a ``finally`` block so that the completion is
-    always persisted even when the client disconnects mid-stream (which
-    causes the async generator to be closed via ``aclose()``).
-    """
-    collected_text_parts: list[str] = []
-    collected_token_ids: list[int] = []
-    collected_logprobs: list[float] = []
-    finish_reason = "stop"
-    tool_calls_collected: list[dict[str, Any]] = []
-
-    try:
-        async for chunk in stream:
-            # Yield the raw SSE chunk to the client
-            chunk_data = chunk.model_dump() if hasattr(chunk, "model_dump") else chunk
-            yield f"data: {json.dumps(chunk_data)}\n\n"
-
-            # Accumulate data for recording
-            if hasattr(chunk, "choices") and chunk.choices:
-                delta = chunk.choices[0]
-
-                # Text content
-                if hasattr(delta, "delta") and hasattr(delta.delta, "content"):
-                    if delta.delta.content:
-                        collected_text_parts.append(delta.delta.content)
-
-                # Tool calls
-                if hasattr(delta, "delta") and hasattr(delta.delta, "tool_calls"):
-                    if delta.delta.tool_calls:
-                        for tc in delta.delta.tool_calls:
-                            tc_dict = tc.model_dump() if hasattr(tc, "model_dump") else tc
-                            tool_calls_collected.append(tc_dict)
-
-                # Finish reason
-                if hasattr(delta, "finish_reason") and delta.finish_reason:
-                    finish_reason = delta.finish_reason
-
-                # Provider-specific fields (token_ids on last chunk)
-                psf = getattr(delta, "provider_specific_fields", None) or {}
-                if "token_ids" in psf:
-                    collected_token_ids = psf["token_ids"]
-
-                # Logprobs
-                chunk_logprobs = getattr(delta, "logprobs", None)
-                if chunk_logprobs and hasattr(chunk_logprobs, "content") and chunk_logprobs.content:
-                    for t in chunk_logprobs.content:
-                        collected_logprobs.append(t.logprob)
-
-        yield "data: [DONE]\n\n"
-    finally:
-        # Always record, even if the generator is closed early due to
-        # client disconnect.  The data may be incomplete (e.g. missing
-        # token_ids from the last chunk) but partial recording is still
-        # preferable to losing the entire turn.
-        proxy.recorder.record_completion(
-            session_id=trial_id,
-            messages=messages,
-            completion_text="".join(collected_text_parts),
-            token_ids=collected_token_ids,
-            logprobs=collected_logprobs,
-            finish_reason=finish_reason,
-            tool_calls=tool_calls_collected if tool_calls_collected else None,
-        )
+    # Build an OpenAI-compatible response
+    response_body = build_openai_response(
+        token_ids=token_ids,
+        content_text=content_text,
+        tool_calls=tool_calls,
+        finish_reason=finish_reason,
+    )
+    return JSONResponse(content=response_body)
 
 
 # ---------------------------------------------------------------------------
-# LLMProxyServer: the singleton server
+# OpenAI response builder (public — used by both relay and local handlers)
+# ---------------------------------------------------------------------------
+
+
+def build_openai_response(
+    *,
+    token_ids: list[int],
+    content_text: str,
+    tool_calls: list[dict[str, Any]] | None,
+    finish_reason: str,
+) -> dict[str, Any]:
+    """Build an OpenAI-compatible chat completion response dict.
+
+    This is a public helper so that framework-specific local-mode
+    handlers can reuse it.
+    """
+    message: dict[str, Any] = {"role": "assistant"}
+    if tool_calls:
+        message["content"] = (
+            content_text.strip() if content_text and content_text.strip() else None
+        )
+        message["tool_calls"] = tool_calls
+    else:
+        message["content"] = content_text
+
+    return {
+        "id": f"chatcmpl-{uuid4().hex[:12]}",
+        "object": "chat.completion",
+        "choices": [
+            {
+                "index": 0,
+                "message": message,
+                "finish_reason": finish_reason,
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 0,
+            "completion_tokens": len(token_ids),
+            "total_tokens": len(token_ids),
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# LLMProxyServer
 # ---------------------------------------------------------------------------
 
 
 class LLMProxyServer:
-    """LLM Proxy server that holds vLLM server handles and serves
-    OpenAI-compatible HTTP requests via LiteLLM.
+    """Framework-agnostic LLM Proxy server.
 
-    This server is designed to be a **singleton** in the Ray cluster.
-    It is created once when the agent system starts and shared across
-    all ``RemoteAgentLoop`` instances.
+    Bridges OpenAI-compatible HTTP requests to backend inference — either
+    via WebSocket relay (standalone / default) or via an injected local
+    completion handler (when co-located with the inference engine).
 
-    Usage::
+    Usage (relay / standalone)::
 
-        proxy = LLMProxyServer(
-            server_handles=[handle_1, handle_2],
-            model_path="Qwen/Qwen2.5-7B-Instruct",
-        )
-        url = await proxy.start()          # http://0.0.0.0:PORT
-        proxy.register_session("trial-1")
-        # Agent uses base_url = f"{url}/trial-1/v1"
-        # ...
-        session = proxy.get_session_data("trial-1")
-        await proxy.stop()
+        proxy = LLMProxyServer()
+        url = await proxy.start()
+        # Workers connect to ws://host:port/ws/worker
+        # Agents use base_url = f"{url}/session-1/v1"
+
+    Usage (local mode — framework injects handler)::
+
+        proxy = LLMProxyServer(completion_handler=my_handler)
+        url = await proxy.start()
+        # Agents use base_url = f"{url}/session-1/v1"
     """
 
     def __init__(
         self,
-        server_handles: list,
-        model_path: str,
         host: str = "0.0.0.0",
         port: int = 0,
-        tool_format: str | None = None,
+        relay_request_timeout: float = 300.0,
+        completion_handler: CompletionHandler | None = None,
+        on_session_deleted: Callable[[str], None] | None = None,
     ):
         """
         Args:
-            server_handles: Ray actor handles of vLLM rollout servers.
-            model_path: HuggingFace model name/path for the tokenizer.
             host: Bind address for the HTTP server.
             port: Port number. ``0`` means auto-select a free port.
-            tool_format: Tool-call format (e.g. ``"hermes"``, ``"gpt-oss"``).
+            relay_request_timeout: Timeout (seconds) for relay-mode requests
+                waiting for a worker response.
+            completion_handler: Optional async callable for local-mode
+                inference.  Signature:
+                ``async (proxy, session_id, messages, body, is_streaming) -> Response``.
+                When provided, the proxy runs in **local mode** and does not
+                start the WebSocket relay.
+            on_session_deleted: Optional callback invoked when a session is
+                deleted.  Useful for framework-specific cleanup (e.g.
+                releasing sticky-session bindings).
         """
         self.host = host
         self.port = port
-
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            model_path, trust_remote_code=True
-        )
         self.recorder = SessionRecorder()
+        self._on_session_deleted = on_session_deleted
 
-        # Initialize LiteLLM custom provider
-        tool_parser: ToolParser | None = None
-        if tool_format:
-            tool_parser = ToolParser.get_tool_parser(tool_format, self.tokenizer)
-            logger.info("Tool parser initialized: %s", tool_format)
+        if completion_handler is not None:
+            # --- Local mode: framework-injected handler ---
+            self._completion_handler = completion_handler
+            self.relay = None
+            self._mode = "local"
+        else:
+            # --- Relay mode: forward via WebSocket ---
+            from .relay import InferenceRelay
 
-        self._provider = VLLMRayProvider(
-            server_handles=server_handles,
-            tokenizer=self.tokenizer,
-            tool_parser=tool_parser,
-        )
-        litellm.custom_provider_map = [
-            {"provider": "verl-vllm", "custom_handler": self._provider}
-        ]
+            self.relay = InferenceRelay(
+                request_timeout=relay_request_timeout,
+            )
+            self._completion_handler = None
+            self._mode = "relay"
 
         self.app = _build_app(self)
 
@@ -342,11 +329,16 @@ class LLMProxyServer:
         self._serve_task: asyncio.Task | None = None
         self._actual_port: int | None = None
 
+    @property
+    def mode(self) -> str:
+        """Operating mode: ``"local"`` or ``"relay"``."""
+        return self._mode
+
     # -- session management ------------------------------------------------
 
-    def register_session(self, trial_id: str) -> None:
-        """Register a new trial session for recording."""
-        self.recorder.create_session(trial_id)
+    def register_session(self, session_id: str) -> None:
+        """Register a new session for recording."""
+        self.recorder.create_session(session_id)
 
     def get_session_data(self, session_id: str):
         """Retrieve the recorded session data."""
@@ -356,7 +348,11 @@ class LLMProxyServer:
         self.recorder.mark_completed(session_id)
 
     def delete_session(self, session_id: str) -> None:
-        self._provider.release_session(session_id)
+        if self._on_session_deleted is not None:
+            try:
+                self._on_session_deleted(session_id)
+            except Exception as e:
+                logger.warning("on_session_deleted hook error: %s", e)
         self.recorder.delete_session(session_id)
 
     # -- HTTP server lifecycle ---------------------------------------------
@@ -372,7 +368,7 @@ class LLMProxyServer:
 
         Args:
             on_cancel_callback: Optional callback function to call when the
-                server task is cancelled. Useful for cleaning up singleton state.
+                server task is cancelled.
         """
         if self.port == 0:
             self._actual_port = _find_free_port()
@@ -392,9 +388,7 @@ class LLMProxyServer:
             try:
                 await self._server.serve()
             except asyncio.CancelledError:
-                logger.warning(
-                    "Proxy server task cancelled (cleaning up singleton state)"
-                )
+                logger.warning("Proxy server task cancelled")
                 if on_cancel_callback is not None:
                     try:
                         on_cancel_callback()
@@ -409,7 +403,7 @@ class LLMProxyServer:
                 break
             await asyncio.sleep(0.1)
 
-        logger.info("LLM Proxy started at %s", self.url)
+        logger.info("LLM Proxy started at %s (mode=%s)", self.url, self.mode)
         return self.url
 
     async def stop(self) -> None:

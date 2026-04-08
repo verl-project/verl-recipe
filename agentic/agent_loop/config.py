@@ -16,6 +16,10 @@ REMOTE_AGENT_ENVIRONMENT_KWARGS     JSON-encoded dict of kwargs forwarded to the
                                     constructor (e.g. namespace, registry, use_sandbox_claim …)
 REMOTE_AGENT_USE_LOCAL_TRIAL        If "1" or "true", run Trial locally instead of via Harbor
                                     HTTP server (default: false)
+PROXY_SERVER_URL                    URL of a standalone proxy server (e.g. http://proxy:8080).
+                                    When set, the agent loop skips Ray-based proxy discovery
+                                    and connects to this URL directly.  An inference worker
+                                    is also started automatically to bridge vLLM to the proxy.
 """
 
 from __future__ import annotations
@@ -46,6 +50,9 @@ class RemoteAgentConfig:
     environment_overrides: dict[str, str] = field(default_factory=dict)
     environment_kwargs: dict[str, Any] = field(default_factory=dict)
     use_local_trial: bool = False
+
+    # Standalone proxy mode
+    proxy_server_url: Optional[str] = None
 
     @classmethod
     def from_env(cls) -> "RemoteAgentConfig":
@@ -79,5 +86,7 @@ class RemoteAgentConfig:
             kwargs["environment_kwargs"] = json.loads(v)
         if v := os.getenv("REMOTE_AGENT_USE_LOCAL_TRIAL"):
             kwargs["use_local_trial"] = v.strip().lower() in ("1", "true", "yes")
+        if v := os.getenv("PROXY_SERVER_URL"):
+            kwargs["proxy_server_url"] = v
 
         return cls(**kwargs)

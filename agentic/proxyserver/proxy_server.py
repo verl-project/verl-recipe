@@ -1,185 +1,115 @@
-"""Standalone LLM Proxy Server management via Ray actor.
+"""Standalone LLM Proxy Server — framework-agnostic relay service.
 
-Extracts the proxy server lifecycle from ``RemoteAgentLoop`` into
-a reusable module.  The proxy is wrapped in a **Ray named actor**
-(``ProxyServerActor``) that is pinned to the head node via
-``NodeAffinitySchedulingStrategy``.
+Starts the proxy as an independent HTTP + WebSocket service in relay
+mode.  No framework-specific dependencies (no Ray, no PyTorch, no
+transformers).  Any framework's inference workers can connect to
+``/ws/worker`` and service inference requests pushed by the proxy.
 
-Usage from a recipe::
+Usage::
 
-    from verl.experimental.proxy_server import start_proxy_server
+    # CLI
+    python -m recipe.agentic.proxyserver.proxy_server \\
+        --host 0.0.0.0 --port 8080
 
-    proxy_url = start_proxy_server(
-        server_handles=server_handles,
-        model_path="Qwen/Qwen2.5-7B-Instruct",
-    )
-
-Usage from ``RemoteAgentLoop`` (or any worker node)::
-
-    from verl.experimental.proxy_server import get_proxy_url
-
-    url = get_proxy_url()  # lightweight Ray RPC to discover URL
-    # Then interact via HTTP: POST /sessions/{id}, GET /sessions/{id}, ...
+    # Programmatic
+    from recipe.agentic.proxyserver.proxy_server import run_standalone_proxy
+    run_standalone_proxy(host="0.0.0.0", port=8080)
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
-import os
-
-import ray
 
 from .server import LLMProxyServer
 
 logger = logging.getLogger(__name__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
-
-PROXY_ACTOR_NAME = "llm_proxy_server"
-
-# Module-level handle to keep the non-detached actor alive (prevent GC).
-_proxy_actor_handle = None
 
 
-# ---------------------------------------------------------------------------
-# Ray Actor
-# ---------------------------------------------------------------------------
-
-
-@ray.remote
-class ProxyServerActor:
-    """Ray actor wrapping :class:`LLMProxyServer`, pinned to head node.
-
-    The actor manages the full lifecycle of the HTTP proxy that bridges
-    OpenAI-compatible requests to verl's vLLM rollout servers.
-    """
-
-    def __init__(
-        self,
-        server_handles: list,
-        model_path: str,
-        host: str = "0.0.0.0",
-        port: int = 0,
-        tool_format: str | None = "hermes",
-    ):
-        self.proxy = LLMProxyServer(
-            server_handles=server_handles,
-            model_path=model_path,
-            host=host,
-            port=port,
-            tool_format=tool_format,
-        )
-        self._url: str | None = None
-
-    async def start(self) -> str:
-        """Start the proxy HTTP server and return a cluster-routable URL.
-
-        Uses ``ray.util.get_node_ip_address()`` (the standard pattern in
-        the verl codebase) to obtain an IP that is reachable from other
-        nodes in the Ray cluster.
-        """
-        await self.proxy.start()
-
-        actual_ip = ray.util.get_node_ip_address().strip("[]")
-        actual_port = self.proxy._actual_port
-        self._url = f"http://{actual_ip}:{actual_port}"
-        logger.info("ProxyServerActor started at %s", self._url)
-        return self._url
-
-    def get_url(self) -> str | None:
-        """Return the cluster-routable proxy URL, or ``None`` if not started."""
-        return self._url
-
-    async def stop(self) -> None:
-        """Gracefully shut down the proxy HTTP server."""
-        if self.proxy is not None:
-            await self.proxy.stop()
-            logger.info("ProxyServerActor stopped")
-
-
-# ---------------------------------------------------------------------------
-# Convenience functions
-# ---------------------------------------------------------------------------
-
-
-def start_proxy_server(
-    server_handles: list,
-    model_path: str,
+def run_standalone_proxy(
     host: str = "0.0.0.0",
-    port: int = 0,
-    tool_format: str = "hermes",
-) -> str:
-    """Start the proxy server as a Ray named actor on the head node.
+    port: int = 8080,
+    relay_request_timeout: float = 300.0,
+    log_level: str = "INFO",
+) -> None:
+    """Run the proxy as a standalone service in relay mode.
 
-    If an actor with the same name already exists, its URL is returned
-    immediately without creating a new one.
-
-    This function is intended to be called from the recipe's
-    ``TaskRunner.run()`` (which executes on the head node) **after**
-    ``trainer.init_workers()`` has produced ``server_handles``.
+    This starts the HTTP + WebSocket server and blocks until interrupted.
+    No framework-specific dependencies are required.  Framework-side
+    inference workers must connect to ``ws://{host}:{port}/ws/worker``
+    to service requests.
 
     Args:
-        server_handles: Ray actor handles of vLLM rollout servers.
-        model_path: HuggingFace model name/path for the tokenizer.
         host: Bind address for the HTTP server.
-        port: Port number. ``0`` means auto-select a free port.
-        tool_format: Tool-call format (e.g. ``"hermes"``).
-
-    Returns:
-        The cluster-routable proxy URL, e.g. ``http://10.0.1.5:9123``.
+        port: Port number.
+        relay_request_timeout: Timeout (seconds) for relay-mode requests.
+        log_level: Logging level (e.g. ``"INFO"``, ``"DEBUG"``).
     """
-    # Fast path: reuse existing actor
+    logging.basicConfig(
+        level=getattr(logging, log_level.upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    )
+
+    proxy = LLMProxyServer(
+        host=host,
+        port=port,
+        relay_request_timeout=relay_request_timeout,
+    )
+
+    async def _run():
+        url = await proxy.start()
+        logger.info(
+            "Standalone proxy started at %s (relay mode)\n"
+            "  Workers connect to: ws://%s:%d/ws/worker\n"
+            "  Health check:       %s/health",
+            url, host, port, url,
+        )
+        try:
+            while True:
+                await asyncio.sleep(3600)
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            pass
+        finally:
+            await proxy.stop()
+
     try:
-        existing = ray.get_actor(PROXY_ACTOR_NAME)
-        url = ray.get(existing.get_url.remote())
-        if url is not None:
-            logger.info("Reusing existing proxy server actor at %s", url)
-            return url
-    except ValueError:
+        asyncio.run(_run())
+    except KeyboardInterrupt:
         pass
 
-    # Create new actor, pinned to the current (head) node
-    global _proxy_actor_handle
-    head_node_id = ray.get_runtime_context().get_node_id()
-    actor = ProxyServerActor.options(
-        name=PROXY_ACTOR_NAME,
-        scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
-            node_id=head_node_id,
-            soft=False,
-        ),
-    ).remote(server_handles, model_path, host, port, tool_format)
 
-    # Keep the handle at module level to prevent GC of the non-detached actor.
-    _proxy_actor_handle = actor
+def main() -> None:
+    """CLI entry point for running the proxy as a standalone service."""
+    import argparse
 
-    url = ray.get(actor.start.remote())
-    logger.info("Proxy server actor created at %s (head node %s)", url, head_node_id)
-    return url
+    parser = argparse.ArgumentParser(
+        description="Run the LLM Proxy as a standalone relay service.",
+    )
+    parser.add_argument(
+        "--host", default="0.0.0.0",
+        help="Bind address (default: 0.0.0.0)",
+    )
+    parser.add_argument(
+        "--port", type=int, default=8080,
+        help="Port number (default: 8080)",
+    )
+    parser.add_argument(
+        "--relay-timeout", type=float, default=300.0,
+        help="Timeout (seconds) for relay requests (default: 300)",
+    )
+    parser.add_argument(
+        "--log-level", default="INFO",
+        help="Logging level (default: INFO)",
+    )
+    args = parser.parse_args()
+
+    run_standalone_proxy(
+        host=args.host,
+        port=args.port,
+        relay_request_timeout=args.relay_timeout,
+        log_level=args.log_level,
+    )
 
 
-def get_proxy_url() -> str | None:
-    """Get the URL of an already-running proxy server.
-
-    Performs a lightweight Ray RPC to the named actor.  Returns ``None``
-    if the actor does not exist.
-
-    This is the primary entry point for ``RemoteAgentLoop`` on any node
-    to discover the proxy address.
-    """
-    try:
-        actor = ray.get_actor(PROXY_ACTOR_NAME)
-        return ray.get(actor.get_url.remote())
-    except ValueError:
-        return None
-
-
-def stop_proxy_server() -> None:
-    """Stop the proxy server actor and remove it from the cluster."""
-    global _proxy_actor_handle
-    try:
-        actor = ray.get_actor(PROXY_ACTOR_NAME)
-        ray.get(actor.stop.remote())
-        ray.kill(actor)
-        logger.info("Proxy server actor stopped and killed")
-    except ValueError:
-        pass
-    _proxy_actor_handle = None
+if __name__ == "__main__":
+    main()

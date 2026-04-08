@@ -1,10 +1,19 @@
 """RemoteAgentLoop: a verl-compatible agent loop that delegates execution
 to a remote third-party agent while capturing LLM traffic via an HTTP proxy.
 
-The proxy runs as a Ray named actor (``ProxyServerActor``) on the head
-node, managed by :mod:`verl.experimental.proxy_server`.  Each
-``RemoteAgentLoop`` instance communicates with the proxy entirely via
-HTTP — it does not hold a direct Python reference to the proxy object.
+The proxy can run in two modes:
+
+**Ray actor mode** (default)
+    The proxy runs as a Ray named actor (``ProxyServerActor``) on the head
+    node, managed by :mod:`recipe.agentic.proxyserver.proxy_server`.  Each
+    ``RemoteAgentLoop`` instance communicates with the proxy entirely via
+    HTTP — it does not hold a direct Python reference to the proxy object.
+
+**Standalone proxy mode** (``PROXY_SERVER_URL`` set)
+    The proxy runs as a standalone service.  The agent loop connects to
+    the proxy URL directly (skipping Ray-based discovery) and starts an
+    :class:`InferenceWorkerClient` that bridges the framework's vLLM
+    servers to the proxy via WebSocket.
 
 URL scheme
 ~~~~~~~~~~
@@ -93,7 +102,7 @@ class RemoteAgentLoop(AgentLoopBase):
 
     1. Discovers the proxy server URL via a lightweight Ray RPC
        (``get_proxy_url()``).  The proxy itself is a Ray named actor
-       managed by :mod:`verl.experimental.proxy_server`.
+       managed by :mod:`recipe.agentic.proxyserver.proxy_server`.
     2. Registers a unique *trial_id* with the proxy via HTTP.
     3. Calls the remote harbor server via the SDK, telling the agent to
        use ``http://{LOCAL_IP}:{port}/{trial_id}/v1`` as its OpenAI
@@ -135,6 +144,10 @@ class RemoteAgentLoop(AgentLoopBase):
         self.environment_kwargs: dict[str, Any] = dict(remote_cfg.environment_kwargs)
         self.use_local_trial: bool = remote_cfg.use_local_trial
 
+        # Standalone proxy mode
+        self.proxy_server_url: str | None = remote_cfg.proxy_server_url
+        self._inference_worker = None
+
         # Sequence length limits
         self.prompt_length = rollout_cfg.prompt_length
         self.response_length = rollout_cfg.response_length
@@ -144,20 +157,67 @@ class RemoteAgentLoop(AgentLoopBase):
     # ------------------------------------------------------------------
 
     def _get_proxy_url(self) -> str:
-        """Discover the proxy server URL via Ray named actor RPC.
+        """Discover the proxy server URL.
 
-        Raises ``RuntimeError`` if the proxy actor has not been started
-        (i.e. the recipe did not call ``start_proxy_server()``).
+        In standalone mode (``PROXY_SERVER_URL`` set), returns the configured
+        URL directly.  Otherwise, performs a lightweight Ray RPC to the
+        named proxy actor.
+
+        Raises ``RuntimeError`` if the proxy cannot be found.
         """
-        from verl.experimental.proxy_server import get_proxy_url
+        if self.proxy_server_url:
+            return self.proxy_server_url
+
+        from recipe.agentic.proxyserver.ray_actor import get_proxy_url
 
         url = get_proxy_url()
         if url is None:
             raise RuntimeError(
                 "Proxy server actor not found.  Make sure the recipe calls "
-                "start_proxy_server() before training starts."
+                "start_proxy_server() before training starts, or set "
+                "PROXY_SERVER_URL for standalone proxy mode."
             )
         return url
+
+    async def _ensure_inference_worker(self) -> None:
+        """Start the inference worker client if in standalone proxy mode.
+
+        The worker connects to the proxy's WebSocket endpoint and bridges
+        inference requests to the local vLLM rollout servers.  This is a
+        no-op if the proxy is running in local (Ray actor) mode.
+
+        The worker is started lazily on the first call and reused across
+        all subsequent ``run()`` invocations.
+        """
+        if not self.proxy_server_url:
+            return
+        if self._inference_worker is not None:
+            return
+
+        from recipe.agentic.proxyserver.worker_client import \
+            InferenceWorkerClient
+
+        # Build the WebSocket URL from the proxy HTTP URL
+        ws_url = self.proxy_server_url.replace("http://", "ws://").replace(
+            "https://", "wss://"
+        )
+        if not ws_url.endswith("/"):
+            ws_url += "/"
+        ws_url += "ws/worker"
+
+        # Get vLLM server handles from the server manager
+        server_handles = self.server_manager.server_handles
+        model_path = self.config.actor_rollout_ref.model.path
+
+        self._inference_worker = InferenceWorkerClient(
+            proxy_ws_url=ws_url,
+            server_handles=server_handles,
+            model_path=model_path,
+        )
+        await self._inference_worker.start()
+        logger.info(
+            "Inference worker started, connecting to proxy at %s", ws_url
+        )
 
     async def _register_session(self, proxy_url: str, trial_id: str) -> None:
         """POST /sessions/{trial_id} to register a new session."""
@@ -388,7 +448,10 @@ class RemoteAgentLoop(AgentLoopBase):
         instance_id = kwargs.get("instance_id", "")
         trial_id = instance_id + "-" + shortuuid.uuid()
 
-        # 1. Discover proxy URL (cluster-internal) via Ray named actor
+        # 0. If using a standalone proxy, ensure the inference worker is up
+        await self._ensure_inference_worker()
+
+        # 1. Discover proxy URL (cluster-internal) via Ray named actor or env
         proxy_url = self._get_proxy_url()
         parsed = urlparse(proxy_url)
         proxy_port = parsed.port

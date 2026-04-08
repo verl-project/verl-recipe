@@ -149,7 +149,7 @@ class TaskRunner(BaseTaskRunner):
         server_handles = trainer.async_rollout_manager.server_handles
         proxy_cfg = config.get("proxy_server", {})
 
-        from recipe.agentic.proxyserver.proxy_server import start_proxy_server
+        from recipe.agentic.proxyserver.ray_actor import start_proxy_server
 
         proxy_url = start_proxy_server(
             server_handles=server_handles,

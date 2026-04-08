@@ -1,0 +1,124 @@
+# -------------------------------------------------------------------
+# Kubernetes deployment for the standalone LLM Proxy Server
+#
+# A framework-agnostic relay service — no GPU required.  Any
+# framework's inference workers connect via WebSocket to /ws/worker.
+#
+# Apply:
+#   kubectl apply -f recipe/agentic/proxyserver/deploy.yaml
+#
+# The proxy is exposed as a ClusterIP Service.  To make it accessible
+# outside the cluster, change type to LoadBalancer or add an Ingress.
+# -------------------------------------------------------------------
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: llm-proxy
+  labels:
+    app.kubernetes.io/part-of: llm-proxy
+
+---
+# ---- ConfigMap: tunable parameters ------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llm-proxy-config
+  namespace: llm-proxy
+  labels: &labels
+    app.kubernetes.io/name: llm-proxy-server
+    app.kubernetes.io/component: proxy
+data:
+  PROXY_HOST: "0.0.0.0"
+  PROXY_PORT: "8080"
+  # Max seconds to wait for a worker response before timing out
+  RELAY_TIMEOUT: "300"
+  # Logging level: DEBUG, INFO, WARNING, ERROR
+  LOG_LEVEL: "INFO"
+
+---
+# ---- Deployment -------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-proxy-server
+  namespace: llm-proxy
+  labels: *labels
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: llm-proxy-server
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: llm-proxy-server
+        app.kubernetes.io/component: proxy
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: proxy
+          image: llm-proxy-server:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--host"
+            - "$(PROXY_HOST)"
+            - "--port"
+            - "$(PROXY_PORT)"
+            - "--relay-timeout"
+            - "$(RELAY_TIMEOUT)"
+            - "--log-level"
+            - "$(LOG_LEVEL)"
+          envFrom:
+            - configMapRef:
+                name: llm-proxy-config
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 2
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "1"
+              memory: "512Mi"
+
+---
+# ---- Service ----------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-proxy-server
+  namespace: llm-proxy
+  labels: *labels
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: llm-proxy-server
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
