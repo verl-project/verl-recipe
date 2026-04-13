@@ -12,6 +12,7 @@ except ImportError:
     from torch.distributed._tensor import DTensor
 
 from verl.models.transformers.monkey_patch import apply_monkey_patch
+from verl.single_controller.base.decorator import Dispatch, register
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils.device import (
     get_device_id,
@@ -47,6 +48,7 @@ def move_buffers_to_device_recursive(model, device):
 class MMActorRolloutRefWorker(ActorRolloutRefWorker):
     def __init__(self, config: DictConfig, role: str, **kwargs):
         super().__init__(config, role, **kwargs)
+        self.trainer = None
 
     def _dataloader(self, args=None):
         return None
@@ -116,14 +118,22 @@ class MMActorRolloutRefWorker(ActorRolloutRefWorker):
 
         set_expandable_segments(False)
 
-        if peft_config is not None and self.base_sync_done:
-            per_tensor_param = params.items() if isinstance(params, dict) else params  # Fixed: handle dict case
-        else:
-            device = get_device_id()  # used when fsdp2 set cpu_offload_policy
-            per_tensor_param = (
-                (name, param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param)
-                for name, param in params.items()
+        # Ensure all params are on GPU before sending to rollout engine.
+        # collect_lora_params returns CPU tensors via .detach().cpu(), so the
+        # previous base_sync_done fast-path silently passed CPU tensors through,
+        # which could cause errors in backends that expect GPU tensors (e.g.
+        # SGLang's CUDA IPC serializer).
+        device = get_device_id()
+        _items = params.items() if isinstance(params, dict) else params
+        per_tensor_param = (
+            (
+                name,
+                param.to(device, non_blocking=True).full_tensor()
+                if isinstance(param, DTensor)
+                else param.to(device, non_blocking=False),
             )
+            for name, param in _items
+        )
 
         # QAT: quantize weights before sending to vLLM
         if self._qat_enabled:
@@ -274,7 +284,7 @@ class MMActorRolloutRefWorker(ActorRolloutRefWorker):
             use_meta_tensor=not actor_model_config.tie_word_embeddings, mesh=self.device_mesh
         )
 
-        with init_context(), warnings.catch_warnings():
+        with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             from mindspeed_mm.fsdp.train.trainer import Trainer
 
@@ -287,6 +297,7 @@ class MMActorRolloutRefWorker(ActorRolloutRefWorker):
                 self.mm_args.parallel.fsdp_plan.cpu_offload = True
 
             trainer = Trainer(args=self.mm_args, dataloader_provider=self._dataloader)
+            self.trainer = trainer
             trainer.train_dataloader = None
             actor_module = trainer.model
 
@@ -349,6 +360,21 @@ class MMActorRolloutRefWorker(ActorRolloutRefWorker):
             actor_lr_scheduler = None
 
         return actor_module_fsdp, actor_optimizer, actor_lr_scheduler, actor_model_config
+    
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def init_model(self):
+        super().init_model()
+        from mindspeed_mm.fsdp.optimizer.clip_grad_norm import clip_grad_norm
+        
+        def _optimizer_step():
+            grad_norm = clip_grad_norm(self.trainer.model, max_norm=self.mm_args.training.clip_grad, foreach=self.mm_args.training.clip_grad_foreach)
+            # Update parameters
+            if self._is_actor:
+                self.trainer.optimizer.step()
+            return grad_norm
+
+        if self._is_actor:
+            self.actor._optimizer_step = _optimizer_step
 
 
 class AsyncMMActorRolloutRefWorker(AsyncActorRolloutRefWorker, MMActorRolloutRefWorker):
