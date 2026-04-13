@@ -24,7 +24,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: llm-proxy-config
-  namespace: llm-proxy
+  namespace: default
   labels: &labels
     app.kubernetes.io/name: llm-proxy-server
     app.kubernetes.io/component: proxy
@@ -42,8 +42,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: llm-proxy-server
-  namespace: llm-proxy
-  labels: *labels
+  namespace: default
 spec:
   replicas: 1
   selector:
@@ -65,6 +64,27 @@ spec:
         - name: proxy
           image: llm-proxy-server:latest
           imagePullPolicy: IfNotPresent
+          env:
+            - name: PROXY_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: llm-proxy-config
+                  key: PROXY_HOST
+            - name: PROXY_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: llm-proxy-config
+                  key: PROXY_PORT
+            - name: RELAY_TIMEOUT
+              valueFrom:
+                configMapKeyRef:
+                  name: llm-proxy-config
+                  key: RELAY_TIMEOUT
+            - name: LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: llm-proxy-config
+                  key: LOG_LEVEL
           args:
             - "--host"
             - "$(PROXY_HOST)"
@@ -74,9 +94,6 @@ spec:
             - "$(RELAY_TIMEOUT)"
             - "--log-level"
             - "$(LOG_LEVEL)"
-          envFrom:
-            - configMapRef:
-                name: llm-proxy-config
           ports:
             - name: http
               containerPort: 8080
@@ -111,8 +128,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: llm-proxy-server
-  namespace: llm-proxy
-  labels: *labels
+  namespace: default
 spec:
   type: ClusterIP
   selector:
