@@ -1,4 +1,8 @@
 # Accelerating RL Rollout with Model-free Speculative Decoding
+## Required `verl` version
+
+See [`REQUIRED_VERL.txt`](REQUIRED_VERL.txt) for the upstream repository, install mode (rolling `main`, pinned release tag, or pinned git commit), and copy-pastable `pip` / `git` instructions where they exist.
+
 
 ## Introduction
 
@@ -35,7 +39,7 @@ sudo apt install -y libprotobuf-dev protobuf-compiler libprotoc-dev \
     libgrpc-dev libgrpc++-dev protobuf-compiler-grpc \
     libxxhash-dev libboost-all-dev cmake
 
-pip install verl@git+https://github.com/volcengine/verl.git@ccd7d934f91be98bb3732c78bd1870fa39c399ad
+pip install verl@git+https://github.com/verl-project/verl.git@ccd7d934f91be98bb3732c78bd1870fa39c399ad
 pip install git+https://github.com/He-Jingkai/specRL.git --no-build-isolation -v
 ```
 

@@ -1,4 +1,8 @@
 # NVFP4 QAT (Quantization-Aware Training)
+## Required `verl` version
+
+See [`REQUIRED_VERL.txt`](REQUIRED_VERL.txt) for the upstream repository, install mode (rolling `main`, pinned release tag, or pinned git commit), and copy-pastable `pip` / `git` instructions where they exist.
+
 
 This module provides **NVFP4 W4A16 Quantization-Aware Training (QAT)**, enabling seamless integration between distributed training and vLLM inference engine. This allows **NVFP4 quantized** inference during training without causing KL divergence explosion.
 

@@ -1,4 +1,8 @@
 # Recipe: Tokens saving and Auto Fault Recover for Rollout
+## Required `verl` version
+
+See [`REQUIRED_VERL.txt`](REQUIRED_VERL.txt) for the upstream repository, install mode (rolling `main`, pinned release tag, or pinned git commit), and copy-pastable `pip` / `git` instructions where they exist.
+
 
 ## Design
 
@@ -28,7 +32,7 @@ train
 
 ```bash
 # dev version
-pip install verl@git+https://github.com/volcengine/verl.git@b97ebfd5062223337ae065c2250f8ab5c0e08e5e
+pip install verl@git+https://github.com/verl-project/verl.git@b97ebfd5062223337ae065c2250f8ab5c0e08e5e
 ```
 
 ## Quickstart

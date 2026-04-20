@@ -1,0 +1,15 @@
+# FlowRL — README offers two tracks
+UPSTREAM=https://github.com/verl-project/verl.git
+MODE=mixed
+OPTION_A_TAG=v0.4.0
+OPTION_A_COMMIT=0758489422e8d41a89e6c36d4c477714520f0dcc
+OPTION_A_PIP=pip install verl==0.4.0
+OPTION_B=rolling_main
+OPTION_B_VERL_COMMIT=bcb638649a50e58494a8ddd92085ad1174f674b8
+OPTION_B_PIP_INSTALL=pip install verl@git+https://github.com/verl-project/verl.git@bcb638649a50e58494a8ddd92085ad1174f674b8
+OPTION_B_RECIPE_SUBMODULE_COMMIT=ba246418f4de12b845a09bba975f1a5242adc898
+OPTION_B_RECIPE_FOLDER=flowrl
+OPTION_B_RECIPE_FOLDER_LAST_COMMIT=21892b9276936efab5375c3f6b8415e472ef7118
+OPTION_B_PIP=From repo root with this recipe on main: pip install -e .
+NOTES=Option A pins historical verl; Option B pins this workspace's verl core (OPTION_B_VERL_COMMIT) and records the recipe submodule/folder commits.
+

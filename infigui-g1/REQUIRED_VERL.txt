@@ -1,0 +1,7 @@
+# infigui-g1 — Docker image tag references verl 0.5.x line
+UPSTREAM=https://github.com/verl-project/verl.git
+MODE=pinned_tag
+TAG=v0.5.0
+COMMIT=8fdc4d3f202f41461f4de9f42a637228e342668b
+PIP_INSTALL=pip install verl==0.5.0
+NOTES=Scripts reference Docker image verlai/verl:...verl0.5...; pin to v0.5.0 unless you intentionally track main.

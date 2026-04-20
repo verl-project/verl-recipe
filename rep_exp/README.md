@@ -1,4 +1,8 @@
 <div align="center">
+## Required `verl` version
+
+See [`REQUIRED_VERL.txt`](REQUIRED_VERL.txt) for the upstream repository, install mode (rolling `main`, pinned release tag, or pinned git commit), and copy-pastable `pip` / `git` instructions where they exist.
+
 
 # Representation-Based Exploration for Language Models: <br> From Test-Time to Post-Training
 
@@ -10,7 +14,7 @@
 
 Install the following commit of verl:
 ```
-pip install verl@git+https://github.com/volcengine/verl.git@b9bd00efba253ea90072555c45692054cf703de2
+pip install verl@git+https://github.com/verl-project/verl.git@b9bd00efba253ea90072555c45692054cf703de2
 ```
 
 The only other package to install is scikit-learn, which we'll use for applying a sparse projection.

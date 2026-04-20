@@ -1,0 +1,5 @@
+# fault_recover — README pins a specific commit
+UPSTREAM=https://github.com/verl-project/verl.git
+MODE=pinned_commit
+COMMIT=b97ebfd5062223337ae065c2250f8ab5c0e08e5e
+PIP_INSTALL=pip install verl@git+https://github.com/verl-project/verl.git@b97ebfd5062223337ae065c2250f8ab5c0e08e5e

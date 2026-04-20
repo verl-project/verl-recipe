@@ -1,4 +1,8 @@
 ## 在线量化权重：
+## Required `verl` version
+
+See [`REQUIRED_VERL.txt`](REQUIRED_VERL.txt) for the upstream repository, install mode (rolling `main`, pinned release tag, or pinned git commit), and copy-pastable `pip` / `git` instructions where they exist.
+
 
 介绍在昇腾设备上，使用 [Flash-RL](https://github.com/yaof20/Flash-RL) 工具，修改推理后端，通过比较 INT8 模型和 BF16 模型，对权重和激活值执行在线量化。下文以 Qwen3-30B int8 为例，在 NPU 上跑通端到端功能。
 

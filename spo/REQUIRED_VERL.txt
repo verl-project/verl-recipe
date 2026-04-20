@@ -1,0 +1,7 @@
+# SPO — README requires this exact commit before pip install -e .
+UPSTREAM=https://github.com/verl-project/verl.git
+MODE=pinned_commit
+COMMIT=d7944c01e63e9eb639c8357648b7958550591158
+GIT_SETUP=git clone https://github.com/verl-project/verl.git && cd verl && git checkout d7944c01e63e9eb639c8357648b7958550591158
+PIP_INSTALL=pip install -e .
+NOTES=conda environment.yml may list verl==0.7.0.dev0 from an editable install metadata snapshot; trust the git commit above for reproducibility.

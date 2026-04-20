@@ -1,6 +1,10 @@
 # DeepSeek-R1-Zero on Ascend NPU
 本recipe是基于Deepseek-V3-Base模型在NPU上进行RLHF后训练的样例，基于GRPO与规则奖励，使用deepscaler数据集。
 
+## 依赖的 `verl` 版本
+
+请参阅本目录下的 [`REQUIRED_VERL.txt`](REQUIRED_VERL.txt)（与英文 [`README.md`](README.md) 中说明一致），了解上游仓库、`main` 滚动开发或固定 tag/commit 的安装方式，以及可复制的 `pip` / `git` 命令。
+
 ## 实现细节
 为了在Ascend NPU上实现DeepSeek模型的RL训练，本样例中补充了一些代码，如下所示：
 - 我们参考`verl/utils/reward_score/gsm8k.py`，在`deepscaler.py`中实现了一个简单的规则奖励函数。

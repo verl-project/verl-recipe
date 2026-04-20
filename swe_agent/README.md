@@ -1,4 +1,8 @@
 # SWE-Agent VERL Recipe
+## Required `verl` version
+
+See [`REQUIRED_VERL.txt`](REQUIRED_VERL.txt) for the upstream repository, install mode (rolling `main`, pinned release tag, or pinned git commit), and copy-pastable `pip` / `git` instructions where they exist.
+
 
 Train language models to solve real-world software engineering tasks using reinforcement learning. This recipe integrates [SWE-agent](https://github.com/SWE-agent/SWE-agent) as the agent framework with VERL's GRPO trainer, enabling models to learn from interactive coding feedback in Docker-sandboxed environments.
 

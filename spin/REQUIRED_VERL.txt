@@ -1,0 +1,15 @@
+# SPIN — rolling track + historical baseline tag
+UPSTREAM=https://github.com/verl-project/verl.git
+MODE=rolling_with_baseline
+ROLLING_VERL_COMMIT=bcb638649a50e58494a8ddd92085ad1174f674b8
+ROLLING_PIP_INSTALL=pip install verl@git+https://github.com/verl-project/verl.git@bcb638649a50e58494a8ddd92085ad1174f674b8
+ROLLING_GIT_SETUP=git clone https://github.com/verl-project/verl.git && cd verl && git checkout bcb638649a50e58494a8ddd92085ad1174f674b8 && git submodule update --init --recursive recipe
+RECIPE_SUBMODULE_COMMIT=ba246418f4de12b845a09bba975f1a5242adc898
+RECIPE_FOLDER=spin
+RECIPE_FOLDER_LAST_COMMIT=21892b9276936efab5375c3f6b8415e472ef7118
+REFERENCE_TAG=v0.3.0.post1
+REFERENCE_COMMIT=070ed6ac3f6aea13a916556794f34e8f2bde7dde
+ROLLING_PIP=From repository root: pip install -e ".[sglang]"
+NOTES=Use ROLLING_VERL_COMMIT for the current in-tree workflow; REFERENCE_* is the older documented baseline.
+REFRESH=Recompute: (cd verl && git rev-parse HEAD); (cd verl/recipe && git log -1 --format=%H -- spin)
+
