@@ -30,6 +30,37 @@ Together these pin both the library and the bundled recipe tree. **`REFRESH=`** 
 
 Each recipe `README.md` links to its `REQUIRED_VERL.txt` in a short **Required `verl` version** section. The repository root [`README.md`](../README.md) also points here for discoverability.
 
+### One-shot installer: [`install_verl.sh`](install_verl.sh)
+
+`install_verl.sh` reads a recipe's `REQUIRED_VERL.txt` and installs the pinned core `verl` for you. It understands every `MODE=` value listed above and prints the command it will run before executing it (use `--show` for a dry-run).
+
+```bash
+# From the root of this repo (the directory containing install_verl.sh):
+
+# List every recipe + its pinned `pip install` line
+./install_verl.sh --list
+
+# Dry-run: see exactly which pip command a recipe would execute
+./install_verl.sh --recipe dapo --show
+
+# Install the pinned verl core for a recipe via pip (default)
+./install_verl.sh --recipe retool
+
+# Clone upstream verl at the pinned commit, init the recipe submodule,
+# and `pip install -e .` from the checkout (useful when you want an
+# editable install or plan to modify verl itself).
+./install_verl.sh --recipe langgraph_agent --method git --dest ./verl
+
+# Recipes that expose multiple variants: pick one with --option
+./install_verl.sh --recipe dapo   --option reproduction   # DAPO paper SHA
+./install_verl.sh --recipe flowrl --option A              # FlowRL v0.4.0 tag
+./install_verl.sh --recipe spin   --option baseline       # SPIN v0.3.0.post1
+```
+
+Flags: `--recipe NAME` (e.g. `gkd/megatron`, `specRL/histoSpec`) or `--file PATH/TO/REQUIRED_VERL.txt`, `--method pip|git` (default `pip`), `--dest DIR` (default `./verl`, only used with `--method git`), `--show` (dry-run), `--yes` (skip confirmation), `--list`, `--help`.
+
+The script requires only `bash`, `git`, `awk`, and `pip`/`pip3` on `PATH`. It does **not** `source` or `eval` the `REQUIRED_VERL.txt` file — values are extracted with `awk` and the exact command to be executed is echoed before it runs.
+
 | Recipe | `REQUIRED_VERL.txt` |
 | --- | --- |
 | char_count | [`recipe/char_count/REQUIRED_VERL.txt`](char_count/REQUIRED_VERL.txt) |
