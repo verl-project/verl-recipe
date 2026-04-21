@@ -142,8 +142,8 @@ Overview
 Requirements
 ------------
 
-- A NeMo Gym clone with the environments you want to train on.
-- ``pip install -e /path/to/nemo-gym`` in the container at job start.
+- A NeMo Gym clone (0.2.1+) with the environments you want to train on.
+- ``pip install -e $NEMO_GYM_ROOT`` in the container at job start. ``pip install nemo-gym`` also works if you don't need to modify environments. Pin to ``nemo-gym==0.2.1`` if you run into any issues on newer versions.
 - Container: ``verlai/verl:vllm017.latest`` (vLLM 0.17.0).
 
 Environment Variables
@@ -173,8 +173,8 @@ Each training run needs a config YAML (see ``configs/math.yaml`` for an example)
 .. code-block:: yaml
 
     nemo_gym:
-      nemo_gym_root: $NEMO_GYM_ROOT        # path to NeMo Gym clone, expanded at runtime
-      uses_reasoning_parser: false          # set true for reasoning models (e.g. DeepSeek-R1)
+      nemo_gym_root: $NEMO_GYM_ROOT
+      uses_reasoning_parser: false          # set true for reasoning models
       config_paths:
         - $NEMO_GYM_ROOT/responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
         - $NEMO_GYM_ROOT/resources_servers/your_env/configs/your_env.yaml

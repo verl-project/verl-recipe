@@ -76,7 +76,7 @@ echo "Installing nemo-gym..."
 srun --overlap --nodes=1 --ntasks=1 -w "${head_node}" \
     --no-container-mount-home --container-mounts=${MOUNTS} \
     --container-name=ray-head \
-    bash -c "PYTHONPATH= touch ${NEMO_GYM_ROOT}/scripts/__init__.py && pip install -q uv && echo 'blinker==1.4' > /tmp/constraints.txt && pip install -q -e ${NEMO_GYM_ROOT} -c /tmp/constraints.txt"
+    bash -c "echo 'blinker==1.4' > /tmp/constraints.txt && pip install -q uv && pip install -q -e ${NEMO_GYM_ROOT} -c /tmp/constraints.txt"
 
 # TODO: test if hermes tool parser still hits "already borrowed" tokenizer errors under concurrent load
 # if so, point to or provide the patch here, or use a different model+tool parser
@@ -93,7 +93,7 @@ PYTHONUNBUFFERED=1 srun --overlap --nodes=1 --ntasks=1 -w "${head_node}" \
         VLLM_USE_V1=1 \
         TORCH_NCCL_AVOID_RECORD_STREAMS=1 \
         NEMO_GYM_ROOT="${NEMO_GYM_ROOT}" \
-        PYTHONPATH="${NEMO_GYM_ROOT}:${VERL_ROOT}" \
+        PYTHONPATH="${VERL_ROOT}" \
         VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
         RAY_grpc_keepalive_time_ms=60000 \
         RAY_grpc_keepalive_timeout_ms=600000 \

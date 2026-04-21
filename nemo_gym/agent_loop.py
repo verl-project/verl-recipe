@@ -58,6 +58,12 @@ _postprocess = _AgentLoopWorker._postprocess
 
 
 class NemoGymAgentLoopManager(AgentLoopManager):
+    def __init__(self, *args, **kwargs):
+        from recipe.nemo_gym.replica import NemoGymVLLMReplica
+
+        self.rollout_replica_class = NemoGymVLLMReplica
+        super().__init__(*args, **kwargs)
+
     @classmethod
     @auto_await
     async def create(

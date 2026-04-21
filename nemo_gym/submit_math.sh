@@ -76,7 +76,7 @@ echo "Installing nemo-gym..."
 srun --overlap --nodes=1 --ntasks=1 -w "${head_node}" \
     --no-container-mount-home --container-mounts=${MOUNTS} \
     --container-name=ray-head \
-    bash -c "touch ${NEMO_GYM_ROOT}/scripts/__init__.py && pip install -q uv && echo 'blinker==1.4' > /tmp/constraints.txt && pip install -q -e ${NEMO_GYM_ROOT} -c /tmp/constraints.txt"
+    bash -c "echo 'blinker==1.4' > /tmp/constraints.txt && pip install -q uv && pip install -q -e ${NEMO_GYM_ROOT} -c /tmp/constraints.txt"
 
 echo "Launching training on ${head_node}..."
 PYTHONUNBUFFERED=1 srun --overlap --nodes=1 --ntasks=1 -w "${head_node}" \
@@ -91,7 +91,7 @@ PYTHONUNBUFFERED=1 srun --overlap --nodes=1 --ntasks=1 -w "${head_node}" \
         VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
         TORCH_NCCL_AVOID_RECORD_STREAMS=1 \
         NEMO_GYM_ROOT="${NEMO_GYM_ROOT}" \
-        PYTHONPATH="${NEMO_GYM_ROOT}:${VERL_ROOT}" \
+        PYTHONPATH="${VERL_ROOT}" \
         RAY_grpc_keepalive_time_ms=60000 \
         RAY_grpc_keepalive_timeout_ms=600000 \
         RAY_grpc_client_keepalive_time_ms=60000 \
