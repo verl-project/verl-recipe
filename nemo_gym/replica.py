@@ -16,14 +16,18 @@ import ray
 from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer, vLLMReplica
 
 
-class NemoGymVLLMHttpServer(vLLMHttpServer):
+class NeMoGymvLLMHttpServer(vLLMHttpServer):
     def apply_nemo_gym_server_patch(self):
-        from recipe.nemo_gym.server_patch import patch_serving_chat_for_nemo_gym
+        from recipe.nemo_gym.server_patch import (
+            patch_hermes_tool_parser_thread_safety,
+            patch_serving_chat_for_nemo_gym,
+        )
 
         patch_serving_chat_for_nemo_gym()
+        patch_hermes_tool_parser_thread_safety()
 
 
-class NemoGymVLLMReplica(vLLMReplica):
+class NeMoGymvLLMReplica(vLLMReplica):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.server_class = ray.remote(NemoGymVLLMHttpServer)
+        self.server_class = ray.remote(NeMoGymvLLMHttpServer)

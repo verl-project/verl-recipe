@@ -57,11 +57,11 @@ from verl.utils.ray_utils import auto_await
 _postprocess = _AgentLoopWorker._postprocess
 
 
-class NemoGymAgentLoopManager(AgentLoopManager):
+class NeMoGymAgentLoopManager(AgentLoopManager):
     def __init__(self, *args, **kwargs):
-        from recipe.nemo_gym.replica import NemoGymVLLMReplica
+        from recipe.nemo_gym.replica import NeMoGymvLLMReplica
 
-        self.rollout_replica_class = NemoGymVLLMReplica
+        self.rollout_replica_class = NeMoGymvLLMReplica
         super().__init__(*args, **kwargs)
 
     @classmethod
@@ -73,7 +73,7 @@ class NemoGymAgentLoopManager(AgentLoopManager):
         rollout_resource_pool=None,
         reward_loop_worker_handles=None,
         teacher_model_manager=None,
-    ) -> NemoGymAgentLoopManager:
+    ) -> NeMoGymAgentLoopManager:
         instance = cls(
             config,
             worker_group,
@@ -182,7 +182,7 @@ class NemoGymAgentLoopManager(AgentLoopManager):
         )
         self._rollout_thread.start()
 
-        print(f"NemoGymAgentLoopManager ready: {len(base_urls)} vLLM endpoints: {base_urls}")
+        print(f"NeMoGymAgentLoopManager ready: {len(base_urls)} vLLM endpoints: {base_urls}")
 
     def generate_sequences(self, prompts: DataProto) -> DataProto:
         future = asyncio.run_coroutine_threadsafe(self._async_generate_sequences(prompts), self._rollout_loop)

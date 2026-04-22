@@ -78,8 +78,6 @@ srun --overlap --nodes=1 --ntasks=1 -w "${head_node}" \
     --container-name=ray-head \
     bash -c "echo 'blinker==1.4' > /tmp/constraints.txt && pip install -q uv && pip install -q -e ${NEMO_GYM_ROOT} -c /tmp/constraints.txt"
 
-# TODO: test if hermes tool parser still hits "already borrowed" tokenizer errors under concurrent load
-# if so, point to or provide the patch here, or use a different model+tool parser
 
 echo "Launching training on ${head_node}..."
 PYTHONUNBUFFERED=1 srun --overlap --nodes=1 --ntasks=1 -w "${head_node}" \
@@ -105,7 +103,7 @@ PYTHONUNBUFFERED=1 srun --overlap --nodes=1 --ntasks=1 -w "${head_node}" \
             data.train_files="${TRAIN_FILE}" \
             data.val_files="${TEST_FILE}" \
             +data.custom_cls.path="${VERL_ROOT}/recipe/nemo_gym/dataset.py" \
-            +data.custom_cls.name=NemoGymJSONLDataset \
+            +data.custom_cls.name=NeMoGymJSONLDataset \
             data.truncation=left \
             data.train_batch_size=32 \
             actor_rollout_ref.rollout.n=16 \
@@ -166,6 +164,6 @@ PYTHONUNBUFFERED=1 srun --overlap --nodes=1 --ntasks=1 -w "${head_node}" \
             trainer.default_local_dir="${CKPTS_DIR}" \
             trainer.resume_mode=disable \
             trainer.log_val_generations=10 \
-            +actor_rollout_ref.rollout.agent.agent_loop_manager_class='recipe.nemo_gym.agent_loop.NemoGymAgentLoopManager' \
+            +actor_rollout_ref.rollout.agent.agent_loop_manager_class='recipe.nemo_gym.agent_loop.NeMoGymAgentLoopManager' \
             +actor_rollout_ref.rollout.agent.agent_loop_config_path="${VERL_ROOT}/recipe/nemo_gym/configs/workplace.yaml" \
     2>&1

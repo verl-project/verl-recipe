@@ -18,7 +18,7 @@ import torch
 from torch.utils.data import Dataset
 
 
-class NemoGymJSONLDataset(Dataset):
+class NeMoGymJSONLDataset(Dataset):
     def __init__(
         self,
         data_files: str | list[str],
@@ -36,7 +36,7 @@ class NemoGymJSONLDataset(Dataset):
         for path in data_files:
             path = Path(path)
             if not path.exists():
-                raise FileNotFoundError(f"NemoGymJSONLDataset: file not found: {path}")
+                raise FileNotFoundError(f"NeMoGymJSONLDataset: file not found: {path}")
             with open(path) as f:
                 for line in f:
                     line = line.strip()

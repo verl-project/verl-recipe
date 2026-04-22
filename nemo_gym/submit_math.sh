@@ -17,8 +17,8 @@ GPUS_PER_NODE=8
 source "${SLURM_SUBMIT_DIR}/config.env"
 
 MODEL_PATH="/path/to/Qwen3-4B-Instruct"
-TRAIN_FILE="/path/to/math_with_judge/dapo17k_bytedtsinghua_train_nrl.jsonl"
-TEST_FILE="/path/to/math_with_judge/aime24_bytedtsinghua_validation_nrl.jsonl"
+TRAIN_FILE="/path/to/math_with_judge/dapo17k_bytedtsinghua_train.jsonl"
+TEST_FILE="/path/to/math_with_judge/aime24_bytedtsinghua_validation.jsonl"
 CKPTS_DIR="${RESULTS_ROOT}/DAPO-Qwen2.5-7b-MATH-megatron"
 
 CONTAINER="verlai/verl:vllm017.latest"
@@ -102,7 +102,7 @@ PYTHONUNBUFFERED=1 srun --overlap --nodes=1 --ntasks=1 -w "${head_node}" \
             data.train_files="${TRAIN_FILE}" \
             data.val_files="${TEST_FILE}" \
             +data.custom_cls.path="${VERL_ROOT}/recipe/nemo_gym/dataset.py" \
-            +data.custom_cls.name=NemoGymJSONLDataset \
+            +data.custom_cls.name=NeMoGymJSONLDataset \
             data.truncation=left \
             data.train_batch_size=32 \
             actor_rollout_ref.rollout.n=16 \
@@ -161,6 +161,6 @@ PYTHONUNBUFFERED=1 srun --overlap --nodes=1 --ntasks=1 -w "${head_node}" \
             trainer.default_local_dir="${CKPTS_DIR}" \
             trainer.resume_mode=disable \
             trainer.log_val_generations=10 \
-            +actor_rollout_ref.rollout.agent.agent_loop_manager_class='recipe.nemo_gym.agent_loop.NemoGymAgentLoopManager' \
+            +actor_rollout_ref.rollout.agent.agent_loop_manager_class='recipe.nemo_gym.agent_loop.NeMoGymAgentLoopManager' \
             +actor_rollout_ref.rollout.agent.agent_loop_config_path="${VERL_ROOT}/recipe/nemo_gym/configs/math.yaml" \
     2>&1
