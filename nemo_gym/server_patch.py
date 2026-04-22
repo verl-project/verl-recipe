@@ -133,7 +133,8 @@ def patch_hermes_tool_parser_thread_safety() -> None:
     so concurrent instantiations don't race the Rust tokenizer and crash with
     ``RuntimeError: Already borrowed``. First call under lock runs the original
     __init__; subsequent calls for the same tokenizer reuse the cached token IDs.
-    Based on prime-rl PR #1837.
+    Based on prime-rl PR #1837. 
+    Related vLLM PRs: #37169, #37382, #40059, or #35034 and vLLM issue: #34932
     """
     import threading
 
