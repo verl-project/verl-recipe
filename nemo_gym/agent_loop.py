@@ -15,12 +15,15 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util as _ilu
+import logging
 import os
 import socket
 import sys
 import threading
 from collections import defaultdict
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # TODO: remove in next nemo gym release
 _nemo_gym_path = os.environ.get("NEMO_GYM_ROOT")
@@ -182,7 +185,7 @@ class NeMoGymAgentLoopManager(AgentLoopManager):
         )
         self._rollout_thread.start()
 
-        print(f"NeMoGymAgentLoopManager ready: {len(base_urls)} vLLM endpoints: {base_urls}")
+        logger.info(f"NeMoGymAgentLoopManager ready: {len(base_urls)} vLLM endpoints: {base_urls}")
 
     def generate_sequences(self, prompts: DataProto) -> DataProto:
         future = asyncio.run_coroutine_threadsafe(self._async_generate_sequences(prompts), self._rollout_loop)

@@ -133,37 +133,27 @@ def patch_hermes_tool_parser_thread_safety() -> None:
     so concurrent instantiations don't race the Rust tokenizer and crash with
     ``RuntimeError: Already borrowed``. First call under lock runs the original
     __init__; subsequent calls for the same tokenizer reuse the cached token IDs.
-    Based on prime-rl PR #1837. 
+    Based on prime-rl PR #1837.
     Related vLLM PRs: #37169, #37382, #40059, or #35034 and vLLM issue: #34932
     """
+    import re
     import threading
 
-    import regex as re
-
-    try:
-        from vllm.tool_parsers.abstract_tool_parser import ToolParser
-        from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
-    except ImportError:
-        from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import ToolParser
-        from vllm.entrypoints.openai.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
+    # vLLM 0.17.0 module paths
+    from vllm.tool_parsers.abstract_tool_parser import ToolParser
+    from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
+    from vllm.transformers_utils.tokenizer import MistralTokenizer
 
     _original_init = Hermes2ProToolParser.__init__
     _cache: dict[int, dict] = {}
     _lock = threading.Lock()
 
     def _patched_init(self, tokenizer):
-        try:
-            from vllm.transformers_utils.tokenizer import MistralTokenizer
-
-            actual_tokenizer = tokenizer.tokenizer if isinstance(tokenizer, MistralTokenizer) else tokenizer
-        except ImportError:
-            actual_tokenizer = tokenizer
-            MistralTokenizer = None  # noqa: N806
-
+        actual_tokenizer = tokenizer.tokenizer if isinstance(tokenizer, MistralTokenizer) else tokenizer
         key = id(actual_tokenizer)
         if key in _cache:
             ToolParser.__init__(self, tokenizer)
-            if MistralTokenizer is not None and isinstance(tokenizer, MistralTokenizer):
+            if isinstance(tokenizer, MistralTokenizer):
                 self.model_tokenizer = tokenizer.tokenizer
             self.current_tool_name_sent = False
             self.prev_tool_call_arr = []
