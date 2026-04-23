@@ -142,13 +142,14 @@ def patch_hermes_tool_parser_thread_safety() -> None:
     # vLLM 0.17.0 module paths
     from vllm.tool_parsers.abstract_tool_parser import ToolParser
     from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
-    from vllm.transformers_utils.tokenizer import MistralTokenizer
 
     _original_init = Hermes2ProToolParser.__init__
     _cache: dict[int, dict] = {}
     _lock = threading.Lock()
 
     def _patched_init(self, tokenizer):
+        from vllm.tokenizers.mistral import MistralTokenizer
+
         actual_tokenizer = tokenizer.tokenizer if isinstance(tokenizer, MistralTokenizer) else tokenizer
         key = id(actual_tokenizer)
         if key in _cache:
