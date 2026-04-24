@@ -1308,7 +1308,7 @@ class RayPPOTrainer:
         # SYB fix
         if self.config.trainer.gen_cache.get("use_gen_cache", False):
 
-            from verl.utils.generation_reuse import GenCacheManager
+            from recipe.generate_cache.generation_reuse import GenCacheManager
 
             self.gc_mgr = GenCacheManager(
                 trainer_config=self.config,
