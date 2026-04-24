@@ -16,7 +16,7 @@ top_p=1.0
 top_k=-1 # 0 for HF rollout, -1 for vLLM rollout
 
 # actor_rollout_ref.rollout.quantization=ascend \
-python3 -m verl.trainer.main_ppo \
+python3 -m recipe.generate_cache.main_ppo \
     algorithm.adv_estimator=grpo \
     data.train_files=/data/l50044498/datasets/gsm8k_rl/train.parquet \
     data.val_files=/data/l50044498/datasets/gsm8k_rl/test.parquet \
