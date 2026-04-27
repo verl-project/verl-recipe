@@ -2,6 +2,8 @@
 set -xeuo pipefail
 
 export VLLM_USE_V1=1
+export CPU_AFFINITY_CONF=2
+export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_CONNECT_TIMEOUT=5400
 export VLLM_ASCEND_ENABLE_NZ=0
 export LD_PRELOAD=/usr/local/lib/libjemalloc.so.2
