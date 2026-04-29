@@ -1,0 +1,35 @@
+# Minimal hydra config for the recipe-side dynamo rollout backend.
+#
+# Inherits everything from the standard ppo_trainer; the only deltas are:
+#   * actor_rollout_ref.rollout.name=dynamo  -> resolves to recipe.dynamo via
+#     the static entries in verl.workers.rollout.base._ROLLOUT_REGISTRY and
+#     verl.workers.rollout.replica.RolloutReplicaRegistry
+#   * actor_rollout_ref.rollout.mode=async   -> dynamo only ships an async
+#     ServerAdapter (mirrors trtllm/vllm async-server pattern)
+#
+# Anything dynamo-specific (disagg, frontend.port, kv_events, ...) lives
+# under actor_rollout_ref.rollout.dynamo and is parsed inside ServerAdapter.
+# Strict-typed schema is deferred to a recipe-side dataclass per
+# registration_design.md §5.
+
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+actor_rollout_ref:
+  rollout:
+    name: dynamo
+    mode: async
+    # NOTE (m2): dynamo-specific knobs (backend, disagg, frontend.port,
+    # discovery_backend, use_kv_events, ...) intentionally omitted. The m2
+    # ServerAdapter is a thin subclass of vllm's and reads no dynamo-side
+    # config. When m3 introduces real dynamo runtime injection, plumb those
+    # knobs through actor_rollout_ref.rollout.engine_kwargs (RolloutConfig
+    # already has engine_kwargs: dict) and parse them inside ServerAdapter.
+
+trainer:
+  project_name: verl-dynamo
