@@ -1,0 +1,78 @@
+#
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.#
+import logging
+import os
+from typing import Any
+from uuid import uuid4
+
+from verl.experimental.agent_loop.agent_loop import AgentLoopOutput, register
+from verl.experimental.agent_loop.single_turn_agent_loop import SingleTurnAgentLoop
+from verl.utils.profiler import simple_timer
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+@register("async_flow_single_turn_agent")
+class AsyncFlowSingleTurnAgentLoop(SingleTurnAgentLoop):
+    """SingleTurnAgentLoop with model_version tracking.
+
+    Uses server_manager.generate_with_version() to get model_version
+    and writes it into extra_fields, which flows into DataProto.non_tensor_batch
+    via the existing _postprocess pipeline.
+    """
+
+    async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
+        messages = list(kwargs["raw_prompt"])
+
+        # 1. extract images and videos from messages
+        multi_modal_data = await self.process_vision_info(messages)
+        images = multi_modal_data.get("images")
+        videos = multi_modal_data.get("videos")
+
+        # 2. apply chat template and tokenize
+        prompt_ids = await self.apply_chat_template(
+            messages,
+            images=images,
+            videos=videos,
+        )
+
+        # 3. generate sequences with model_version
+        metrics = {}
+        with simple_timer("generate_sequences", metrics):
+            output, model_version = await self.server_manager.generate_with_version(
+                request_id=uuid4().hex,
+                prompt_ids=prompt_ids,
+                sampling_params=sampling_params,
+                image_data=images,
+                video_data=videos,
+            )
+        response_mask = [1] * len(output.token_ids)
+
+        return AgentLoopOutput(
+            prompt_ids=prompt_ids,
+            response_ids=output.token_ids[: self.response_length],
+            response_mask=response_mask[: self.response_length],
+            response_logprobs=output.log_probs[: self.response_length] if output.log_probs else None,
+            routed_experts=(
+                output.routed_experts[: len(prompt_ids) + self.response_length]
+                if output.routed_experts is not None
+                else None
+            ),
+            multi_modal_data=multi_modal_data,
+            num_turns=2,
+            metrics=metrics,
+            extra_fields={"model_version": model_version},
+        )
