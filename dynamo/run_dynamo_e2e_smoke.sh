@@ -43,8 +43,11 @@ top_p=1.0
 top_k=-1
 
 # 1 GPU per actor + 1 GPU per rollout (we have 8 GPUs, so this is fine).
+# TP_SIZE env override lets m4 (KV router) collapse 8 GPUs into a single
+# vLLM replica so a single Frontend can route to one logical worker;
+# default 1 keeps m2/m3 numerical baseline (8 replicas).
 sp_size=1
-gen_tp=1
+gen_tp=${TP_SIZE:-1}
 fsdp_size=${NGPUS_PER_NODE}
 infer_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 2))
 
