@@ -16,7 +16,6 @@ import re
 from typing import Any
 
 import datasets
-from recipe.retool.retool_dataset_utils import map_fn, map_fn2
 
 from verl.tools.base_tool import OpenAIFunctionToolSchema
 from verl.tools.sandbox_fusion_tools import SandboxFusionTool
@@ -59,6 +58,32 @@ class CustomSandboxFusionTool(SandboxFusionTool):
         return result, None, None
 
 
+answer_format = """\nThe answer format must be: \\boxed{'The final answer goes here.'}"""
+
+
+def _map_fn_aime(row: dict, *, data_source: str):
+    if data_source == "Maxwell-Jia/AIME_2024":
+        problem, answer = row["Problem"], row["Answer"]
+    elif data_source in ("yentinglin/aime_2025", "retool_dataset/aime_2025"):
+        problem, answer = row["problem"], row["answer"]
+
+    prompt = problem + answer_format
+    return {
+        "data_source": data_source.split("/")[1].lower(),
+        "prompt": [{"role": "user", "content": prompt}],
+        "ability": "MATH",
+        "reward_model": {"ground_truth": str(answer)},
+        "agent_name": "tool_agent",
+    }
+
+
+def _map_fn_default(row: dict):
+    content = row["prompt"][0]["content"]
+    row["prompt"][0]["content"] = content + answer_format
+    row["agent_name"] = "tool_agent"
+    return row
+
+
 class CustomRLHFDataset(RLHFDataset):
     """Custom dataset class to process Maxwell-Jia/AIME_2024, yentinglin/aime_2025 datasets."""
 
@@ -68,12 +93,12 @@ class CustomRLHFDataset(RLHFDataset):
             # read parquet files and cache
             dataframe = datasets.load_dataset(parquet_file)["train"]
             data_source = "/".join(parquet_file.split("/")[-2:])
-            if data_source in ["Maxwell-Jia/AIME_2024", "yentinglin/aime_2025"]:
+            if data_source in ["Maxwell-Jia/AIME_2024", "yentinglin/aime_2025", "retool_dataset/aime_2025"]:
                 dataframe = dataframe.map(
-                    map_fn, fn_kwargs={"data_source": data_source}, remove_columns=dataframe.column_names
+                    _map_fn_aime, fn_kwargs={"data_source": data_source}, remove_columns=dataframe.column_names
                 )
             else:
-                dataframe = dataframe.map(map_fn2, num_proc=16)
+                dataframe = dataframe.map(_map_fn_default)
             dataframes.append(dataframe)
         self.dataframe: datasets.Dataset = datasets.concatenate_datasets(dataframes)
 
