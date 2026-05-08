@@ -543,13 +543,17 @@ class FSDPSFTTrainer:
                         )
                         ref_shift_logits = ref_output.logits[..., :-1, :].contiguous()
                         ref_shift_logits = ref_shift_logits.view(-1, ref_shift_logits.size(-1))
-                    # Forward KL: KL(p_theta || p_ref). F.kl_div expects (input=log_q, target=p)
-                    # and computes sum p * (log p - log q) = KL(target || input). To get
-                    # KL(p_theta || p_ref) we pass input=log p_ref, target=p_theta.
-                    # Use log_target=True for numerical stability.
+                    # Forward KL per the ASFT paper (Eq. 6): D_KL(p_ref || p_theta),
+                    # where p_ref (a.k.a. P / pi_base) is the fixed reference and
+                    # p_theta (a.k.a. Q / pi_theta) is the policy. The paper explicitly
+                    # adopts the "P||Q" convention as forward KL and ablates against
+                    # the mode-seeking reverse KL D_KL(p_theta || p_ref) (Sec 5, Fig 2).
+                    # F.kl_div(input=log q, target=p) computes sum p * (log p - log q)
+                    # = D_KL(target || input), so passing input=log p_theta, target=p_ref
+                    # gives exactly D_KL(p_ref || p_theta) — i.e. paper's forward KL.
                     kl_div = F.kl_div(
-                        F.log_softmax(ref_shift_logits.float(), dim=-1),
                         F.log_softmax(shift_logits.float(), dim=-1),
+                        F.log_softmax(ref_shift_logits.float(), dim=-1),
                         log_target=True,
                         reduction="none",
                     ).sum(dim=-1)
