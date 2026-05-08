@@ -9,6 +9,7 @@ Usage:
   python prepare_all_data.py --dataset med --output_dir /path/to/output
   python prepare_all_data.py --dataset math --output_dir /path/to/output
 """
+
 import argparse
 import json
 from pathlib import Path
@@ -66,10 +67,12 @@ def prepare_dataset(name: str, output_root: Path, max_samples: int = -1, val_siz
 
     converted = []
     for item in rows:
-        converted.append({
-            "prompt": item.get("instruction", ""),
-            "response": item.get("response", ""),
-        })
+        converted.append(
+            {
+                "prompt": item.get("instruction", ""),
+                "response": item.get("response", ""),
+            }
+        )
 
     df = pd.DataFrame(converted)
 

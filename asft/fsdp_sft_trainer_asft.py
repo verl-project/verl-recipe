@@ -23,11 +23,12 @@ import os
 os.environ["NCCL_DEBUG"] = "WARN"
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
+import importlib
+import importlib.util
 import logging
 import re
 import time
 from contextlib import nullcontext
-import importlib
 
 import hydra
 import torch
@@ -445,7 +446,9 @@ class FSDPSFTTrainer:
     ):
         frozen_config = AutoConfig.from_pretrained(model_path, trust_remote_code=trust_remote_code)
         if hasattr(frozen_config, "max_position_embeddings"):
-            frozen_config.max_position_embeddings = max(frozen_config.max_position_embeddings, self.config.data.max_length)
+            frozen_config.max_position_embeddings = max(
+                frozen_config.max_position_embeddings, self.config.data.max_length
+            )
         frozen_model = AutoModelForCausalLM.from_pretrained(
             model_path,
             config=frozen_config,
@@ -513,7 +516,7 @@ class FSDPSFTTrainer:
                 shift_logits = logits[..., :-1, :].contiguous()
                 shift_labels = labels.contiguous()
                 # Flatten the tokens
-                shift_logits = shift_logits.view(-1, self.model.config.vocab_size)
+                shift_logits = shift_logits.view(-1, shift_logits.size(-1))
                 shift_labels = shift_labels.view(-1)
                 # Enable model parallelism
                 shift_labels = shift_labels.to(shift_logits.device)
@@ -533,13 +536,21 @@ class FSDPSFTTrainer:
                         raise RuntimeError("ASFT mode requires a reference model, but ref_model is None.")
                     with torch.no_grad():
                         ref_output = self.ref_model(
-                            input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids, use_cache=False
+                            input_ids=input_ids,
+                            attention_mask=attention_mask,
+                            position_ids=position_ids,
+                            use_cache=False,
                         )
                         ref_shift_logits = ref_output.logits[..., :-1, :].contiguous()
-                        ref_shift_logits = ref_shift_logits.view(-1, self.model.config.vocab_size)
+                        ref_shift_logits = ref_shift_logits.view(-1, ref_shift_logits.size(-1))
+                    # Forward KL: KL(p_theta || p_ref). F.kl_div expects (input=log_q, target=p)
+                    # and computes sum p * (log p - log q) = KL(target || input). To get
+                    # KL(p_theta || p_ref) we pass input=log p_ref, target=p_theta.
+                    # Use log_target=True for numerical stability.
                     kl_div = F.kl_div(
+                        F.log_softmax(ref_shift_logits.float(), dim=-1),
                         F.log_softmax(shift_logits.float(), dim=-1),
-                        F.softmax(ref_shift_logits.float(), dim=-1),
+                        log_target=True,
                         reduction="none",
                     ).sum(dim=-1)
                     loss = dft_loss + self.asft_kl_coef * kl_div.to(dft_loss.dtype)
@@ -711,23 +722,130 @@ class FSDPSFTTrainer:
     def _compute_profile_coverage(generation: str, profile: str) -> float:
         """Fraction of meaningful profile keywords appearing in generation."""
         _STOP_WORDS = {
-            "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
-            "have", "has", "had", "do", "does", "did", "will", "would", "could",
-            "should", "may", "might", "shall", "can", "need", "dare", "ought",
-            "used", "to", "of", "in", "for", "on", "with", "at", "by", "from",
-            "as", "into", "through", "during", "before", "after", "above", "below",
-            "between", "out", "off", "over", "under", "again", "further", "then",
-            "once", "and", "but", "or", "nor", "not", "so", "yet", "both",
-            "either", "neither", "each", "every", "all", "any", "few", "more",
-            "most", "other", "some", "such", "no", "only", "own", "same", "than",
-            "too", "very", "just", "because", "if", "when", "where", "how",
-            "what", "which", "who", "whom", "this", "that", "these", "those",
-            "i", "me", "my", "myself", "we", "our", "ours", "you", "your",
-            "he", "him", "his", "she", "her", "it", "its", "they", "them",
-            "their", "about", "up", "down", "here", "there", "also",
+            "a",
+            "an",
+            "the",
+            "is",
+            "are",
+            "was",
+            "were",
+            "be",
+            "been",
+            "being",
+            "have",
+            "has",
+            "had",
+            "do",
+            "does",
+            "did",
+            "will",
+            "would",
+            "could",
+            "should",
+            "may",
+            "might",
+            "shall",
+            "can",
+            "need",
+            "dare",
+            "ought",
+            "used",
+            "to",
+            "of",
+            "in",
+            "for",
+            "on",
+            "with",
+            "at",
+            "by",
+            "from",
+            "as",
+            "into",
+            "through",
+            "during",
+            "before",
+            "after",
+            "above",
+            "below",
+            "between",
+            "out",
+            "off",
+            "over",
+            "under",
+            "again",
+            "further",
+            "then",
+            "once",
+            "and",
+            "but",
+            "or",
+            "nor",
+            "not",
+            "so",
+            "yet",
+            "both",
+            "either",
+            "neither",
+            "each",
+            "every",
+            "all",
+            "any",
+            "few",
+            "more",
+            "most",
+            "other",
+            "some",
+            "such",
+            "no",
+            "only",
+            "own",
+            "same",
+            "than",
+            "too",
+            "very",
+            "just",
+            "because",
+            "if",
+            "when",
+            "where",
+            "how",
+            "what",
+            "which",
+            "who",
+            "whom",
+            "this",
+            "that",
+            "these",
+            "those",
+            "i",
+            "me",
+            "my",
+            "myself",
+            "we",
+            "our",
+            "ours",
+            "you",
+            "your",
+            "he",
+            "him",
+            "his",
+            "she",
+            "her",
+            "it",
+            "its",
+            "they",
+            "them",
+            "their",
+            "about",
+            "up",
+            "down",
+            "here",
+            "there",
+            "also",
         }
         profile_words = {
-            w.lower().strip(".,!?;:\"'()[]{}") for w in profile.split()
+            w.lower().strip(".,!?;:\"'()[]{}")
+            for w in profile.split()
             if len(w) > 2 and w.lower().strip(".,!?;:\"'()[]{}") not in _STOP_WORDS
         }
         if not profile_words:
@@ -811,6 +929,7 @@ class FSDPSFTTrainer:
             # Uniformly sample up to max_samples
             if len(all_candidates) > max_samples:
                 import random
+
                 rng = random.Random(global_step)
                 all_candidates = rng.sample(all_candidates, max_samples)
 
@@ -837,8 +956,10 @@ class FSDPSFTTrainer:
                     print(f"[gen_val] tokenization failed (turn {turn_index}): {e}")
                     continue
 
-            print(f"[gen_val] Prepared {len(prompt_input_ids_list)} samples across turns "
-                  f"(from {len(messages_list)} conversations)")
+            print(
+                f"[gen_val] Prepared {len(prompt_input_ids_list)} samples across turns "
+                f"(from {len(messages_list)} conversations)"
+            )
 
         # Generate one sample at a time — all ranks must call generate together
         # Broadcast sample count from rank 0
@@ -869,18 +990,22 @@ class FSDPSFTTrainer:
                 input_ids = ids.unsqueeze(0)  # (1, seq_len)
                 attention_mask = mask.unsqueeze(0)
 
-                # All ranks call generate
-                output_ids = self.fsdp_model.generate(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    max_new_tokens=256,
-                    do_sample=False,
-                    use_cache=False,
-                )
+                # All ranks call generate. FSDP-wrapped modules don't expose
+                # `generate` directly, so summon full params and call generate
+                # on the underlying HF module.
+                with FSDP.summon_full_params(self.fsdp_model, recurse=True, writeback=False):
+                    inner_model = self.fsdp_model.module if hasattr(self.fsdp_model, "module") else self.fsdp_model
+                    output_ids = inner_model.generate(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        max_new_tokens=256,
+                        do_sample=False,
+                        use_cache=False,
+                    )
 
                 # Only rank 0 decodes and computes metrics
                 if rank == 0:
-                    gen_ids = output_ids[0, input_ids.shape[1]:]
+                    gen_ids = output_ids[0, input_ids.shape[1] :]
                     gen_text = self.tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
 
                     gt_text = gt_texts[sample_idx]
@@ -899,7 +1024,6 @@ class FSDPSFTTrainer:
 
         # Aggregate and log (rank 0 only)
         if rank == 0 and word_f1_scores:
-
             avg_word_f1 = sum(word_f1_scores) / len(word_f1_scores)
             avg_p_cover = sum(p_cover_scores) / len(p_cover_scores)
             avg_gen_len = sum(gen_lengths) / len(gen_lengths)
@@ -912,6 +1036,7 @@ class FSDPSFTTrainer:
 
             # Per-turn aggregation for compounding error curve
             from collections import defaultdict
+
             turn_f1 = defaultdict(list)
             turn_pcover = defaultdict(list)
             for i, t_idx in enumerate(successful_turn_indices):
@@ -1013,7 +1138,7 @@ class FSDPSFTTrainer:
             # Rank 0 loads data
             if rank == 0:
                 data = []
-                with open(dataset_path, "r", encoding="utf-8") as f:
+                with open(dataset_path, encoding="utf-8") as f:
                     for line in f:
                         line = line.strip()
                         if line:
@@ -1021,6 +1146,7 @@ class FSDPSFTTrainer:
                 # Subsample
                 if len(data) > self.benchmark_eval_max_samples:
                     import random
+
                     rng = random.Random(42)
                     data = rng.sample(data, self.benchmark_eval_max_samples)
 
@@ -1047,8 +1173,12 @@ class FSDPSFTTrainer:
                 if self.tokenizer.pad_token is None:
                     self.tokenizer.pad_token = self.tokenizer.eos_token
                 encoded = self.tokenizer(
-                    prompts, return_tensors="pt", padding=True, truncation=True,
-                    max_length=512, add_special_tokens=True,
+                    prompts,
+                    return_tensors="pt",
+                    padding=True,
+                    truncation=True,
+                    max_length=512,
+                    add_special_tokens=True,
                 )
                 input_ids = encoded["input_ids"].to(self.device_name)
                 attention_mask = encoded["attention_mask"].to(self.device_name)
