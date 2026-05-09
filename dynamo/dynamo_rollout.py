@@ -11,27 +11,30 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Dynamo rollout ServerAdapter (recipe-side, m2).
+"""ServerAdapter for the dynamo backend.
 
-m2 is the "vLLM-equivalent" milestone: the trainer side talks to a per-node
-:class:`recipe.dynamo.dynamo_async_server.DynamoHttpServer` Ray actor that
-embeds a vLLM ``AsyncLLM`` directly (no Dynamo Frontend / runtime yet).
-The actor name prefix is read from ``config.name`` by the vLLM ServerAdapter,
-which is already ``"dynamo_"`` for this backend, so no behavior diverges
-from vLLM in m2.
-
-Subclassing keeps us automatically aligned with any upstream verl fixes to
-the vLLM ServerAdapter. Dynamo-specific deltas (Frontend subprocess, dynamo
-runtime injection) start landing in m3+ on the *server* side, not here.
+Inherits the vLLM ServerAdapter (HTTP path is identical: trainer rank reads
+``replica.server_address`` and POSTs chat completions to it) and only
+overrides the Ray actor name prefix used for sleep/wake/update_weights RPC,
+so it lands on ``dynamo_server_*`` (created by DynamoReplica.launch_servers)
+rather than ``vllm_server_*``.
 """
 
-from verl.workers.rollout.vllm_rollout.vllm_rollout import ServerAdapter as _VllmServerAdapter
+from verl.workers.rollout.vllm_rollout.vllm_rollout import (
+    ServerAdapter as _VllmServerAdapter,
+)
 
 
 class ServerAdapter(_VllmServerAdapter):
-    """Per-rank dynamo client. Identical behavior to the vLLM ServerAdapter
-    in m2; ``_get_server_name_prefix`` already returns ``"dynamo_"`` because
-    it reads ``self.config.name``.
+    """Per-rank dynamo client.
+
+    All HTTP-based generation goes through the frontend URL stored in
+    ``RolloutReplica.server_address``; weight-update / wake-up / sleep
+    requests go to the per-replica Ray actor named ``dynamo_server_{r}_{n}``.
     """
 
-    pass
+    def _get_server_name_prefix(self) -> str:
+        return "dynamo_"
+
+
+__all__ = ["ServerAdapter"]

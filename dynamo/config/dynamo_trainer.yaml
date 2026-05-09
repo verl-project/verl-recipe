@@ -1,4 +1,4 @@
-# Minimal hydra config for the recipe-side dynamo rollout backend.
+# Hydra config for the recipe-side dynamo rollout backend.
 #
 # Inherits everything from the standard ppo_trainer; the only deltas are:
 #   * actor_rollout_ref.rollout.name=dynamo  -> resolves to recipe.dynamo via
@@ -7,10 +7,9 @@
 #   * actor_rollout_ref.rollout.mode=async   -> dynamo only ships an async
 #     ServerAdapter (mirrors trtllm/vllm async-server pattern)
 #
-# Anything dynamo-specific (disagg, frontend.port, kv_events, ...) lives
-# under actor_rollout_ref.rollout.dynamo and is parsed inside ServerAdapter.
-# Strict-typed schema is deferred to a recipe-side dataclass per
-# registration_design.md §5.
+# Anything dynamo-specific (router_mode, frontend_http_port, namespace,
+# etc.) lives under actor_rollout_ref.rollout.engine_kwargs.dynamo and is
+# parsed inside DynamoHttpServer (see dynamo_async_server.py:_dynamo_cfg).
 
 hydra:
   searchpath:
@@ -24,12 +23,16 @@ actor_rollout_ref:
   rollout:
     name: dynamo
     mode: async
-    # NOTE (m2): dynamo-specific knobs (backend, disagg, frontend.port,
-    # discovery_backend, use_kv_events, ...) intentionally omitted. The m2
-    # ServerAdapter is a thin subclass of vllm's and reads no dynamo-side
-    # config. When m3 introduces real dynamo runtime injection, plumb those
-    # knobs through actor_rollout_ref.rollout.engine_kwargs (RolloutConfig
-    # already has engine_kwargs: dict) and parse them inside ServerAdapter.
+    engine_kwargs:
+      dynamo:
+        # All keys optional; sane defaults applied in DynamoHttpServer.
+        # namespace: verl_dynamo
+        # router_mode: kv               # round-robin | kv | random | least-loaded
+        # frontend_http_port: 0         # 0 = auto-assign on master node
+        # etcd_port: 0                  # 0 = auto-assign
+        # etcd_peer_port: 0             # 0 = auto-assign
+        # nats_port: 0                  # 0 = auto-assign
+        # served_model_name: <str>      # falls back to model_config.local_path
 
 trainer:
   project_name: verl-dynamo
