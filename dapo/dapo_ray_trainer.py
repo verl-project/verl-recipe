@@ -329,6 +329,10 @@ class RayDAPOTrainer(RayPPOTrainer):
                         batch, is_metrics = compute_rollout_correction_and_add_to_batch(batch, rollout_corr_config)
                         # IS and off-policy metrics already have rollout_corr/ prefix
                         metrics.update(is_metrics)
+                        # add diff of probs too.
+                        from verl.utils.debug.metrics import calculate_debug_metrics
+
+                        metrics.update(calculate_debug_metrics(batch))
 
                     with marked_timer("adv", timing_raw, "brown"):
                         # compute advantages, executed on the driver process
