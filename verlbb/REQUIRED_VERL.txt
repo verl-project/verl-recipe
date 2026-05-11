@@ -1,0 +1,13 @@
+# verlbb — rolling; requires Bumblebee runtime available in the Python environment
+UPSTREAM=https://github.com/verl-project/verl.git
+MODE=rolling
+BRANCH=main
+# Exact upstream verl commit this recipe was last exercised against.
+VERL_COMMIT=ca82c4b47148fe2266d4b4626723d0c4654c5bc0
+PIP_INSTALL=pip install verl@git+https://github.com/verl-project/verl.git@ca82c4b47148fe2266d4b4626723d0c4654c5bc0
+GIT_SETUP=git clone https://github.com/verl-project/verl.git && cd verl && git checkout ca82c4b47148fe2266d4b4626723d0c4654c5bc0 && git submodule update --init --recursive recipe
+RECIPE_SUBMODULE_COMMIT=34b0d7e08706d1b35d3527ca2e9c39e7c6d9fe3c
+RECIPE_FOLDER=verlbb
+RECIPE_FOLDER_LAST_COMMIT=new-recipe
+NOTES=VERL_COMMIT pins the core library. Bumblebee itself is an external runtime dependency and must be installed or exposed through BUMBLEBEE_ROOT.
+REFRESH=Recompute: (cd verl && git rev-parse HEAD); (cd verl/recipe && git rev-parse HEAD); after merge, (cd verl/recipe && git log -1 --format=%H -- verlbb)

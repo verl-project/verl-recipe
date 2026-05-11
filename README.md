@@ -90,12 +90,14 @@ The script requires only `bash`, `git`, `awk`, and `pip`/`pip3` on `PATH`. It do
 | spo | [`recipe/spo/REQUIRED_VERL.txt`](spo/REQUIRED_VERL.txt) |
 | sppo | [`recipe/sppo/REQUIRED_VERL.txt`](sppo/REQUIRED_VERL.txt) |
 | swe_agent | [`recipe/swe_agent/REQUIRED_VERL.txt`](swe_agent/REQUIRED_VERL.txt) |
+| verlbb | [`recipe/verlbb/REQUIRED_VERL.txt`](verlbb/REQUIRED_VERL.txt) |
 
 ## Available Recipes (high level)
 
 - [retool](https://github.com/verl-project/verl-recipe/tree/main/retool): Reinforcement Learning for Strategic Tool Use in LLMs
 - [langgraph_agent](https://github.com/verl-project/verl-recipe/tree/main/langgraph_agent): A tiny example to demonstrate multi-turn rollout with [LangGraph ReactAgent](https://langchain-ai.github.io/langgraph/agents/overview/) to solve math expression.
 - [spo](https://github.com/verl-project/verl-recipe/tree/main/spo): [Single-stream Policy Optimization](https://arxiv.org/abs/2509.13232).
+- [verlbb](https://github.com/verl-project/verl-recipe/tree/main/verlbb): Bumblebee as an external verl engine for SFT and GRPO.
 - TBA...
 
 ## Contribution
