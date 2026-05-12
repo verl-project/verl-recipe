@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --account=general_sa
+#SBATCH --account=coreai_dlalgo_llm
 #SBATCH --job-name=verl-dynamo-30b
 #SBATCH --partition=batch
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=1
 #SBATCH --time=4:00:00
-#SBATCH --output=/lustre/fsw/general_sa/sopyang/rl/verl_0211/slurm/logs/train_30b_dynamo_%j.log
-#SBATCH --error=/lustre/fsw/general_sa/sopyang/rl/verl_0211/slurm/logs/train_30b_dynamo_%j.err
+#SBATCH --output=/lustre/fsw/portfolios/coreai/users/sopyang/dynamorl_workspace/slurm/logs/train_30b_dynamo_%j.log
+#SBATCH --error=/lustre/fsw/portfolios/coreai/users/sopyang/dynamorl_workspace/slurm/logs/train_30b_dynamo_%j.err
 #
 # Dynamo-backed retool: same workload as recipe/retool/train_30b_rl.sh
 # but with rollout.name=dynamo + KV-router Frontend.
@@ -23,8 +23,8 @@
 #     patches — those were Route A (m3/m4) toggles; Route B is unconditional.
 
 set -x
-WORKSPACE=/lustre/fsw/general_sa/sopyang/
-CONTAINER="/lustre/fsw/general_sa/sopyang/images/vllm017_latest.sqsh"
+WORKSPACE=/lustre/fsw/portfolios/coreai/users/sopyang/
+CONTAINER="/lustre/fsw/portfolios/coreai/users/sopyang/images/vllm017_latest.sqsh"
 
 echo "=== Qwen3-30B Retool / Dynamo backend (Route B) — multi-node (2x8 H100) ==="
 echo "Node: $(hostname), $(date -Iseconds)"
@@ -110,7 +110,7 @@ pip install . 2>&1 | tail -1
 pip install "antlr4-python3-runtime==4.9.3" 2>&1 | tail -1
 
 # Surface dynamo subprocess logs out of the container's /tmp.
-export VERL_DYNAMO_LOG_DIR=/workspace/rl/verl_0211/slurm/dynamo_logs/\${SLURM_JOB_ID:-manual}
+export VERL_DYNAMO_LOG_DIR=/workspace/dynamorl_workspace/slurm/dynamo_logs/\${SLURM_JOB_ID:-manual}
 mkdir -p "\$VERL_DYNAMO_LOG_DIR"
 EOF
 
@@ -137,26 +137,26 @@ cd /tmp && rm -rf SandboxFusion
 git clone --depth 1 https://github.com/bytedance/SandboxFusion.git 2>&1 | tail -2
 cd SandboxFusion
 pip install tenacity structlog psutil aiofiles aiohttp "databases[aiomysql,aiosqlite]" 2>&1 | tail -3
-python3 /workspace/rl/verl_0211/verl/recipe/retool/patch_sf_runner.py /tmp/SandboxFusion
+python3 /workspace/dynamorl_workspace/verl/recipe/retool/patch_sf_runner.py /tmp/SandboxFusion
 export PYTHONPATH=/tmp/SandboxFusion:\${PYTHONPATH:-}
 
-mkdir -p /workspace/rl/verl_0211/slurm
-SANDBOX_LOG=/workspace/rl/verl_0211/slurm/sandbox_fusion_\${SLURM_JOB_ID:-manual}.log
+mkdir -p /workspace/dynamorl_workspace/slurm
+SANDBOX_LOG=/workspace/dynamorl_workspace/slurm/sandbox_fusion_\${SLURM_JOB_ID:-manual}.log
 nohup python3 -m uvicorn sandbox.server.server:app --host 0.0.0.0 --port 8080 > "\$SANDBOX_LOG" 2>&1 &
 disown
 sleep 8
 curl -sf http://localhost:8080/v1/ping && echo " Sandbox-Fusion OK" || echo "Sandbox-Fusion FAILED"
 
-cd /workspace/rl/verl_0211/verl
-export PYTHONPATH=/workspace/rl/verl_0211/verl:/tmp/SandboxFusion:\${PYTHONPATH:-}
+cd /workspace/dynamorl_workspace/verl
+export PYTHONPATH=/workspace/dynamorl_workspace/verl:/tmp/SandboxFusion:\${PYTHONPATH:-}
 
 project_name=retool_30b_dynamo_2node_routeB
 experiment_name=routeB_30b_dynamo_2node
-default_local_dir=/workspace/rl/verl_0211/ckpt/\$experiment_name
+default_local_dir=/workspace/dynamorl_workspace/ckpt/\$experiment_name
 mkdir -p "\$default_local_dir"
 
-mkdir -p /workspace/rl/verl_0211/slurm
-export VERL_ROLLOUT_PROMPT_LOG_PATH=/workspace/rl/verl_0211/slurm/rollout_prompt_response_\${experiment_name}_\${SLURM_JOB_ID:-manual}.jsonl
+mkdir -p /workspace/dynamorl_workspace/slurm
+export VERL_ROLLOUT_PROMPT_LOG_PATH=/workspace/dynamorl_workspace/slurm/rollout_prompt_response_\${experiment_name}_\${SLURM_JOB_ID:-manual}.jsonl
 rm -f "\$VERL_ROLLOUT_PROMPT_LOG_PATH"
 
 if [ -n "\${WANDB_API_KEY:-}" ]; then
@@ -165,8 +165,8 @@ else
   TRAINER_LOGGER="[\"console\"]"
 fi
 
-dapo_math_17k=/workspace/datasets/retool_dataset/DAPO-Math-17k
-aime_2025=/workspace/datasets/retool_dataset/aime_2025
+dapo_math_17k=/workspace/dynamorl_workspace/datasets/DAPO-Math-17k
+aime_2025=/workspace/dynamorl_workspace/datasets/aime_2025
 
 export RAY_ADDRESS=$ip_head
 
@@ -182,9 +182,9 @@ python3 recipe/dynamo/main_dynamo.py \\
     data.max_response_length=16384 \\
     data.filter_overlong_prompts=True \\
     data.truncation=error \\
-    data.custom_cls.path=/workspace/rl/verl_0211/verl/recipe/retool/retool.py \\
+    data.custom_cls.path=/workspace/dynamorl_workspace/verl/recipe/retool/retool.py \\
     data.custom_cls.name=CustomRLHFDataset \\
-    custom_reward_function.path=/workspace/rl/verl_0211/verl/recipe/retool/retool.py \\
+    custom_reward_function.path=/workspace/dynamorl_workspace/verl/recipe/retool/retool.py \\
     custom_reward_function.name=compute_score \\
     actor_rollout_ref.model.path=Qwen/Qwen3-30B-A3B-Instruct-2507 \\
     actor_rollout_ref.model.use_remove_padding=True \\
@@ -208,7 +208,7 @@ python3 recipe/dynamo/main_dynamo.py \\
     actor_rollout_ref.rollout.multi_turn.enable=True \\
     actor_rollout_ref.rollout.multi_turn.max_user_turns=16 \\
     actor_rollout_ref.rollout.multi_turn.max_assistant_turns=16 \\
-    actor_rollout_ref.rollout.multi_turn.tool_config_path=/workspace/rl/verl_0211/verl/recipe/retool/sandbox_fusion_tool_config.yaml \\
+    actor_rollout_ref.rollout.multi_turn.tool_config_path=/workspace/dynamorl_workspace/verl/recipe/retool/sandbox_fusion_tool_config.yaml \\
     actor_rollout_ref.rollout.multi_turn.format=hermes \\
     actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \\
     actor_rollout_ref.rollout.n=8 \\
