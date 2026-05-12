@@ -33,6 +33,16 @@ actor_rollout_ref:
         # etcd_peer_port: 0             # 0 = auto-assign
         # nats_port: 0                  # 0 = auto-assign
         # served_model_name: <str>      # falls back to model_config.local_path
+    checkpoint_engine:
+      # Dynamo v1 does not implement weight refit. CheckpointEngineManager
+      # early-returns out of update_weights() when this is True; rollout
+      # generation keeps using the initial weights while the trainer-side
+      # actor advances independently (off-policy regime).
+      # For an apples-to-apples baseline vs. vllm, run the vllm config with
+      # the same override:
+      #   ++actor_rollout_ref.rollout.checkpoint_engine.skip_refit=true
+      # Mirrors NeMo-RL PR #2222 NEED_REFIT=False (grpo.py:2494).
+      skip_refit: true
 
 trainer:
   project_name: verl-dynamo

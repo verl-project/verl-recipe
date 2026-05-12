@@ -20,6 +20,10 @@ so it lands on ``dynamo_server_*`` (created by DynamoReplica.launch_servers)
 rather than ``vllm_server_*``.
 """
 
+from collections.abc import Generator
+
+import torch
+
 from verl.workers.rollout.vllm_rollout.vllm_rollout import (
     ServerAdapter as _VllmServerAdapter,
 )
@@ -35,6 +39,33 @@ class ServerAdapter(_VllmServerAdapter):
 
     def _get_server_name_prefix(self) -> str:
         return "dynamo_"
+
+    @torch.no_grad()
+    async def update_weights(
+        self,
+        weights: Generator[tuple[str, torch.Tensor], None, None],
+        global_steps: int = None,
+        **kwargs,
+    ):
+        """Dynamo v1: weight refit is not implemented.
+
+        The primary gate is ``checkpoint_engine.skip_refit`` in
+        CheckpointEngineManager, which prevents this method from ever being
+        invoked in normal e2e training. This override is defensive: it
+        ensures that if the gate is bypassed (e.g., from a non-standard
+        call site), dynamo does not fall into the parent vLLM IPC path,
+        which would attempt to call ``update_weights_from_ipc`` on a
+        DynamoHttpServer that has no such handler.
+
+        Mirrors NeMo-RL PR #2222 where ``DynamoVllmGeneration.update_weights_*``
+        methods assert False as a safety net while ``NEED_REFIT=False`` keeps
+        them off the hot path.
+        """
+        # Drain the generator so the upstream BucketedWeightSender (if any
+        # caller bypassed the gate) does not block waiting to enqueue bytes.
+        for _ in weights:
+            pass
+        return None
 
 
 __all__ = ["ServerAdapter"]
