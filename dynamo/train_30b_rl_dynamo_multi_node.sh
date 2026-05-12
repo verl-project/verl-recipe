@@ -4,6 +4,7 @@
 #SBATCH --partition=batch
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=1
+#SBATCH --gpus-per-node=8
 #SBATCH --time=4:00:00
 #SBATCH --output=/lustre/fsw/portfolios/coreai/users/sopyang/dynamorl_workspace/slurm/logs/train_30b_dynamo_%j.log
 #SBATCH --error=/lustre/fsw/portfolios/coreai/users/sopyang/dynamorl_workspace/slurm/logs/train_30b_dynamo_%j.err
