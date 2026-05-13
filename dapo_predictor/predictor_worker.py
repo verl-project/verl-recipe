@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import numpy as np
 import torch
 from codetiming import Timer
+from omegaconf import OmegaConf
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from verl import DataProto
-from verl.single_controller.base.decorator import make_nd_compute_dataproto_dispatch_fn, register
-from verl.utils.attention_utils import index_first_axis, rearrange, unpad_input
+from verl.single_controller.base.decorator import Dispatch, make_nd_compute_dataproto_dispatch_fn, register
+from verl.utils.attention_utils import index_first_axis, pad_input, rearrange, unpad_input
 from verl.utils.device import get_device_id
 from verl.utils.fsdp_utils import load_fsdp_model_to_gpu, offload_fsdp_model_to_cpu
 from verl.utils.profiler import DistProfiler
@@ -20,9 +19,7 @@ from verl.utils.seqlen_balancing import prepare_dynamic_batch, restore_dynamic_b
 from verl.utils.ulysses import gather_outputs_and_unpad, ulysses_pad, ulysses_pad_and_slice_inputs
 from verl.workers.actor.dp_actor import DataParallelPPOActor
 from verl.workers.fsdp_workers import AsyncActorRolloutRefWorker
-from verl.utils.attention_utils import index_first_axis, pad_input, rearrange, unpad_input
-from verl.single_controller.base.decorator import Dispatch, make_nd_compute_dataproto_dispatch_fn, register
-from omegaconf import OmegaConf
+
 
 class PredictorDataParallelPPOActor(DataParallelPPOActor):
     """PPO actor with an attached linear predictor scorer for prompt reordering.
@@ -46,8 +43,6 @@ class PredictorDataParallelPPOActor(DataParallelPPOActor):
         """Extract last-token hidden states from the actor model for predictor scoring."""
         self.actor_module.eval()
 
-        # Deterministic behavior for reproducible hidden states
-        torch.manual_seed(42)    
         micro_batch_size = data.meta_info["micro_batch_size"]    
         temperature = data.meta_info["temperature"]    
         use_dynamic_bsz = data.meta_info["use_dynamic_bsz"]  
@@ -56,11 +51,6 @@ class PredictorDataParallelPPOActor(DataParallelPPOActor):
         select_keys = ["input_ids", "attention_mask", "position_ids"]    
         non_tensor_select_keys = ["multi_modal_inputs"] if has_multi_modal_inputs else []  
         data = data.select(batch_keys=select_keys, non_tensor_batch_keys=non_tensor_select_keys)  
-        
-        # Inspect data shape and content
-
-        # Check for duplicate prompts
-        input_ids = data.batch['input_ids']    
         
         if use_dynamic_bsz:  
             max_token_len = data.meta_info["max_token_len"] * self.ulysses_sequence_parallel_size  
@@ -206,13 +196,18 @@ class PredictorDataParallelPPOActor(DataParallelPPOActor):
             return last_token_hidden
 
     @staticmethod
-    def listmle_loss(y_pred: torch.Tensor, y_true: torch.Tensor, eps: float = 1e-10) -> torch.Tensor:
+    def listmle_loss(
+        y_pred: torch.Tensor,
+        y_true: torch.Tensor,
+        eps: float = 1e-10,
+        generator: torch.Generator | None = None,
+    ) -> torch.Tensor:
         """Compute ListMLE loss with random feature shuffling for regularization.
 
         Shuffles hidden dimensions, sorts by true labels, then computes the
         ListMLE loss to train the predictor scorer to predict response length.
         """
-        random_indices = torch.randperm(y_pred.shape[-1], device=y_pred.device)
+        random_indices = torch.randperm(y_pred.shape[-1], generator=generator).to(y_pred.device)
         y_pred_shuffled = y_pred[:, random_indices].float()
         y_true_shuffled = y_true[:, random_indices].float()
         _, indices = y_true_shuffled.sort(descending=True, dim=-1)
@@ -251,7 +246,6 @@ class PredictorAsyncActorRolloutRefWorker(AsyncActorRolloutRefWorker):
         cfg = OmegaConf.select(self.config, "predictor_reorder", default=None)
         if cfg is None:
             cfg = OmegaConf.select(self.config, "trainer.predictor_reorder", default=None)
-        print(f'cfg{cfg}')
         return cfg or {}
 
     def _actor_params_are_offloaded(self) -> bool:
@@ -274,7 +268,6 @@ class PredictorAsyncActorRolloutRefWorker(AsyncActorRolloutRefWorker):
         if not (keep_actor_loaded and self._is_offload_param):
             return super().update_actor(data)
         load_fsdp_model_to_gpu(self.actor_module_fsdp)
-        print(f'keep_actor_loaded{keep_actor_loaded}')
         self._sync_predictor_scorer_device()
 
         original_is_offload_param = self._is_offload_param
@@ -293,7 +286,6 @@ class PredictorAsyncActorRolloutRefWorker(AsyncActorRolloutRefWorker):
         """
         assert self._is_actor
         loaded_actor_for_predictor = self._is_offload_param and self._actor_params_are_offloaded()
-        print(f' self._actor_params_are_offloaded()_compute_predcitor_score{ self._actor_params_are_offloaded()}')
         if loaded_actor_for_predictor:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
         self._sync_predictor_scorer_device()
@@ -351,7 +343,6 @@ class PredictorAsyncActorRolloutRefWorker(AsyncActorRolloutRefWorker):
         #     return DataProto(meta_info={"metrics": {}})
 
         loaded_actor_for_predictor = self._is_offload_param and self._actor_params_are_offloaded()
-        print(f' loaded_actor_for_predictor_update_predictor{ loaded_actor_for_predictor}')
         if loaded_actor_for_predictor:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
         self._sync_predictor_scorer_device()
@@ -385,7 +376,6 @@ class PredictorAsyncActorRolloutRefWorker(AsyncActorRolloutRefWorker):
 
         if torch.distributed.is_initialized():
             world_size = torch.distributed.get_world_size()
-            rank = torch.distributed.get_rank()   
 
             gathered_hidden = [torch.empty_like(hidden_states) for _ in range(world_size)]
             gathered_lengths = [torch.empty_like(response_lengths) for _ in range(world_size)]
@@ -395,22 +385,17 @@ class PredictorAsyncActorRolloutRefWorker(AsyncActorRolloutRefWorker):
             response_lengths = torch.cat(gathered_lengths, dim=0)
 
             if sp_size > 1:  
-                rank_data_len = len(response_lengths)  // world_size
+                rank_data_len = len(response_lengths) // world_size
                 dp_world_size = world_size // sp_size  
                 
                 # Reshape and extract SP rank 0 data 
-                reshaped_response = response_lengths.view(dp_world_size, sp_size, rank_data_len   )  
+                reshaped_response = response_lengths.view(dp_world_size, sp_size, rank_data_len)
                 reshaped_hidden = hidden_states.view(dp_world_size, sp_size, rank_data_len, -1)  
                 
                 response_lengths = reshaped_response[:, 0, :].flatten()  
                 hidden_states = reshaped_hidden[:, 0, :, :].flatten(0, 1)
-            
-            if rank == 0:    
-                print(f"After gathering - all_hidden_states shape: {hidden_states.shape}")    
-                print(f"After gathering - all_response_lengths shape: {response_lengths}")  
 
-
-        label_group_size= self.config.rollout.response_length // 40
+        label_group_size = max(1, self.config.rollout.response_length // 40)
         response_lengths = response_lengths // label_group_size
 
         predictor = self.actor.predictor_scorer.float()
@@ -420,8 +405,25 @@ class PredictorAsyncActorRolloutRefWorker(AsyncActorRolloutRefWorker):
             weight_decay=cfg.get("weight_decay", 1e-4),
         )
         dataset = TensorDataset(hidden_states.float(), response_lengths.float())
-        dataloader = DataLoader(dataset, batch_size=cfg.get("batch_size", 32), shuffle=True, drop_last=False)
-        epochs = cfg.get("epochs", 100)
+        predictor_seed = int(cfg.get("seed", 1))
+        dataloader_generator = torch.Generator()
+        dataloader_generator.manual_seed(predictor_seed)
+        dataloader = DataLoader(
+            dataset,
+            batch_size=cfg.get("batch_size", 32),
+            shuffle=True,
+            drop_last=False,
+            generator=dataloader_generator,
+        )
+        listmle_generator = torch.Generator()
+        listmle_generator.manual_seed(predictor_seed)
+        epochs = cfg.get("epochs", 10)
+
+        kendalltau = None
+        try:
+            from scipy.stats import kendalltau
+        except ImportError:
+            pass
 
         metrics = {}
         with Timer(name="predictor_update", logger=None) as timer:
@@ -432,10 +434,9 @@ class PredictorAsyncActorRolloutRefWorker(AsyncActorRolloutRefWorker):
                 for batch_hidden, batch_lengths in dataloader:
                     # batch_hidden = batch_hidden.float().requires_grad_(True)  
                     # batch_lengths = batch_lengths.float()  
-                    print('Training')
                     preds = predictor(batch_hidden).squeeze(-1).unsqueeze(0)
                     labels = batch_lengths.unsqueeze(0)
-                    loss = self.actor.listmle_loss(preds, labels)
+                    loss = self.actor.listmle_loss(preds, labels, generator=listmle_generator)
                     optimizer.zero_grad()
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(predictor.parameters(), max_norm=1.0)
@@ -447,16 +448,16 @@ class PredictorAsyncActorRolloutRefWorker(AsyncActorRolloutRefWorker):
                         pred_numpy = preds.squeeze().detach().cpu().float().numpy()  
                         true_numpy = labels.squeeze().detach().cpu().float().numpy()  
                         
-                        if len(pred_numpy) > 1:  
-                            from scipy.stats import kendalltau  
-                            kendall_tau, p_value = kendalltau(pred_numpy, true_numpy)  
+                        if len(pred_numpy) > 1 and kendalltau is not None:
+                            kendall_tau, _ = kendalltau(pred_numpy, true_numpy)
                             if not np.isnan(kendall_tau):  
                                 epoch_kendall_taus.append(kendall_tau)  
                 
                 if epoch == 0 or epoch == epochs - 1:  
                     avg_epoch_loss = epoch_loss / num_batches if num_batches > 0 else 0.0  
                     avg_kendall_tau = np.mean(epoch_kendall_taus) if epoch_kendall_taus else 0.0  
-                    print(f"Predictor training epoch {epoch}, avg loss: {avg_epoch_loss:.4f}, avg Kendall tau: {avg_kendall_tau:.4f}")  
+                    metrics[f"predictor/epoch_{epoch}_loss"] = avg_epoch_loss
+                    metrics[f"predictor/epoch_{epoch}_kendall_tau"] = avg_kendall_tau
 
                 metrics["predictor/final_loss"] = epoch_loss / max(num_batches, 1)
         metrics["predictor/epochs"] = epochs
@@ -466,5 +467,4 @@ class PredictorAsyncActorRolloutRefWorker(AsyncActorRolloutRefWorker):
         output = DataProto(meta_info={"metrics": metrics}).to("cpu")
         if loaded_actor_for_predictor:
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
-        print(f'self._actor_params_are_offloaded()_update_predictor{self._actor_params_are_offloaded()}')
         return output

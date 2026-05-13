@@ -287,23 +287,20 @@ class PredictorRayDAPOTrainer(RayDAPOTrainer):
         raise ValueError("Cannot restore order: neither `uid` nor `extra_info.index` found in non_tensor_batch")
 
     def _maybe_update_predictor(self, gen_batch: DataProto, batch: DataProto, metrics, timing_raw):
-
         with marked_timer("update_predictor", timing_raw, "orange"):
-            # if not self.config.algorithm.filter_groups.enable:
-            #         predictor_output = self.actor_rollout_wg.update_predictor(gen_batch, batch)  
-            # else:
-                # Dynamically extract prompt length  
-            prompt_length = batch.batch["prompts"].shape[-1]  
-            prompt_input_ids = batch.batch["prompts"]  # [batch_size, prompt_length]  
-            prompt_attention_mask = batch.batch["attention_mask"][:, :prompt_length]  # dynamic slice  
-            prompt_position_ids = batch.batch["position_ids"][:, :prompt_length]  # dynamic slice  
-            
-            # Build a standalone prompt batch for predictor training  
-            prompt_batch = DataProto.from_dict({  
-                "input_ids": prompt_input_ids,  
-                "attention_mask": prompt_attention_mask,  
-                "position_ids": prompt_position_ids
-            }, meta_info=batch.meta_info   )
+            prompt_length = batch.batch["prompts"].shape[-1]
+            prompt_input_ids = batch.batch["prompts"]
+            prompt_attention_mask = batch.batch["attention_mask"][:, :prompt_length]
+            prompt_position_ids = batch.batch["position_ids"][:, :prompt_length]
+
+            prompt_batch = DataProto.from_dict(
+                {
+                    "input_ids": prompt_input_ids,
+                    "attention_mask": prompt_attention_mask,
+                    "position_ids": prompt_position_ids,
+                },
+                meta_info=batch.meta_info,
+            )
 
             predictor_output = self.actor_rollout_wg.update_predictor(prompt_batch, batch)
         metrics.update(reduce_metrics(predictor_output.meta_info.get("metrics", {})))
