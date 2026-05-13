@@ -2,7 +2,6 @@ import ast
 import unittest
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKER = REPO_ROOT / "dapo_predictor" / "predictor_worker.py"
 

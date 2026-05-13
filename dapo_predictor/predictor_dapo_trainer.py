@@ -2,22 +2,6 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
-
-import numpy as np
-import torch
-
-from verl import DataProto
-from verl.trainer.ppo.metric_utils import compute_data_metrics, compute_throughout_metrics, compute_timing_metrics
-from verl.trainer.ppo.ray_trainer import AdvantageEstimator, apply_kl_penalty, compute_advantage
-from verl.utils.metric import reduce_metrics
-from verl.utils.profiler import marked_timer
-
-from recipe.dapo.dapo_ray_trainer import RayDAPOTrainer
-
-from .predictor_utils import snake_sort_indices
-
-
 import os
 import uuid
 from collections import defaultdict
@@ -26,23 +10,23 @@ from pprint import pprint
 
 import numpy as np
 import torch
+from recipe.dapo.dapo_ray_trainer import RayDAPOTrainer
 from tqdm import tqdm
 
 from verl import DataProto
-from verl.trainer.ppo.core_algos import agg_loss
 from verl.trainer.ppo.metric_utils import compute_data_metrics, compute_throughout_metrics, compute_timing_metrics
 from verl.trainer.ppo.ray_trainer import (
     AdvantageEstimator,
-    RayPPOTrainer,
     apply_kl_penalty,
     compute_advantage,
-    compute_response_mask,
 )
 from verl.trainer.ppo.reward import extract_reward
 from verl.utils.checkpoint.checkpoint_manager import should_save_ckpt_esi
 from verl.utils.metric import reduce_metrics
 from verl.utils.profiler import marked_timer
 from verl.utils.rollout_skip import RolloutSkip
+
+from .predictor_utils import snake_sort_indices
 
 
 class PredictorRayDAPOTrainer(RayDAPOTrainer):
@@ -99,16 +83,18 @@ class PredictorRayDAPOTrainer(RayDAPOTrainer):
 
         Tokenizes from raw prompts/messages if the model inputs are missing.
         """
-        from verl.workers.rollout.schemas import (  
-            AsyncRolloutRequest,  
-            AsyncRolloutRequestStateEnum,  
-            TokenizationSanityCheckModeEnum,  
+        import uuid
+
+        from tensordict import TensorDict
+
+        from verl.workers.rollout.schemas import (
+            AsyncRolloutRequest,
+            AsyncRolloutRequestStateEnum,
+            TokenizationSanityCheckModeEnum,
         )
 
-        import uuid
-        from tensordict import TensorDict
-        if gen_batch.batch is None:  
-            gen_batch.batch = {}  
+        if gen_batch.batch is None:
+            gen_batch.batch = {}
 
         batch_keys = set(gen_batch.batch.keys())
         if {"input_ids", "attention_mask", "position_ids"}.issubset(batch_keys):
@@ -142,14 +128,20 @@ class PredictorRayDAPOTrainer(RayDAPOTrainer):
                 for i, msg in enumerate(messages):
                     multi_modal_data = {"image": [], "video": []}
                     if multi_modal_batch is not None:
-                        mm_val = multi_modal_batch[i] if isinstance(multi_modal_batch, np.ndarray) else multi_modal_batch
+                        mm_val = (
+                            multi_modal_batch[i] if isinstance(multi_modal_batch, np.ndarray) else multi_modal_batch
+                        )
                         if isinstance(mm_val, dict):
                             multi_modal_data.update(mm_val)
                     tools = None
                     if tool_schema_batch is not None:
-                        tool_schema_val = tool_schema_batch[i] if isinstance(tool_schema_batch, np.ndarray) else tool_schema_batch
+                        tool_schema_val = (
+                            tool_schema_batch[i] if isinstance(tool_schema_batch, np.ndarray) else tool_schema_batch
+                        )
                         if tool_schema_val:
-                            tools = [tool.model_dump() if hasattr(tool, "model_dump") else tool for tool in tool_schema_val]
+                            tools = [
+                                tool.model_dump() if hasattr(tool, "model_dump") else tool for tool in tool_schema_val
+                            ]
                     request = AsyncRolloutRequest.model_validate(
                         {
                             "request_id": str(uuid.uuid4()),
@@ -195,14 +187,14 @@ class PredictorRayDAPOTrainer(RayDAPOTrainer):
                         else:
                             position_ids[i, : pid.shape[-1]] = pid
 
-                    gen_batch.batch = TensorDict(  
-                        source={  
-                            "input_ids": input_ids,  
-                            "attention_mask": attention_mask,   
-                            "position_ids": position_ids,  
-                        },  
-                        batch_size=(len(input_id_list),),  
-                    )  
+                    gen_batch.batch = TensorDict(
+                        source={
+                            "input_ids": input_ids,
+                            "attention_mask": attention_mask,
+                            "position_ids": position_ids,
+                        },
+                        batch_size=(len(input_id_list),),
+                    )
                     batch_keys.update({"input_ids", "attention_mask", "position_ids"})
 
             if seqs is not None:
@@ -221,7 +213,9 @@ class PredictorRayDAPOTrainer(RayDAPOTrainer):
             batch_keys.add("attention_mask")
 
         if "position_ids" not in batch_keys and "attention_mask" in batch_keys:
-            gen_batch.batch["position_ids"] = (torch.cumsum(gen_batch.batch["attention_mask"], dim=-1) - 1).clamp_min(0).long()
+            gen_batch.batch["position_ids"] = (
+                (torch.cumsum(gen_batch.batch["attention_mask"], dim=-1) - 1).clamp_min(0).long()
+            )
 
         return gen_batch
 
@@ -395,14 +389,13 @@ class PredictorRayDAPOTrainer(RayDAPOTrainer):
                 is_last_step = self.global_steps >= self.total_training_steps
 
                 with marked_timer("step", timing_raw):
-
-                    with marked_timer("predictor_score", timing_raw, "purple"):  
-                        with marked_timer("predictor_hydrate", timing_raw, "purple"):  
-                            predictor_input_batch = gen_batch_output.select(deepcopy=True)  
-                            predictor_input_batch = self._hydrate_gen_batch_model_inputs(predictor_input_batch)  
-                        predictor_order = self._build_predictor_order(predictor_input_batch)  
+                    with marked_timer("predictor_score", timing_raw, "purple"):
+                        with marked_timer("predictor_hydrate", timing_raw, "purple"):
+                            predictor_input_batch = gen_batch_output.select(deepcopy=True)
+                            predictor_input_batch = self._hydrate_gen_batch_model_inputs(predictor_input_batch)
+                        predictor_order = self._build_predictor_order(predictor_input_batch)
                         # predictor_scores = self.actor_rollout_wg.compute_predictor_score(predictor_input_batch)
-                        self._apply_predictor_order(gen_batch_output, predictor_order)  
+                        self._apply_predictor_order(gen_batch_output, predictor_order)
                         # print(f'predictor_scores{predictor_scores}')
                     # generate a batch
                     with marked_timer("gen", timing_raw, "red"):
@@ -550,7 +543,6 @@ class PredictorRayDAPOTrainer(RayDAPOTrainer):
                     # if self.config.trainer.balance_batch:
                     #     self._balance_batch(batch, metrics=metrics)
 
-
                     if self.config.trainer.balance_batch:
                         uid_before_balance = batch.non_tensor_batch["uid"].copy()
                         self._balance_batch(batch, metrics=metrics)
@@ -607,10 +599,10 @@ class PredictorRayDAPOTrainer(RayDAPOTrainer):
                         with marked_timer("update_actor", timing_raw, "red"):
                             actor_output = self._update_actor(batch)
 
-                        # Update predictor after actor update  
+                        # Update predictor after actor update
                         if reverse_idx is not None:
                             batch.reorder(reverse_idx)
-                        self._maybe_update_predictor(gen_batch, batch, metrics, timing_raw)  
+                        self._maybe_update_predictor(gen_batch, batch, metrics, timing_raw)
 
                         # Check if ESI/training plan is close to expiration
                         esi_close_to_expiration = should_save_ckpt_esi(
@@ -699,4 +691,3 @@ class PredictorRayDAPOTrainer(RayDAPOTrainer):
                 self._save_checkpoint()
             metrics = {f"timing/{k}": v for k, v in timing_raw.items()}
             logger.log(data=metrics, step=self.global_steps)
-

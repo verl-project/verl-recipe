@@ -5,16 +5,15 @@ import socket
 
 import hydra
 import ray
-
 from recipe.dapo.main_dapo import DAPOTaskRunner
+from recipe.dapo_predictor.predictor_dapo_trainer import PredictorRayDAPOTrainer
+from recipe.dapo_predictor.predictor_worker import PredictorAsyncActorRolloutRefWorker
+
 from verl.experimental.reward_loop import migrate_legacy_reward_impl
 from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler, run_ppo
 from verl.trainer.ppo.utils import need_critic, need_reference_policy
 from verl.utils.config import validate_config
 from verl.utils.device import auto_set_device
-
-from recipe.dapo_predictor.predictor_dapo_trainer import PredictorRayDAPOTrainer
-from recipe.dapo_predictor.predictor_worker import PredictorAsyncActorRolloutRefWorker
 
 
 class PredictorDAPOTaskRunner(DAPOTaskRunner):
@@ -48,7 +47,7 @@ class PredictorDAPOTaskRunner(DAPOTaskRunner):
             with open_dict(config.actor_rollout_ref):
                 config.actor_rollout_ref.predictor_reorder = OmegaConf.create(
                     OmegaConf.to_container(trainer_predictor_cfg, resolve=True)
-                )            
+                )
         actor_rollout_cls, ray_worker_group_cls = self.add_actor_rollout_worker(config)
         self.add_critic_worker(config)
         self.add_reward_model_resource_pool(config)
