@@ -1,13 +1,16 @@
 #!/bin/bash
 
-LOCAL_IP="10.0.30.11" \
+# PYTHONPATH 必须在 python 启动前生效，无法迁移到 yaml。
+# 其余原本通过环境变量设置的参数已迁移为 Hydra override，
+# 优先级：命令行 override > shell 环境变量 > yaml 默认值。
 PYTHONPATH="/home/verl/harbor/src/harbor:$PYTHONPATH" \
-REMOTE_AGENT_NAME="swe-agent" \
-REMOTE_MODEL_NAME="openai/qwen-max" \
-REMOTE_AGENT_USE_LOCAL_TRIAL="true" \
-REMOTE_AGENT_TASK_PATH_TEMPLATE='/home/verl/dataset-tasks/{instance_id}' \
-REMOTE_AGENT_KWARGS='{"total_cost_limit":0,"per_instance_cost_limit":0}' \
 python3 -m recipe.agentic.agentic_main \
+    proxy_server.llm_proxy_ip=10.0.30.11 \
+    remote_agent.agent_name=swe-agent \
+    remote_agent.model_name=openai/qwen-max \
+    remote_agent.use_local_trial=true \
+    remote_agent.task_path_template='/home/verl/dataset-tasks/{instance_id}' \
+    'remote_agent.agent_kwargs={total_cost_limit: 0, per_instance_cost_limit: 0}' \
     algorithm.adv_estimator=grpo \
     algorithm.use_kl_in_reward=false \
     algorithm.kl_ctrl.kl_coef=0.0 \

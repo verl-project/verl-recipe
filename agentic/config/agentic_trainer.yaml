@@ -8,8 +8,45 @@ defaults:
   - ppo_trainer
   - _self_
 
+# Harbor local-directory dataset.
+# 当 train_harbor_dir / val_harbor_dir 为非 null 时，agentic_main 会扫描该目录下
+# 包含 task.toml + instruction.md 的子目录，生成 verl parquet 并覆盖 data.train_files /
+# data.val_files。为 null 时保持原有 train_files / val_files 不变。
+data:
+  train_harbor_dir: null
+  val_harbor_dir: null
+  harbor_cache_dir: "~/.cache/verl/agentic/harbor"
+  harbor_data_source: "harbor"
+  harbor_ability: "agent"
+  harbor_overwrite: false
+  harbor_train_limit: null
+  harbor_val_limit: null
+
 # Proxy server configuration (used by start_proxy_server in the recipe)
 proxy_server:
   host: "0.0.0.0"
   port: 0
   tool_format: "hermes"
+  # IP reachable by external agents (Harbor server, etc.).
+  # Mapped to env LLM_PROXY_IP. When the LLM proxy is co-located with the
+  # trainer node, this is just the trainer's externally reachable IP.
+  # null 表示不从 yaml 注入，仅允许 shell 环境变量提供。
+  llm_proxy_ip: null
+
+# RemoteAgentLoop configuration. 任意字段设为 null 表示不从 yaml 注入，
+# 保留给 RemoteAgentConfig.from_env() 读取同名环境变量。
+# 优先级：命令行 override > shell 环境变量 > yaml 默认值。
+remote_agent:
+  agent_name: null                 # -> REMOTE_AGENT_NAME
+  agent_import_path: null          # -> REMOTE_AGENT_IMPORT_PATH
+  model_name: null                 # -> REMOTE_MODEL_NAME
+  agent_kwargs: null               # -> REMOTE_AGENT_KWARGS (json-encoded)
+  max_retries: null                # -> REMOTE_AGENT_MAX_RETRIES
+  retry_base_delay: null           # -> REMOTE_AGENT_RETRY_BASE_DELAY
+  task_path_template: null         # -> REMOTE_AGENT_TASK_PATH_TEMPLATE
+  environment_overrides: null      # -> REMOTE_AGENT_ENVIRONMENT_OVERRIDES (json)
+  environment_kwargs: null         # -> REMOTE_AGENT_ENVIRONMENT_KWARGS (json)
+  use_local_trial: null            # -> REMOTE_AGENT_USE_LOCAL_TRIAL
+  proxy_server_url: null           # -> PROXY_SERVER_URL
+  harbor_server_url: null          # -> HARBOR_SERVER_URL
+  harbor_timeout: null             # -> HARBOR_TIMEOUT

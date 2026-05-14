@@ -21,10 +21,12 @@ The proxy base URL (cluster-internal) is, e.g.,
 ``http://10.0.1.5:9123``.  For a given ``trial_id`` the *external*
 agent receives::
 
-    agent_base_url = f"http://{LOCAL_IP}:{port}/{trial_id}/v1"
+    agent_base_url = f"http://{LLM_PROXY_IP}:{port}/{trial_id}/v1"
 
-where ``LOCAL_IP`` is an environment variable specifying an IP that is
-reachable from outside the Ray cluster (e.g. the Harbor server).
+where ``LLM_PROXY_IP`` is an environment variable specifying an IP that is
+reachable from outside the Ray cluster (e.g. the Harbor server). When the
+LLM proxy is co-located with the trainer, this is just the trainer node's
+externally reachable IP.
 
 Session management (register / get / complete / delete) is done via
 the proxy's REST endpoints, allowing ``RemoteAgentLoop`` to run on
@@ -36,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
 
@@ -105,7 +108,7 @@ class RemoteAgentLoop(AgentLoopBase):
        managed by :mod:`recipe.agentic.proxyserver.proxy_server`.
     2. Registers a unique *trial_id* with the proxy via HTTP.
     3. Calls the remote harbor server via the SDK, telling the agent to
-       use ``http://{LOCAL_IP}:{port}/{trial_id}/v1`` as its OpenAI
+       use ``http://{LLM_PROXY_IP}:{port}/{trial_id}/v1`` as its OpenAI
        ``base_url`` (cluster-external URL).
     4. After the agent finishes, collects the recorded ``token_ids`` and
        ``logprobs`` from the proxy session via HTTP and reconstructs a
@@ -140,6 +143,15 @@ class RemoteAgentLoop(AgentLoopBase):
 
         self.task_path_template: str = remote_cfg.task_path_template
 
+        # Local Harbor task roots — resolved from the trainer config so that
+        # ``data.train_harbor_dir`` / ``data.val_harbor_dir`` (set by the
+        # recipe's yaml) can be used to look up a task directory by
+        # ``instance_id`` instead of relying on ``task_path_template``.
+        # An env override ``HARBOR_DATASET_DIRS`` (``:`` or ``,`` separated)
+        # is also honored, useful for standalone proxy mode where the worker
+        # may not see the trainer config.
+        self.harbor_search_dirs: list[Path] = self._collect_harbor_search_dirs(config)
+
         self.environment_overrides: dict[str, str] = dict(remote_cfg.environment_overrides)
         self.environment_kwargs: dict[str, Any] = dict(remote_cfg.environment_kwargs)
         self.use_local_trial: bool = remote_cfg.use_local_trial
@@ -151,6 +163,81 @@ class RemoteAgentLoop(AgentLoopBase):
         # Sequence length limits
         self.prompt_length = rollout_cfg.prompt_length
         self.response_length = rollout_cfg.response_length
+
+    # ------------------------------------------------------------------
+    # Task-path resolution helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _collect_harbor_search_dirs(config: Any) -> list[Path]:
+        """Collect local Harbor task roots from config + env.
+
+        Reads ``data.train_harbor_dir`` and ``data.val_harbor_dir`` from the
+        trainer config (both optional, may be ``None``) and additionally any
+        path listed in ``$HARBOR_DATASET_DIRS`` (``:`` or ``,`` separated).
+        Non-existent paths are silently skipped.
+        """
+        dirs: list[Path] = []
+        try:
+            data_cfg = config.get("data", {}) if hasattr(config, "get") else {}
+        except Exception:  # noqa: BLE001 - defensive: any config shape
+            data_cfg = {}
+        for key in ("train_harbor_dir", "val_harbor_dir"):
+            try:
+                value = data_cfg.get(key, None) if hasattr(data_cfg, "get") else None
+            except Exception:  # noqa: BLE001
+                value = None
+            if value:
+                dirs.append(Path(os.path.expanduser(str(value))))
+
+        env_dirs = os.getenv("HARBOR_DATASET_DIRS")
+        if env_dirs:
+            for raw in env_dirs.replace(":", ",").split(","):
+                raw = raw.strip()
+                if raw:
+                    dirs.append(Path(os.path.expanduser(raw)))
+
+        # Deduplicate while preserving order.
+        seen: set[str] = set()
+        unique: list[Path] = []
+        for d in dirs:
+            key = str(d)
+            if key not in seen:
+                seen.add(key)
+                unique.append(d)
+        return unique
+
+    def _resolve_task_path(
+        self,
+        instance_id: str,
+        explicit_local_path: str | None = None,
+    ) -> str:
+        """Resolve ``task_path`` for a given ``instance_id``.
+
+        Resolution order:
+
+        1. ``explicit_local_path`` (the ``local_task_path`` column emitted by
+           :mod:`recipe.agentic.dataset.local_harbor`) if it points to an
+           existing directory — this is the fast path when the dataset row
+           already carries the absolute path.
+        2. ``<root>/<instance_id>`` for each configured harbor root
+           (``data.train_harbor_dir``, ``data.val_harbor_dir``, then
+           ``$HARBOR_DATASET_DIRS``).
+        3. ``self.task_path_template.format(instance_id=...)`` — kept for
+           backward compatibility with the old env-driven workflow.
+        """
+        if explicit_local_path:
+            candidate = Path(os.path.expanduser(str(explicit_local_path)))
+            if candidate.is_dir():
+                return str(candidate)
+
+        if instance_id:
+            for root in self.harbor_search_dirs:
+                candidate = root / instance_id
+                if candidate.is_dir():
+                    return str(candidate)
+
+        return self.task_path_template.format(instance_id=instance_id)
 
     # ------------------------------------------------------------------
     # HTTP helpers — interact with the proxy via its REST endpoints
@@ -460,14 +547,14 @@ class RemoteAgentLoop(AgentLoopBase):
         await self._register_session(proxy_url, trial_id)
 
         try:
-            # 3. Build the agent's base_url using LOCAL_IP (cluster-external)
-            local_ip = os.getenv("LOCAL_IP", "0.0.0.0")
-            if local_ip == "0.0.0.0":
+            # 3. Build the agent's base_url using LLM_PROXY_IP (cluster-external)
+            llm_proxy_ip = os.getenv("LLM_PROXY_IP", "0.0.0.0")
+            if llm_proxy_ip == "0.0.0.0":
                 logger.warning(
-                    "LOCAL_IP is not set, falling back to 0.0.0.0. "
+                    "LLM_PROXY_IP is not set, falling back to 0.0.0.0. "
                     "The remote agent may not be able to reach the proxy."
                 )
-            agent_base_url = f"http://{local_ip}:{proxy_port}/{trial_id}/v1"
+            agent_base_url = f"http://{llm_proxy_ip}:{proxy_port}/{trial_id}/v1"
 
             agent_kwargs = dict(self.remote_agent_kwargs)
             agent_kwargs["model_base_url"] = agent_base_url
@@ -476,7 +563,10 @@ class RemoteAgentLoop(AgentLoopBase):
             agent_kwargs["top_p"] = sampling_params.get("top_p", 1.0)
 
             # 4. Call the remote harbor server with retry
-            task_path = self.task_path_template.format(instance_id=instance_id)
+            task_path = self._resolve_task_path(
+                instance_id,
+                explicit_local_path=kwargs.get("local_task_path"),
+            )
             result = await self._submit_with_retry(
                 proxy_url=proxy_url,
                 trial_id=trial_id,
