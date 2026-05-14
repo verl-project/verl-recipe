@@ -2,9 +2,10 @@
 
 This recipe extends the standard PPO training flow by starting a
 :class:`ProxyServerActor` (a Ray named actor on the head node) **after**
-``trainer.init_workers()`` produces ``server_handles``.  The proxy
-bridges OpenAI-compatible HTTP requests from remote agents to verl's
-vLLM rollout servers.
+``trainer.init_workers()`` brings up the rollout replicas and the verl
+``GlobalRequestLoadBalancer``.  The proxy bridges OpenAI-compatible HTTP
+requests from remote agents to verl's vLLM rollout servers via that
+load balancer.
 
 Usage::
 
@@ -20,13 +21,14 @@ import hydra
 import ray
 from omegaconf import OmegaConf
 
+from verl.experimental.reward_loop import migrate_legacy_reward_impl
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 from verl.trainer.main_ppo import TaskRunner as BaseTaskRunner
 from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
-from verl.trainer.ppo.reward import load_reward_manager
 from verl.trainer.ppo.utils import need_critic, need_reference_policy
 from verl.utils.config import validate_config
+from verl.utils.device import auto_set_device
 
 # yaml 字段 → RemoteAgentLoop / proxy 使用的环境变量名的映射。
 # 仅当 yaml 字段不为 None 且 shell 未设同名 env 时才注入，
@@ -41,6 +43,7 @@ _REMOTE_AGENT_ENV_MAP: dict[str, str] = {
     "task_path_template": "REMOTE_AGENT_TASK_PATH_TEMPLATE",
     "environment_overrides": "REMOTE_AGENT_ENVIRONMENT_OVERRIDES",
     "environment_kwargs": "REMOTE_AGENT_ENVIRONMENT_KWARGS",
+    "environment_import_path": "REMOTE_AGENT_ENVIRONMENT_IMPORT_PATH",
     "use_local_trial": "REMOTE_AGENT_USE_LOCAL_TRIAL",
     "proxy_server_url": "PROXY_SERVER_URL",
     "harbor_server_url": "HARBOR_SERVER_URL",
@@ -132,6 +135,10 @@ def _materialize_harbor_datasets(config) -> None:
 
 @hydra.main(config_path="config", config_name="agentic_trainer", version_base=None)
 def main(config):
+    # Automatically set `config.trainer.device = npu` when running on Ascend NPU.
+    auto_set_device(config)
+    # Migrate legacy reward_model.* / custom_reward_function / sandbox_fusion -> config.reward.*
+    config = migrate_legacy_reward_impl(config)
     run_ppo(config)
 
 
@@ -174,9 +181,10 @@ class TaskRunner(BaseTaskRunner):
 
     Inherits the standard PPO ``TaskRunner`` and overrides ``run()`` to
     insert a ``start_proxy_server()`` call between ``init_workers()``
-    and ``fit()``.  The proxy server receives the ``server_handles``
-    produced by ``AgentLoopManager`` and exposes an HTTP endpoint that
-    remote agents can use as an OpenAI-compatible ``base_url``.
+    and ``fit()``.  The proxy server is given the verl
+    ``GlobalRequestLoadBalancer`` handle (owned by ``LLMServerManager``)
+    and exposes an HTTP endpoint that remote agents can use as an
+    OpenAI-compatible ``base_url``.
     """
 
     def run(self, config):
@@ -192,12 +200,13 @@ class TaskRunner(BaseTaskRunner):
 
         actor_rollout_cls, ray_worker_group_cls = self.add_actor_rollout_worker(config)
         self.add_critic_worker(config)
-        self.add_reward_model_worker(config)
+        self.add_reward_model_resource_pool(config)
+        self.add_teacher_model_resource_pool(config)
         self.add_ref_policy_worker(config, actor_rollout_cls)
 
         validate_config(
             config=config,
-            use_reference_policy=need_reference_policy(self.role_worker_mapping),
+            use_reference_policy=need_reference_policy(config),
             use_critic=need_critic(config),
         )
 
@@ -211,13 +220,6 @@ class TaskRunner(BaseTaskRunner):
         trust_remote_code = config.data.get("trust_remote_code", False)
         tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
         processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
-
-        reward_fn = load_reward_manager(
-            config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {})
-        )
-        val_reward_fn = load_reward_manager(
-            config, tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {})
-        )
 
         resource_pool_manager = self.init_resource_pool_mgr(config)
 
@@ -251,8 +253,6 @@ class TaskRunner(BaseTaskRunner):
             role_worker_mapping=self.role_worker_mapping,
             resource_pool_manager=resource_pool_manager,
             ray_worker_group_cls=ray_worker_group_cls,
-            reward_fn=reward_fn,
-            val_reward_fn=val_reward_fn,
             train_dataset=train_dataset,
             val_dataset=val_dataset,
             collate_fn=collate_fn,
@@ -260,20 +260,41 @@ class TaskRunner(BaseTaskRunner):
         )
         trainer.init_workers()
 
-        # ----- Agentic-specific: start the LLM proxy server -----
-        server_handles = trainer.async_rollout_manager.server_handles
+        # ----- Agentic-specific: start the LLM proxy / LB registry -----
+        # In both modes we register a Ray named actor under PROXY_ACTOR_NAME
+        # so that RemoteAgentLoop._ensure_inference_worker can look up the
+        # verl GlobalRequestLoadBalancer cluster-wide.
+        #
+        # * Ray actor mode (default, PROXY_SERVER_URL unset):
+        #     Start the full ProxyServerActor (HTTP proxy + LB holder).
+        # * Standalone proxy mode (PROXY_SERVER_URL set):
+        #     The HTTP proxy runs as an external service; we only start a
+        #     lightweight LoadBalancerRegistry under the same name, no HTTP
+        #     server is bound on the verl side.
+        load_balancer = trainer.llm_server_manager.global_load_balancer
         proxy_cfg = config.get("proxy_server", {})
+        standalone_proxy_url = os.environ.get("PROXY_SERVER_URL")
 
-        from recipe.agentic.proxyserver.ray_actor import start_proxy_server
+        if standalone_proxy_url:
+            from recipe.agentic.proxyserver.ray_actor import start_lb_registry
 
-        proxy_url = start_proxy_server(
-            server_handles=server_handles,
-            model_path=config.actor_rollout_ref.model.path,
-            host=proxy_cfg.get("host", "0.0.0.0"),
-            port=proxy_cfg.get("port", 0),
-            tool_format=proxy_cfg.get("tool_format", "hermes"),
-        )
-        print(f"Proxy server started at {proxy_url}")
+            start_lb_registry(load_balancer=load_balancer)
+            print(
+                f"[agentic] standalone proxy mode: PROXY_SERVER_URL="
+                f"{standalone_proxy_url}; started lightweight"
+                f" LoadBalancerRegistry (no local HTTP proxy)."
+            )
+        else:
+            from recipe.agentic.proxyserver.ray_actor import start_proxy_server
+
+            proxy_url = start_proxy_server(
+                load_balancer=load_balancer,
+                model_path=config.actor_rollout_ref.model.path,
+                host=proxy_cfg.get("host", "0.0.0.0"),
+                port=proxy_cfg.get("port", 0),
+                tool_format=proxy_cfg.get("tool_format", "hermes"),
+            )
+            print(f"Proxy server started at {proxy_url}")
 
         trainer.fit()
 

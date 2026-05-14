@@ -10,7 +10,7 @@ Usage from a recipe::
     from recipe.agentic.proxyserver.ray_actor import start_proxy_server
 
     proxy_url = start_proxy_server(
-        server_handles=server_handles,
+        load_balancer=trainer.llm_server_manager.global_load_balancer,
         model_path="Qwen/Qwen2.5-7B-Instruct",
     )
 
@@ -46,7 +46,7 @@ _proxy_actor_handle = None
 
 
 def _create_local_proxy(
-    server_handles: list,
+    load_balancer: Any,
     model_path: str,
     host: str = "0.0.0.0",
     port: int = 0,
@@ -60,6 +60,9 @@ def _create_local_proxy(
     proxy server.
 
     Args:
+        load_balancer: Ray actor handle of verl's
+            ``GlobalRequestLoadBalancer``. The provider acquires a vLLM
+            server handle per request from this balancer.
         tool_parser_factory: Optional callable ``(format, tokenizer) -> tool_parser``.
             If not supplied, the function tries to import
             ``verl.experimental.agent_loop.tool_parser.ToolParser`` as a
@@ -90,7 +93,7 @@ def _create_local_proxy(
             logger.info("Tool parser initialized: %s", tool_format)
 
     provider = VLLMRayProvider(
-        server_handles=server_handles,
+        load_balancer=load_balancer,
         tokenizer=tokenizer,
         tool_parser=tool_parser,
     )
@@ -290,14 +293,15 @@ def _get_actor_class():
 
         def __init__(
             self,
-            server_handles: list,
+            load_balancer: Any,
             model_path: str,
             host: str = "0.0.0.0",
             port: int = 0,
             tool_format: str | None = "hermes",
         ):
+            self._lb = load_balancer
             self.proxy = _create_local_proxy(
-                server_handles=server_handles,
+                load_balancer=load_balancer,
                 model_path=model_path,
                 host=host,
                 port=port,
@@ -316,6 +320,16 @@ def _get_actor_class():
         def get_url(self) -> str | None:
             return self._url
 
+        def get_load_balancer(self) -> Any:
+            """Return the verl ``GlobalRequestLoadBalancer`` actor handle
+            owned by this proxy.
+
+            Used by ``RemoteAgentLoop._ensure_inference_worker`` (standalone
+            proxy mode) to obtain a load-balancer handle, since the new
+            ``LLMServerClient`` does not expose vLLM server handles directly.
+            """
+            return self._lb
+
         async def stop(self) -> None:
             if self.proxy is not None:
                 await self.proxy.stop()
@@ -325,12 +339,86 @@ def _get_actor_class():
 
 
 # ---------------------------------------------------------------------------
+# Lightweight load-balancer registry (used in standalone-proxy mode)
+# ---------------------------------------------------------------------------
+
+
+def _get_registry_class():
+    """Create the lightweight Ray named actor that just holds the LB handle.
+
+    Used only when an external standalone proxy is configured
+    (``PROXY_SERVER_URL`` set). In that case the heavyweight
+    :class:`ProxyServerActor` is unnecessary — we only need a Ray-addressable
+    place where ``RemoteAgentLoop._ensure_inference_worker`` can look up
+    the verl ``GlobalRequestLoadBalancer`` handle to start an
+    :class:`InferenceWorkerClient`.
+    """
+    ray = _get_ray()
+
+    @ray.remote(num_cpus=0.01)
+    class LoadBalancerRegistry:
+        def __init__(self, load_balancer: Any):
+            self._lb = load_balancer
+            self._url: str | None = None  # no HTTP server in this mode
+
+        def get_url(self) -> str | None:
+            return self._url
+
+        def get_load_balancer(self) -> Any:
+            return self._lb
+
+    return LoadBalancerRegistry
+
+
+def start_lb_registry(load_balancer: Any) -> None:
+    """Start a lightweight load-balancer registry as a Ray named actor.
+
+    Registers under :data:`PROXY_ACTOR_NAME` so that
+    :func:`RemoteAgentLoop._ensure_inference_worker` can call
+    ``ray.get_actor(PROXY_ACTOR_NAME).get_load_balancer.remote()`` without
+    knowing whether the full :class:`ProxyServerActor` or this lightweight
+    registry was started.
+
+    No-op if an actor with the same name already exists.
+    """
+    ray = _get_ray()
+
+    try:
+        ray.get_actor(PROXY_ACTOR_NAME)
+        logger.info(
+            "Reusing existing actor '%s' as load-balancer registry",
+            PROXY_ACTOR_NAME,
+        )
+        return
+    except ValueError:
+        pass
+
+    global _proxy_actor_handle
+    Registry = _get_registry_class()
+    head_node_id = ray.get_runtime_context().get_node_id()
+    actor = Registry.options(
+        name=PROXY_ACTOR_NAME,
+        scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
+            node_id=head_node_id,
+            soft=False,
+        ),
+    ).remote(load_balancer)
+
+    _proxy_actor_handle = actor
+    logger.info(
+        "Load-balancer registry started as named actor '%s' on head node %s",
+        PROXY_ACTOR_NAME,
+        head_node_id,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Convenience functions — Ray actor mode
 # ---------------------------------------------------------------------------
 
 
 def start_proxy_server(
-    server_handles: list,
+    load_balancer: Any,
     model_path: str,
     host: str = "0.0.0.0",
     port: int = 0,
@@ -342,7 +430,9 @@ def start_proxy_server(
     immediately without creating a new one.
 
     Args:
-        server_handles: Ray actor handles of vLLM rollout servers.
+        load_balancer: Ray actor handle of verl's
+            ``GlobalRequestLoadBalancer``. The proxy uses it to route
+            inference requests to vLLM rollout servers.
         model_path: HuggingFace model name/path for the tokenizer.
         host: Bind address for the HTTP server.
         port: Port number. ``0`` means auto-select a free port.
@@ -371,7 +461,7 @@ def start_proxy_server(
             node_id=head_node_id,
             soft=False,
         ),
-    ).remote(server_handles, model_path, host, port, tool_format)
+    ).remote(load_balancer, model_path, host, port, tool_format)
 
     _proxy_actor_handle = actor
 

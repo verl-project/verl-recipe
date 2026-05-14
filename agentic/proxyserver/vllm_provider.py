@@ -10,7 +10,7 @@ Usage::
 
     from recipe.agentic.proxyserver.vllm_provider import VLLMRayProvider
 
-    provider = VLLMRayProvider(server_handles, tokenizer, tool_parser)
+    provider = VLLMRayProvider(load_balancer, tokenizer, tool_parser)
     litellm.custom_provider_map = [
         {"provider": "verl-vllm", "custom_handler": provider}
     ]
@@ -51,40 +51,33 @@ class VLLMRayProvider(CustomLLM):
 
     def __init__(
         self,
-        server_handles: list,
+        load_balancer: Any,
         tokenizer: Any,
         tool_parser: Any | None = None,
     ) -> None:
         super().__init__()
-        self.server_handles = list(server_handles)
+        # Ray actor handle of verl's ``GlobalRequestLoadBalancer``. We acquire
+        # a vLLM server handle per request via ``acquire_server`` and release
+        # it via ``release_server`` so the recipe side carries no routing
+        # state and stays consistent with verl's main rollout path.
+        self._lb = load_balancer
         self.tokenizer = tokenizer
         self.tool_parser = tool_parser
 
-        # Sticky-session load balancing: session_id -> server index
-        self._sticky: dict[str, int] = {}
-        self._request_counts: list[int] = [0] * len(self.server_handles)
-
     # ------------------------------------------------------------------
-    # Load balancing
+    # Load balancing (delegated to verl's GlobalRequestLoadBalancer)
     # ------------------------------------------------------------------
-
-    def _choose_server(self, session_id: str | None):
-        """Pick a server handle using sticky sessions."""
-        key = session_id or "default"
-        if key in self._sticky:
-            return self.server_handles[self._sticky[key]]
-
-        idx = min(
-            range(len(self._request_counts)),
-            key=lambda i: self._request_counts[i],
-        )
-        self._sticky[key] = idx
-        self._request_counts[idx] += 1
-        return self.server_handles[idx]
 
     def release_session(self, session_id: str) -> None:
-        """Remove sticky-session binding for the given session."""
-        self._sticky.pop(session_id, None)
+        """No-op kept for API compatibility.
+
+        Sticky-session bindings live inside the verl
+        ``GlobalRequestLoadBalancer`` actor and are evicted automatically by
+        its LRU cache once capacity is reached. The load balancer exposes no
+        public API to evict by ``session_id`` so we deliberately do nothing
+        here; in-flight counters are released at the end of each request in
+        :meth:`_generate`.
+        """
 
     # ------------------------------------------------------------------
     # Core generation via Ray RPC
@@ -125,18 +118,28 @@ class VLLMRayProvider(CustomLLM):
         if repetition_penalty is not None:
             sampling_params["repetition_penalty"] = repetition_penalty
 
-        server = self._choose_server(session_id)
-        request_id = uuid4().hex
-
-        ref = server.generate.remote(
-            prompt_ids=prompt_ids,
-            sampling_params=sampling_params,
-            request_id=request_id,
-        )
+        # Sticky on session_id so multi-turn requests in the same trial reuse
+        # the same vLLM replica (preserves prefix cache). The per-call
+        # ``request_id`` passed to ``server.generate`` is a fresh uuid so
+        # vLLM treats every turn as a new request.
+        sticky_key = session_id or "default"
 
         import ray
 
-        output = await asyncio.to_thread(ray.get, ref)
+        server_id, server = await self._lb.acquire_server.remote(
+            request_id=sticky_key
+        )
+        try:
+            request_id = uuid4().hex
+            ref = server.generate.remote(
+                prompt_ids=prompt_ids,
+                sampling_params=sampling_params,
+                request_id=request_id,
+            )
+            output = await asyncio.to_thread(ray.get, ref)
+        finally:
+            # Fire-and-forget: mirrors verl's LLMServerClient._release_server.
+            self._lb.release_server.remote(server_id=server_id)
 
         token_ids = list(output.token_ids)
         log_probs = list(output.log_probs) if output.log_probs else []

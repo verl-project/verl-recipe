@@ -96,39 +96,136 @@ uv pip install -e .
 uv pip install -e ./harbor
 ```
 
-### 5.2 启动训练（SWE-Agent + Qwen2.5 示例）
+### 5.2 安装容器工具（Docker 或 crane + BuildKit）
 
-直接使用提供的端到端脚本：
+本地 Trial 模式下 Harbor 环境需要构建/拉取容器镜像。可选择安装 Docker，或使用轻量的 crane + BuildKit 组合：
+
+**方式一：Docker**
+
+按照 [Docker 官方文档](https://docs.docker.com/engine/install/) 安装即可。
+
+**方式二：crane + BuildKit（无需 Docker daemon）**
 
 ```bash
+# 安装 crane（容器镜像操作工具）
+VERSION=v0.20.2
+curl -L "https://github.com/google/go-containerregistry/releases/download/${VERSION}/go-containerregistry_Linux_x86_64.tar.gz" -o crane.tar.gz
+tar -xzf crane.tar.gz
+mv crane /usr/local/bin/
+
+# 安装 buildctl（BuildKit 客户端）
+BUILDKIT_VERSION=v0.13.2
+curl -sL "https://github.com/moby/buildkit/releases/download/${BUILDKIT_VERSION}/buildkit-${BUILDKIT_VERSION}.linux-amd64.tar.gz" \
+  | tar -xz -C /usr/local bin/buildctl
+```
+
+### 5.3 下载数据集
+
+使用 Harbor CLI 将任务数据集下载到本地：
+
+```bash
+harbor datasets download --output /home/verl/swe-bench-verified
+```
+
+下载后的目录结构应符合 [6.1 目录约定](#61-目录约定)。
+
+### 5.4 登录容器镜像仓库
+
+Harbor 环境需要拉取基础镜像，确保已登录目标 registry：
+
+```bash
+# 方式一：通过 docker login
+docker login <registry-url>
+
+# 方式二：通过 crane login
+crane auth login <registry-url> -u <username> -p <password>
+
+# 方式三：直接编辑 ~/.docker/config.json
+cat > ~/.docker/config.json <<'EOF'
+{
+  "auths": {
+    "<registry-url>": {
+      "auth": "<base64(username:password)>"
+    }
+  }
+}
+EOF
+```
+
+> **提示**：crane 和 BuildKit 均会读取 `~/.docker/config.json` 中的认证信息，因此三种方式任选其一即可。
+
+### 5.5 启动训练（SWE-Agent + Qwen2.5 示例）
+
+脚本 [`agentic-qwen2.5-3b.sh`](agentic-qwen2.5-3b.sh) 通过 `ENVIRONMENT` 环境变量选择运行环境，支持 **Docker**（本地）和 **ACK**（Kubernetes）两种模式。脚本会自动设置对应的 `environment_import_path` 和 `environment_kwargs`。
+
+#### 通用参数
+
+| 变量 | 必填 | 默认值 | 说明 |
+| --- | :---: | --- | --- |
+| `MODEL_PATH` | **是** | — | HuggingFace 模型本地路径或名称，例如 `/var/model/Qwen2.5-7B-Instruct` |
+| `ENVIRONMENT` | 否 | `docker` | 环境模式：`docker`（本地 Docker）或 `ack`（Kubernetes） |
+| `REGISTRY` | 否 | *(空)* | 容器镜像 registry 地址，ACK 模式下用于推送/拉取 sandbox 镜像，例如 `my-registry.example.com/swebench` |
+
+#### ACK (Kubernetes) 环境参数
+
+以下参数仅在 `ENVIRONMENT=ack` 时生效，对应 `ACKEnvironment.__init__` 的参数：
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `NAMESPACE` | `default` | Kubernetes namespace |
+| `KUBECONFIG` | *(空，使用默认 ~/.kube/config)* | kubeconfig 文件路径 |
+| `IMAGE_PULL_SECRET` | *(空)* | K8s image pull secret 名称，用于从私有 registry 拉取镜像 |
+| `SERVICE_ACCOUNT` | *(空)* | K8s service account 名称 |
+| `USE_BUILDKIT` | `false` | 是否使用 BuildKit 构建 sandbox 镜像（替代 DinD）。设为 `true` 时需同时设置 `BUILDKIT_ADDRESS` |
+| `BUILDKIT_ADDRESS` | *(空)* | BuildKit 服务地址，例如 `tcp://buildkit-service:1234`。仅当 `USE_BUILDKIT=true` 时生效 |
+| `USE_SANDBOX_CLAIM` | `false` | 是否使用 [OpenKruise](https://openkruise.io/) SandboxClaim 获取预热的 sandbox 容器，避免每次冷启动，显著加速环境初始化 |
+| `CLAIM_TIMEOUT` | `300` | SandboxClaim 等待超时（秒）。仅当 `USE_SANDBOX_CLAIM=true` 时生效 |
+| `SANDBOXSET_REPLICAS` | `5` | SandboxSet 预热副本数。仅当 `USE_SANDBOX_CLAIM=true` 时生效 |
+
+> Docker 模式不需要上述任何 K8s 参数。脚本会自动使用 `DockerEnvironment` 并传入空的 `environment_kwargs`。
+
+#### 完整示例
+
+**Docker 本地环境（最简配置）：**
+
+```bash
+MODEL_PATH=/var/model/Qwen2.5-7B-Instruct \
 bash recipe/agentic/agentic-qwen2.5-3b.sh
 ```
 
-脚本核心命令等价于（参数全部走 Hydra override，`PYTHONPATH` 除外）：
+**ACK 环境（使用 BuildKit 构建镜像）：**
 
 ```bash
-PYTHONPATH=/home/verl/harbor/src/harbor:$PYTHONPATH \
-python3 -m recipe.agentic.agentic_main \
-    proxy_server.llm_proxy_ip=10.0.30.11 \
-    remote_agent.agent_name=swe-agent \
-    remote_agent.model_name=openai/qwen-max \
-    remote_agent.use_local_trial=true \
-    remote_agent.task_path_template='/home/verl/dataset-tasks/{instance_id}' \
-    'remote_agent.agent_kwargs={total_cost_limit: 0, per_instance_cost_limit: 0}' \
-    actor_rollout_ref.rollout.mode=async \
-    actor_rollout_ref.rollout.multi_turn.format=hermes \
-    actor_rollout_ref.rollout.agent.default_agent_loop=remote_agent \
-    actor_rollout_ref.rollout.agent.agent_loop_config_path=recipe/agentic/swe-agent.yaml \
-    ... # 其它 PPO/GRPO 配置项
+MODEL_PATH=/var/model/Qwen2.5-7B-Instruct \
+ENVIRONMENT=ack \
+REGISTRY=my-registry.example.com/swebench \
+KUBECONFIG=/root/.kube/config \
+USE_BUILDKIT=true \
+BUILDKIT_ADDRESS=tcp://buildkit-service:1234 \
+IMAGE_PULL_SECRET=acr-registry \
+bash recipe/agentic/agentic-qwen2.5-3b.sh
 ```
 
-要点：
+**ACK 环境（使用 OpenKruise SandboxClaim 预热容器）：**
+
+```bash
+MODEL_PATH=/var/model/Qwen2.5-7B-Instruct \
+ENVIRONMENT=ack \
+REGISTRY=my-registry.example.com/swebench \
+KUBECONFIG=/root/.kube/config \
+USE_SANDBOX_CLAIM=true \
+SANDBOXSET_REPLICAS=10 \
+IMAGE_PULL_SECRET=acr-registry \
+bash recipe/agentic/agentic-qwen2.5-3b.sh
+```
+
+#### 要点
 
 - `actor_rollout_ref.rollout.mode=async`：rollout 必须使用异步模式；
 - `actor_rollout_ref.rollout.agent.default_agent_loop=remote_agent`：使用本 recipe 提供的 `RemoteAgentLoop`；
 - `agent_loop_config_path`：指向 [`swe-agent.yaml`](swe-agent.yaml)（也可以替换为自定义 yaml）。
 
-### 5.3 自定义 proxy 监听端口
+### 5.6 自定义 proxy 监听端口
 
 修改 [`config/agentic_trainer.yaml`](config/agentic_trainer.yaml) 或在命令行 override：
 
@@ -247,9 +344,9 @@ export HARBOR_DATASET_DIRS=/var/harbor/tasks/train:/var/harbor/tasks/val
 
 ```
                  ┌─────────────────────┐
-                 │  RayPPOTrainer      │  init_workers() → server_handles
+                 │  RayPPOTrainer      │  init_workers() → LLMServerManager + LB
                  └─────────┬───────────┘
-                           │ start_proxy_server(server_handles, ...)
+                           │ start_proxy_server(load_balancer, ...)
                            ▼
        ┌────────────────────────────────────────┐
        │  ProxyServerActor (Ray named actor)    │  HTTP/WebSocket
@@ -269,12 +366,216 @@ export HARBOR_DATASET_DIRS=/var/harbor/tasks/train:/var/harbor/tasks/val
 ```
 
 1. `agentic_main.TaskRunner.run()` 启动标准 PPO 流程；
-2. 在 `trainer.init_workers()` 之后、`trainer.fit()` 之前调用 `start_proxy_server`，注入 `server_handles`；
+2. 在 `trainer.init_workers()` 之后、`trainer.fit()` 之前调用 `start_proxy_server`，把 `trainer.llm_server_manager.global_load_balancer` 这个 LB actor handle 注入 proxy；
 3. 每个 rollout 步骤里 `RemoteAgentLoop` 向 proxy 注册 session、把 `base_url` 交给远程 Agent；
 4. 远程 Agent 通过 OpenAI 协议调用 proxy，proxy 再把请求转发给 verl 的 vLLM 服务；
 5. 会话结束后 `RemoteAgentLoop` 从 proxy 拉取完整 token 序列、tool 调用记录，构造 `AgentLoopOutput` 返回训练器。
 
-## 8. 相关参考
+## 8. 将 Agentic 能力集成到你自己的算法
+
+Agentic recipe 在标准 PPO 训练之上增加了两个组件：
+
+1. **Proxy Server** — 桥接远程 Agent 的 OpenAI 兼容 HTTP 请求到 verl 的 vLLM rollout 服务，同时记录每次 LLM 调用的 token IDs 和 logprobs。
+2. **Remote Agent Loop**（`RemoteAgentLoop`）— 每条样本的 rollout 编排：将任务分发给远程 Agent 框架（如 Harbor），并从 proxy 的录制数据重建 verl 兼容的 trajectory。
+
+```
+┌─────────────────────────────────────────────────────┐
+│  Your TaskRunner                                    │
+│                                                     │
+│  1. init_workers()   ← 标准 verl 初始化              │
+│  2. start_proxy()    ← agentic: 桥接 LLM 流量        │
+│  3. fit()            ← 标准 verl 训练                 │
+└─────────────────────────────────────────────────────┘
+
+Per-sample rollout:
+┌──────────────┐     HTTP/OpenAI     ┌──────────────┐
+│ Remote Agent │ ◄──────────────────► │ LLM Proxy    │
+│ (Harbor,     │                      │ (records      │
+│  SWE-agent,  │                      │  token_ids +  │
+│  custom)     │                      │  logprobs)    │
+└──────────────┘                      └──────┬───────┘
+                                             │ routes to
+                                      ┌──────▼───────┐
+                                      │ verl vLLM    │
+                                      │ rollout      │
+                                      │ servers      │
+                                      └──────────────┘
+```
+
+根据你的需求，有三种集成方式：
+
+### 8.1 方式一：直接使用 Agentic Recipe
+
+如果你的算法基于 PPO，只需自定义远程 Agent 或环境，可以直接用现有 recipe + 配置覆盖。
+
+**步骤 1：创建继承 agentic trainer 的 YAML 配置。**
+
+```yaml
+# my_config.yaml
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+# Proxy server 设置
+proxy_server:
+  host: "0.0.0.0"
+  port: 0
+  tool_format: "hermes"
+  llm_proxy_ip: <你的外部 IP>
+
+# 远程 Agent 设置
+remote_agent:
+  agent_name: my_custom_agent
+  agent_import_path: "my_package.agents:MyAgent"
+  use_local_trial: true
+  environment_import_path: "harbor.environments.docker.docker:DockerEnvironment"
+```
+
+**步骤 2：运行。**
+
+```bash
+python -m recipe.agentic.agentic_main --config-name my_config
+```
+
+这会使用内置的 `RemoteAgentLoop`（注册名 `"remote_agent"`）和 agentic `TaskRunner`，自动管理 proxy server 生命周期。
+
+### 8.2 方式二：在你自己的 TaskRunner 中添加 Proxy Server
+
+如果你有自定义的 `TaskRunner`（例如非 PPO 算法），需要自己在 `init_workers()` 和 `fit()` 之间启动 proxy server。
+
+**步骤 1：继承 base TaskRunner 并插入 proxy 启动。**
+
+```python
+# my_recipe/main.py
+import os
+from verl.trainer.main_ppo import TaskRunner as BaseTaskRunner
+
+class MyAgenticTaskRunner(BaseTaskRunner):
+    """在自定义 TaskRunner 中添加 LLM proxy server。"""
+
+    def run(self, config):
+        from pprint import pprint
+        from omegaconf import OmegaConf
+        from verl.utils.fs import copy_to_local
+        from verl.utils import hf_tokenizer, hf_processor
+        from verl.utils.dataset.rl_dataset import collate_fn
+        from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler
+        from verl.trainer.ppo.ray_trainer import RayPPOTrainer
+        from verl.trainer.ppo.utils import need_critic, need_reference_policy
+        from verl.utils.config import validate_config
+
+        pprint(OmegaConf.to_container(config, resolve=True))
+        OmegaConf.resolve(config)
+
+        # --- 标准 verl 初始化（与 base TaskRunner 相同）---
+        actor_rollout_cls, ray_worker_group_cls = self.add_actor_rollout_worker(config)
+        self.add_critic_worker(config)
+        self.add_reward_model_resource_pool(config)
+        self.add_teacher_model_resource_pool(config)
+        self.add_ref_policy_worker(config, actor_rollout_cls)
+
+        validate_config(
+            config=config,
+            use_reference_policy=need_reference_policy(config),
+            use_critic=need_critic(config),
+        )
+
+        local_path = copy_to_local(
+            config.actor_rollout_ref.model.path,
+            use_shm=config.actor_rollout_ref.model.get("use_shm", False),
+        )
+        trust_remote_code = config.data.get("trust_remote_code", False)
+        tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
+        processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
+        resource_pool_manager = self.init_resource_pool_mgr(config)
+
+        train_dataset = create_rl_dataset(
+            config.data.train_files, config.data, tokenizer, processor,
+            is_train=True, max_samples=config.data.get("train_max_samples", -1),
+        )
+        val_dataset = create_rl_dataset(
+            config.data.val_files, config.data, tokenizer, processor,
+            is_train=False, max_samples=config.data.get("val_max_samples", -1),
+        )
+        train_sampler = create_rl_sampler(config.data, train_dataset)
+
+        trainer = RayPPOTrainer(
+            config=config,
+            tokenizer=tokenizer,
+            processor=processor,
+            role_worker_mapping=self.role_worker_mapping,
+            resource_pool_manager=resource_pool_manager,
+            ray_worker_group_cls=ray_worker_group_cls,
+            train_dataset=train_dataset,
+            val_dataset=val_dataset,
+            collate_fn=collate_fn,
+            train_sampler=train_sampler,
+        )
+        trainer.init_workers()
+
+        # --- Agentic: 启动 LLM proxy server ---
+        self._start_proxy(trainer, config)
+
+        # --- 你的自定义逻辑（如有）---
+
+        trainer.fit()
+
+    def _start_proxy(self, trainer, config):
+        """在 workers 初始化之后启动 LLM proxy server。"""
+        load_balancer = trainer.llm_server_manager.global_load_balancer
+        proxy_cfg = config.get("proxy_server", {})
+        standalone_proxy_url = os.environ.get("PROXY_SERVER_URL")
+
+        if standalone_proxy_url:
+            # 外部 proxy 模式：仅注册 load balancer
+            from recipe.agentic.proxyserver.ray_actor import start_lb_registry
+            start_lb_registry(load_balancer=load_balancer)
+            print(f"[agentic] standalone proxy: {standalone_proxy_url}")
+        else:
+            # 本地 proxy 模式：启动完整 HTTP proxy（Ray actor）
+            from recipe.agentic.proxyserver.ray_actor import start_proxy_server
+            proxy_url = start_proxy_server(
+                load_balancer=load_balancer,
+                model_path=config.actor_rollout_ref.model.path,
+                host=proxy_cfg.get("host", "0.0.0.0"),
+                port=proxy_cfg.get("port", 0),
+                tool_format=proxy_cfg.get("tool_format", "hermes"),
+            )
+            print(f"[agentic] proxy server started at {proxy_url}")
+```
+
+**步骤 2：在你的 YAML 配置中添加 proxy_server 和 remote_agent 配置。**
+
+```yaml
+# 追加到你现有的配置中
+proxy_server:
+  host: "0.0.0.0"
+  port: 0
+  tool_format: "hermes"
+  llm_proxy_ip: <你的外部 IP>
+
+remote_agent:
+  agent_import_path: "my_package.agents:MyAgent"
+  use_local_trial: true
+```
+
+**步骤 3：设置 agent loop 使用 `remote_agent`。**
+
+`RemoteAgentLoop` 在 verl 的 agent loop registry 中注册名为 `"remote_agent"`，在 rollout 配置中指定：
+
+```yaml
+actor_rollout_ref:
+  rollout:
+    agent:
+      default_agent_loop: remote_agent
+      agent_loop_config_path: null
+```
+
+## 9. 相关参考
 
 - 入口实现：[`agentic_main.py`](agentic_main.py)
 - 远程 agent loop：[`agent_loop/remote_agent_loop.py`](agent_loop/remote_agent_loop.py)

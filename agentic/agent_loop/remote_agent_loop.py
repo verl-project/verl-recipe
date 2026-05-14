@@ -50,15 +50,25 @@ from recipe.agentic.proxyserver.models import SessionRecord
 from recipe.agentic.serversdk.client import AgentRunClient
 
 logger = logging.getLogger(__name__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
-
+# Make sure diagnostic INFO/DEBUG lines surface in Ray worker stdout even
+# when the root logger is configured at WARNING level.
+if not logger.handlers:
+    _h = logging.StreamHandler()
+    _h.setFormatter(
+        logging.Formatter("%(levelname)s:%(asctime)s:%(name)s:%(message)s")
+    )
+    logger.addHandler(_h)
+logger.setLevel(logging.DEBUG)
+logger.propagate = True
+# Allow operator override; default to DEBUG while debugging local trial issues.
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "DEBUG"))
 # Late imports to avoid hard dependency on verl at module level.
 try:
     from verl.experimental.agent_loop.agent_loop import (AgentLoopBase,
                                                          AgentLoopOutput,
-                                                         AsyncLLMServerManager,
                                                          DictConfigWrap,
                                                          register)
+    from verl.workers.rollout.llm_server import LLMServerClient
 except ImportError:  # pragma: no cover
     from dataclasses import dataclass
     from dataclasses import field as dc_field
@@ -80,7 +90,7 @@ except ImportError:  # pragma: no cover
         metrics: Any = None
         extra_fields: dict = dc_field(default_factory=dict)
 
-    class AsyncLLMServerManager:  # type: ignore[no-redef]
+    class LLMServerClient:  # type: ignore[no-redef]
         pass
 
     class DictConfigWrap:  # type: ignore[no-redef]
@@ -118,7 +128,7 @@ class RemoteAgentLoop(AgentLoopBase):
     def __init__(
         self,
         trainer_config: DictConfigWrap,
-        server_manager: AsyncLLMServerManager,
+        server_manager: LLMServerClient,
         tokenizer: AutoTokenizer,
         processor: AutoProcessor,
         **kwargs,
@@ -154,6 +164,7 @@ class RemoteAgentLoop(AgentLoopBase):
 
         self.environment_overrides: dict[str, str] = dict(remote_cfg.environment_overrides)
         self.environment_kwargs: dict[str, Any] = dict(remote_cfg.environment_kwargs)
+        self.environment_import_path: str = remote_cfg.environment_import_path
         self.use_local_trial: bool = remote_cfg.use_local_trial
 
         # Standalone proxy mode
@@ -292,13 +303,31 @@ class RemoteAgentLoop(AgentLoopBase):
             ws_url += "/"
         ws_url += "ws/worker"
 
-        # Get vLLM server handles from the server manager
-        server_handles = self.server_manager.server_handles
+        # Get the verl GlobalRequestLoadBalancer handle from the in-cluster
+        # proxy named actor.  In the new verl API ``self.server_manager`` is
+        # an ``LLMServerClient`` that fronts a load balancer and no longer
+        # exposes ``server_handles`` directly.  The agentic recipe registers
+        # the LB handle on the driver via ``start_proxy_server()`` (Ray-actor
+        # mode) or ``start_lb_registry()`` (standalone-proxy mode), so we
+        # look it up by name here and let ``InferenceWorkerClient`` route
+        # requests through it.
+        import ray
+        from recipe.agentic.proxyserver.ray_actor import PROXY_ACTOR_NAME
+
+        try:
+            proxy_actor = ray.get_actor(PROXY_ACTOR_NAME)
+        except ValueError as exc:
+            raise RuntimeError(
+                "Cannot start inference worker: proxy named actor "
+                f"'{PROXY_ACTOR_NAME}' not found. Ensure the recipe calls "
+                "start_proxy_server() before training starts."
+            ) from exc
+        load_balancer = await proxy_actor.get_load_balancer.remote()
         model_path = self.config.actor_rollout_ref.model.path
 
         self._inference_worker = InferenceWorkerClient(
             proxy_ws_url=ws_url,
-            server_handles=server_handles,
+            load_balancer=load_balancer,
             model_path=model_path,
         )
         await self._inference_worker.start()
@@ -469,12 +498,46 @@ class RemoteAgentLoop(AgentLoopBase):
         env_kwargs: dict[str, Any],
     ):
         """Run the trial in-process via :class:`harbor.trial.trial.Trial`."""
+        import socket
+
         from harbor.models.trial.config import AgentConfig as TrialAgentConfig
         from harbor.models.trial.config import \
             EnvironmentConfig as TrialEnvironmentConfig
         from harbor.models.trial.config import TaskConfig, TrialConfig
         from harbor.trial.trial import Trial
         from recipe.agentic.serversdk.models import AgentRunResult
+
+        # ------------------------------------------------------------------
+        # Diagnostic logging — surface every input that may cause [Errno 2]
+        # or K8s ApiException(0) before the trial actually starts.
+        # ------------------------------------------------------------------
+        try:
+            host = socket.gethostname()
+        except Exception:
+            host = "<unknown>"
+
+        logger.info(
+            "[local_trial:%s] host=%s pid=%d HOME=%s cwd=%s",
+            trial_id, host, os.getpid(),
+            os.environ.get("HOME"), os.getcwd(),
+        )
+        logger.info(
+            "[local_trial:%s] task_path=%s exists=%s import_path=%s",
+            trial_id, task_path, os.path.isdir(task_path),
+            self.environment_import_path,
+        )
+        logger.info(
+            "[local_trial:%s] env_kwargs=%s", trial_id, env_kwargs,
+        )
+        kubeconfig = env_kwargs.get("kubeconfig") if isinstance(env_kwargs, dict) else None
+        if kubeconfig:
+            kc_path = os.path.expanduser(str(kubeconfig))
+            logger.info(
+                "[local_trial:%s] kubeconfig=%s expanded=%s exists=%s readable=%s",
+                trial_id, kubeconfig, kc_path,
+                os.path.exists(kc_path),
+                os.access(kc_path, os.R_OK) if os.path.exists(kc_path) else False,
+            )
 
         trial_config = TrialConfig(
             trial_name=trial_id,
@@ -487,14 +550,29 @@ class RemoteAgentLoop(AgentLoopBase):
                 env=env_overrides,
             ),
             environment=TrialEnvironmentConfig(
-                import_path="harbor.environments.harbor_alibaba_provider:KubernetesEnvironment",
+                import_path=self.environment_import_path,
                 env=env_overrides,
                 kwargs=env_kwargs,
             ),
         )
 
-        trial = await Trial.create(trial_config)
-        trial_result = await trial.run()
+        try:
+            trial = await Trial.create(trial_config)
+        except Exception as e:
+            logger.exception(
+                "[local_trial:%s] Trial.create failed: %s: %s",
+                trial_id, type(e).__name__, e,
+            )
+            raise
+
+        try:
+            trial_result = await trial.run()
+        except Exception as e:
+            logger.exception(
+                "[local_trial:%s] trial.run raised %s: %s",
+                trial_id, type(e).__name__, e,
+            )
+            raise
 
         if trial_result.exception_info is None:
             rewards = (
@@ -511,6 +589,20 @@ class RemoteAgentLoop(AgentLoopBase):
             )
 
         exc = trial_result.exception_info
+        # Dump full stack trace if available, so [Errno 2] becomes locatable.
+        tb_text = getattr(exc, "traceback", None) or getattr(exc, "stack_trace", None)
+        logger.error(
+            "[local_trial:%s] trial returned exception %s: %s\n%s",
+            trial_id, exc.exception_type, exc.exception_message,
+            tb_text or "<no traceback in exception_info>",
+        )
+        # Also write the full exception_info repr to make sure nothing is hidden.
+        try:
+            logger.debug(
+                "[local_trial:%s] full exception_info=%r", trial_id, exc,
+            )
+        except Exception:
+            pass
         return AgentRunResult(
             run_id=trial_id,
             status="error",

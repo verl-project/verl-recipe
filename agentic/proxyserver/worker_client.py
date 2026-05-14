@@ -19,7 +19,7 @@ Usage::
 
     client = InferenceWorkerClient(
         proxy_ws_url="ws://proxy-host:8080/ws/worker",
-        server_handles=server_handles,
+        load_balancer=load_balancer,
         model_path="Qwen/Qwen2.5-7B-Instruct",
     )
     await client.start()   # Connects and starts serving requests
@@ -51,7 +51,7 @@ class InferenceWorkerClient:
     def __init__(
         self,
         proxy_ws_url: str,
-        server_handles: list,
+        load_balancer: Any,
         model_path: str,
         tool_format: str | None = "hermes",
         tool_parser_factory=None,
@@ -64,7 +64,9 @@ class InferenceWorkerClient:
         Args:
             proxy_ws_url: WebSocket URL of the proxy, e.g.
                 ``ws://proxy-host:8080/ws/worker``.
-            server_handles: Ray actor handles of vLLM rollout servers.
+            load_balancer: Ray actor handle of verl's
+                ``GlobalRequestLoadBalancer``. Inference requests are routed
+                via ``acquire_server`` / ``release_server`` on this actor.
             model_path: HuggingFace model name/path for the tokenizer.
             tool_format: Tool-call format (e.g. ``"hermes"``).
             tool_parser_factory: Optional callable ``(format, tokenizer) -> tool_parser``.
@@ -76,7 +78,7 @@ class InferenceWorkerClient:
             heartbeat_interval: Seconds between heartbeat pings.
         """
         self.proxy_ws_url = proxy_ws_url
-        self.server_handles = server_handles
+        self.load_balancer = load_balancer
         self.model_path = model_path
         self.tool_format = tool_format
         self.tool_parser_factory = tool_parser_factory
@@ -131,7 +133,7 @@ class InferenceWorkerClient:
                     )
 
         self._provider = VLLMRayProvider(
-            server_handles=self.server_handles,
+            load_balancer=self.load_balancer,
             tokenizer=self._tokenizer,
             tool_parser=tool_parser,
         )

@@ -14,6 +14,12 @@ REMOTE_AGENT_TASK_PATH_TEMPLATE     Task path template with {instance_id} placeh
 REMOTE_AGENT_ENVIRONMENT_OVERRIDES  JSON-encoded dict of env vars forwarded to remote agent
 REMOTE_AGENT_ENVIRONMENT_KWARGS     JSON-encoded dict of kwargs forwarded to the environment
                                     constructor (e.g. namespace, registry, use_sandbox_claim …)
+REMOTE_AGENT_ENVIRONMENT_IMPORT_PATH
+                                    Python import path of the harbor environment class used
+                                    when ``use_local_trial`` is true. Format: ``module:Class``.
+                                    Default: ``harbor.environments.ack:ACKEnvironment``.
+                                    Use ``harbor.environments.docker.docker:DockerEnvironment``
+                                    for local Docker-based runs without a Kubernetes cluster.
 REMOTE_AGENT_USE_LOCAL_TRIAL        If "1" or "true", run Trial locally instead of via Harbor
                                     HTTP server (default: false)
 PROXY_SERVER_URL                    URL of a standalone proxy server (e.g. http://proxy:8080).
@@ -49,6 +55,7 @@ class RemoteAgentConfig:
 
     environment_overrides: dict[str, str] = field(default_factory=dict)
     environment_kwargs: dict[str, Any] = field(default_factory=dict)
+    environment_import_path: str = "harbor.environments.ack:ACKEnvironment"
     use_local_trial: bool = False
 
     # Standalone proxy mode
@@ -84,6 +91,8 @@ class RemoteAgentConfig:
             kwargs["environment_overrides"] = json.loads(v)
         if v := os.getenv("REMOTE_AGENT_ENVIRONMENT_KWARGS"):
             kwargs["environment_kwargs"] = json.loads(v)
+        if v := os.getenv("REMOTE_AGENT_ENVIRONMENT_IMPORT_PATH"):
+            kwargs["environment_import_path"] = v
         if v := os.getenv("REMOTE_AGENT_USE_LOCAL_TRIAL"):
             kwargs["use_local_trial"] = v.strip().lower() in ("1", "true", "yes")
         if v := os.getenv("PROXY_SERVER_URL"):

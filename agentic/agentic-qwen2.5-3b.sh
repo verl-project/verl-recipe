@@ -1,21 +1,19 @@
 #!/bin/bash
+#
+# Agentic recipe: SWE-Agent + Qwen2.5 示例
+#
+# 参数说明和环境配置详见 config/agentic_trainer.yaml
+#
 
-# PYTHONPATH 必须在 python 启动前生效，无法迁移到 yaml。
-# 其余原本通过环境变量设置的参数已迁移为 Hydra override，
-# 优先级：命令行 override > shell 环境变量 > yaml 默认值。
-PYTHONPATH="/home/verl/harbor/src/harbor:$PYTHONPATH" \
+set -euo pipefail
+
+MODEL_PATH="${MODEL_PATH:?请设置 MODEL_PATH，例如 /var/model/Qwen2.5-7B-Instruct}"
+
 python3 -m recipe.agentic.agentic_main \
-    proxy_server.llm_proxy_ip=10.0.30.11 \
-    remote_agent.agent_name=swe-agent \
-    remote_agent.model_name=openai/qwen-max \
-    remote_agent.use_local_trial=true \
-    remote_agent.task_path_template='/home/verl/dataset-tasks/{instance_id}' \
-    'remote_agent.agent_kwargs={total_cost_limit: 0, per_instance_cost_limit: 0}' \
+    actor_rollout_ref.model.path="${MODEL_PATH}" \
     algorithm.adv_estimator=grpo \
     algorithm.use_kl_in_reward=false \
     algorithm.kl_ctrl.kl_coef=0.0 \
-    data.train_files=['/var/model-dataset/princeton-nlp/data/train-00000-of-00001.1.parquet'] \
-    data.val_files=['/var/model-dataset/princeton-nlp/data/test1-00000-of-00001.10.parquet'] \
     data.return_raw_chat=true \
     data.train_batch_size=1 \
     data.max_prompt_length=4096 \
@@ -23,8 +21,6 @@ python3 -m recipe.agentic.agentic_main \
     data.filter_overlong_prompts=true \
     data.truncation=error \
     data.prompt_key=instance_id \
-    reward_model.use_reward_loop=true \
-    actor_rollout_ref.model.path=/var/model/Qwen2.5-7B-Instruct \
     actor_rollout_ref.model.use_remove_padding=true \
     actor_rollout_ref.model.enable_gradient_checkpointing=true \
     actor_rollout_ref.actor.use_kl_loss=false \
@@ -46,8 +42,9 @@ python3 -m recipe.agentic.agentic_main \
     actor_rollout_ref.rollout.multi_turn.max_user_turns=8 \
     actor_rollout_ref.rollout.multi_turn.max_assistant_turns=8 \
     actor_rollout_ref.rollout.multi_turn.format=hermes \
+    actor_rollout_ref.rollout.agent.num_workers=1 \
     actor_rollout_ref.rollout.agent.default_agent_loop=remote_agent \
-    actor_rollout_ref.rollout.agent.agent_loop_config_path=verl/experimental/agent_loop/swe-agent.yaml \
+    actor_rollout_ref.rollout.agent.agent_loop_config_path=recipe/agentic/remote-agent.yaml \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.9 \
     actor_rollout_ref.rollout.n=4 \
     actor_rollout_ref.rollout.val_kwargs.top_p=0.6 \
@@ -55,7 +52,7 @@ python3 -m recipe.agentic.agentic_main \
     actor_rollout_ref.rollout.val_kwargs.n=1 \
     trainer.logger=[\"console\"] \
     trainer.project_name=remote-agent \
-    trainer.experiment_name=qwen2.5-3b \
+    trainer.experiment_name=qwen2.5-7b \
     trainer.n_gpus_per_node=8 \
     trainer.val_before_train=true \
     trainer.log_val_generations=50 \

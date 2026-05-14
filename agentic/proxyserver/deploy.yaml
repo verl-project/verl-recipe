@@ -60,9 +60,12 @@ spec:
         app.kubernetes.io/component: proxy
     spec:
       terminationGracePeriodSeconds: 30
+      imagePullSecrets: 
+      - name: regcred-hangzhou
+      - name: regcred-ap-southeast
       containers:
         - name: proxy
-          image: llm-proxy-server:latest
+          image: registry-cn-hangzhou.ack.aliyuncs.com/dev/verl-proxy-server:2.47.1.2e9c8fb5
           imagePullPolicy: IfNotPresent
           env:
             - name: PROXY_HOST
