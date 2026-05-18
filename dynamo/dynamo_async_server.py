@@ -19,13 +19,14 @@ Per dynamo_design_0507.md, the actor in this design:
   1. Reserves no GPUs itself; trainer workers in colocated mode already claim
      them. We only forward CUDA_VISIBLE_DEVICES into dynamo.vllm subprocesses.
   2. Spawns + watchdogs etcd / nats-server / dynamo.vllm × N / dynamo.frontend.
-  3. Never holds an AsyncLLM. generate() is unsupported on the actor; the
-     trainer agent loop talks to dynamo.frontend over HTTP.
+  3. Never holds an AsyncLLM. The actor's generate() method is only an
+     HTTP client shim to dynamo.frontend; it does not generate locally.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import shutil
@@ -35,6 +36,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from dataclasses import dataclass
 from typing import Any, Optional
 
 import ray
@@ -82,6 +84,16 @@ _NATS_READY_TIMEOUT_S = 30.0
 _WATCHDOG_INTERVAL_S = 5.0
 
 
+@dataclass(frozen=True)
+class _DynamoWorkerSpec:
+    """One dynamo.vllm subprocess to launch on this Ray actor."""
+
+    replica_rank: int
+    cuda_visible_devices: str
+    rank_offset: int
+    label: str
+
+
 # --------------------------------------------------------------------------- #
 # DynamoHttpServer
 # --------------------------------------------------------------------------- #
@@ -97,8 +109,8 @@ class DynamoHttpServer:
                          → _start_frontend → _healthcheck_frontend
         node N (slave) : just _start_vllm_workers, pointing to master etcd/nats
       generate / wake_up / sleep / collective_rpc / ... :
-        v1 — most are no-op or NotImplementedError
-        v2 — collective_rpc bridges to per-subprocess control sidecar
+        generate goes through master dynamo.frontend HTTP
+        collective_rpc bridges to per-subprocess control sidecar
       shutdown : SIGTERM each entry of _SUBPROCESS_REGISTRY in order.
     """
 
@@ -113,6 +125,8 @@ class DynamoHttpServer:
         gpus_per_node: int,
         nnodes: int,
         cuda_visible_devices: str,
+        worker_specs: Optional[list[dict[str, Any]]] = None,
+        expected_workers: Optional[int] = None,
     ):
         # Match vLLMHttpServer's __init__ contract so vLLMReplica.launch_servers
         # can spin us up unchanged. We do NOT instantiate vLLM AsyncLLM.
@@ -132,6 +146,12 @@ class DynamoHttpServer:
         self.gpus_per_node = gpus_per_node
         self.nnodes = nnodes
         self._cuda_visible_devices = cuda_visible_devices
+        self._worker_specs: Optional[list[_DynamoWorkerSpec]] = (
+            [_DynamoWorkerSpec(**spec) for spec in worker_specs]
+            if worker_specs is not None
+            else None
+        )
+        self._expected_workers = expected_workers
 
         # Set by ServerAdapter.update_weights to tag generations.
         self.global_steps: Optional[int] = None
@@ -168,6 +188,7 @@ class DynamoHttpServer:
         self._etcd_data_dir: Optional[str] = None
         self._frontend_log_fp = None
         self._vllm_log_fps: list = []
+        self._vllm_log_paths: list[str] = []
 
         # Per-subprocess control sidecar endpoints (filled in
         # _start_vllm_workers); used by collective_rpc bridge in v2.
@@ -264,6 +285,7 @@ class DynamoHttpServer:
         master_address: Optional[str] = None,
         master_port: Optional[int] = None,
         dp_rpc_port: Optional[int] = None,
+        start_healthcheck: bool = True,
     ):
         """Start subprocesses on this node.
 
@@ -272,7 +294,7 @@ class DynamoHttpServer:
         nats_port (see get_master_address).
         """
         if self.node_rank == 0:
-            await self._launch_master()
+            await self._launch_master(start_healthcheck=start_healthcheck)
         else:
             assert master_address and master_port and dp_rpc_port, (
                 f"slave node_rank={self.node_rank} requires master_address/"
@@ -286,7 +308,7 @@ class DynamoHttpServer:
 
         self._watchdog_task = asyncio.create_task(self._watchdog_loop())
 
-    async def _launch_master(self):
+    async def _launch_master(self, start_healthcheck: bool = True):
         """Master: etcd + nats + vllm workers + frontend + healthcheck."""
         # Reserve ports up-front so we know all of them before starting.
         self._etcd_port = self._dynamo_cfg().get("etcd_port") or get_free_port(self._server_address)[0]
@@ -301,11 +323,10 @@ class DynamoHttpServer:
         self._start_vllm_workers()
         self._start_frontend()
 
-        expected_workers = self._compute_expected_workers()
-        await self._healthcheck_frontend(expected_workers=expected_workers)
-
         # Expose frontend to trainer.
         self._server_port = self._frontend_port
+        if start_healthcheck:
+            await self.wait_frontend_ready()
         logger.info(
             "[DynamoHttpServer] master ready: frontend=http://%s:%s",
             self._server_address,
@@ -328,9 +349,19 @@ class DynamoHttpServer:
         self._server_port = port
 
     def _compute_expected_workers(self) -> int:
+        if self._expected_workers is not None:
+            return self._expected_workers
         tp = self.config.tensor_model_parallel_size
         per_node = max(1, self.gpus_per_node // tp)
         return per_node * self.nnodes
+
+    async def wait_frontend_ready(self, expected_workers: Optional[int] = None):
+        """Wait for the frontend to see all Dynamo workers for this replica."""
+        if self.node_rank != 0:
+            return
+        await self._healthcheck_frontend(
+            expected_workers=expected_workers or self._compute_expected_workers()
+        )
 
     # ------------------------------------------------------------------ #
     # subprocess starters
@@ -425,26 +456,32 @@ class DynamoHttpServer:
         )
         self._served_model_name = served_model_name
 
-        for shard_idx_local in range(n_local_shards):
-            worker_cvd = ",".join(cvd_list[shard_idx_local * tp : (shard_idx_local + 1) * tp])
+        worker_specs = self._worker_specs
+        if worker_specs is None:
+            worker_specs = [
+                _DynamoWorkerSpec(
+                    replica_rank=self.replica_rank,
+                    cuda_visible_devices=",".join(cvd_list[shard_idx_local * tp : (shard_idx_local + 1) * tp]),
+                    rank_offset=shard_idx_local * tp,
+                    label=f"replica{self.replica_rank}_shard{shard_idx_local}",
+                )
+                for shard_idx_local in range(n_local_shards)
+            ]
+
+        for spec_idx, spec in enumerate(worker_specs):
+            worker_cvd = spec.cuda_visible_devices
             control_port = get_free_port(self._server_address)[0]
             control_endpoint = f"tcp://{self._server_address}:{control_port}"
             self._control_endpoints.append(control_endpoint)
 
-            # dynamo defaults DYN_VLLM_KV_EVENT_PORT to 20080 — collides
-            # across DP shards (and across replicas sharing a node).
-            # Must fit in i16 (dynamo runtime parses some ports as i16)
-            # so we draw deterministically from a per-job slice
-            # [20080..32767), stepped by replica_rank * 64 + shard.
-            kv_event_port = 20080 + (self.replica_rank * 64 + shard_idx_local) % (32767 - 20080)
-            assert kv_event_port < 32768
+            kv_event_port = get_free_port(self._server_address)[0]
+            kv_events_config_json = self._build_kv_events_config_json(kv_event_port)
 
             env = os.environ.copy()
             env.update(self._dynamo_env_vars())
             env["CUDA_VISIBLE_DEVICES"] = worker_cvd
-            env[_RANK_OFFSET_ENV] = str(shard_idx_local * tp)
-            env[_REPLICA_RANK_ENV] = str(self.replica_rank)
-            env["DYN_VLLM_KV_EVENT_PORT"] = str(kv_event_port)
+            env[_RANK_OFFSET_ENV] = str(spec.rank_offset)
+            env[_REPLICA_RANK_ENV] = str(spec.replica_rank)
 
             # Ensure subprocess can ``import recipe.dynamo._dynamo_vllm_with_control``
             # even when ray runtime_env doesn't propagate the driver's PYTHONPATH.
@@ -471,17 +508,24 @@ class DynamoHttpServer:
             env["VLLM_SKIP_P2P_CHECK"] = "1"
             env["VLLM_NO_USAGE_STATS"] = "1"
 
-            cmd = self._build_vllm_cmd(served_model_name, tp)
+            cmd = self._build_vllm_cmd(
+                served_model_name,
+                tp,
+                kv_events_config_json=kv_events_config_json,
+            )
 
-            stdout_path = os.path.join(log_dir, f"vllm_shard{shard_idx_local}.log")
+            stdout_path = os.path.join(log_dir, f"{spec.label}.log")
             stdout_fp = open(stdout_path, "w")
             self._vllm_log_fps.append(stdout_fp)
+            self._vllm_log_paths.append(stdout_path)
 
             logger.info(
                 "[DynamoHttpServer] starting dynamo.vllm shard %s/%s "
-                "(GPUs=%s, control=%s, log=%s): %s",
-                shard_idx_local,
-                n_local_shards,
+                "(replica=%s, rank_offset=%s, GPUs=%s, control=%s, log=%s): %s",
+                spec_idx,
+                len(worker_specs),
+                spec.replica_rank,
+                spec.rank_offset,
                 worker_cvd,
                 control_endpoint,
                 stdout_path,
@@ -495,7 +539,23 @@ class DynamoHttpServer:
             )
             self._vllm_processes.append(proc)
 
-    def _build_vllm_cmd(self, served_model_name: str, tp: int) -> list[str]:
+    @staticmethod
+    def _build_kv_events_config_json(kv_event_port: int) -> str:
+        return json.dumps(
+            {
+                "publisher": "zmq",
+                "topic": "kv-events",
+                "endpoint": f"tcp://*:{kv_event_port}",
+                "enable_kv_cache_events": True,
+            }
+        )
+
+    def _build_vllm_cmd(
+        self,
+        served_model_name: str,
+        tp: int,
+        kv_events_config_json: str,
+    ) -> list[str]:
         """Construct the dynamo.vllm CLI for one DP shard.
 
         We launch our own thin entrypoint instead of plain ``-m dynamo.vllm``
@@ -540,6 +600,7 @@ class DynamoHttpServer:
         ]
         # Distributed executor: MP for single-node TP (no Ray inside subprocess).
         cmd += ["--distributed-executor-backend", "mp"]
+        cmd += ["--kv-events-config", kv_events_config_json]
         # Pass through extra args from rollout.engine_kwargs.dynamo.extra_args.
         extra = self._dynamo_cfg().get("extra_args") or []
         if isinstance(extra, list):
@@ -617,8 +678,11 @@ class DynamoHttpServer:
             if isinstance(proc, list):
                 for i, p in enumerate(proc):
                     if p.poll() is not None:
+                        log_hint = ""
+                        if name == "vllm_workers" and i < len(self._vllm_log_paths):
+                            log_hint = f" (log={self._vllm_log_paths[i]})"
                         raise RuntimeError(
-                            f"dynamo {name}[{i}] exited rc={p.returncode}"
+                            f"dynamo {name}[{i}] exited rc={p.returncode}{log_hint}"
                         )
             else:
                 if proc.poll() is not None:
@@ -648,13 +712,79 @@ class DynamoHttpServer:
         video_data=None,
         priority: int = 0,
     ):
-        """Dispatch generation to the local dynamo.vllm subprocess via the
-        control sidecar. Bypasses dynamo's HTTP frontend (which was observed
-        to hang in ai-dynamo 1.0.2 + vllm 0.17 when called from the verl
-        agent loop). Trades KV-router routing for a working path; OK for
-        v2 training smoke."""
+        """Dispatch generation through the Dynamo frontend HTTP router.
+
+        the actor manages the
+        subprocess stack, while token generation goes through the OpenAI-style
+        frontend so Dynamo can route across registered workers.
+        """
         from verl.workers.rollout.replica import TokenOutput
 
+        if image_data is not None or video_data is not None:
+            return TokenOutput(
+                token_ids=[],
+                stop_reason="error: Dynamo frontend generate does not support multimodal inputs",
+                extra_fields={"global_steps": self.global_steps or 0},
+            )
+
+        try:
+            payload = self._build_frontend_completion_payload(prompt_ids, sampling_params)
+            resp = await asyncio.to_thread(
+                requests.post,
+                self._frontend_completions_url(),
+                json=payload,
+                timeout=self._frontend_request_timeout_s(),
+            )
+            if resp.status_code != 200:
+                return TokenOutput(
+                    token_ids=[],
+                    stop_reason=f"error: frontend HTTP {resp.status_code}: {resp.text[:500]}",
+                    extra_fields={"global_steps": self.global_steps or 0},
+                )
+            return self._completion_response_to_token_output(resp.json())
+        except requests.RequestException as e:
+            logger.exception("[generate] frontend request failed (request_id=%s)", request_id)
+            return TokenOutput(
+                token_ids=[],
+                stop_reason=f"error: {type(e).__name__}: {e}",
+                extra_fields={"global_steps": self.global_steps or 0},
+            )
+        except Exception as e:
+            logger.exception("[generate] frontend dispatch failed (request_id=%s)", request_id)
+            return TokenOutput(
+                token_ids=[],
+                stop_reason=f"error: {type(e).__name__}: {e}",
+                extra_fields={"global_steps": self.global_steps or 0},
+            )
+
+    def _frontend_completions_url(self) -> str:
+        assert self._server_port is not None, "frontend server not ready"
+        host = (
+            f"[{self._server_address}]"
+            if is_valid_ipv6_address(self._server_address)
+            else self._server_address
+        )
+        return f"http://{host}:{self._server_port}/v1/completions"
+
+    def _frontend_request_timeout_s(self) -> float:
+        value = self._dynamo_cfg().get("request_timeout_s", 600)
+        try:
+            timeout = float(value)
+        except (TypeError, ValueError) as e:
+            raise ValueError(
+                f"rollout.engine_kwargs.dynamo.request_timeout_s must be a positive number, got {value!r}"
+            ) from e
+        if timeout <= 0:
+            raise ValueError(
+                f"rollout.engine_kwargs.dynamo.request_timeout_s must be positive, got {value!r}"
+            )
+        return timeout
+
+    def _build_frontend_completion_payload(self, prompt_ids, sampling_params) -> dict[str, Any]:
+        tokenizer = getattr(self.model_config, "tokenizer", None)
+        if tokenizer is None:
+            raise RuntimeError("model_config.tokenizer is required for Dynamo frontend generation")
+        model = self._served_model_name or self.model_config.local_path
         sp = dict(sampling_params)
         max_tokens = sp.pop("max_tokens", None) or sp.pop("max_new_tokens", None)
         if max_tokens is None:
@@ -665,78 +795,36 @@ class DynamoHttpServer:
                     self.config.prompt_length + self.config.response_length - len(prompt_ids),
                 ),
             )
-        sp["max_tokens"] = int(max_tokens)
-
-        # Drop keys we don't want forwarded to vLLM SamplingParams.
-        sp.pop("logprobs", None)  # vLLM uses int, verl can pass bool — easier to drop
-
-        if not self._control_endpoints:
-            logger.error("[generate] no control sidecar; cannot run generate")
-            return TokenOutput(
-                token_ids=[],
-                stop_reason="error: no control sidecar",
-                extra_fields={"global_steps": self.global_steps or 0},
-            )
-
-        # Pick a sidecar — for a single replica with single shard there is
-        # only one. With multiple shards we'd want load balancing here, but
-        # v2 smoke uses 1 replica × 1 shard.
-        control_endpoint = self._control_endpoints[0]
-
-        # Detokenize prompt_ids → text. vLLM 0.17 + dynamo intercepted
-        # generate hangs on TokensPrompt; TextPrompt goes through a separate
-        # path that works. Lossy at multi-turn chat boundaries; acceptable
-        # for v2 smoke.
-        tokenizer = getattr(self.model_config, "tokenizer", None)
-        prompt_text = None
-        if tokenizer is not None:
-            prompt_text = tokenizer.decode(list(prompt_ids), skip_special_tokens=False)
-
-        request = {
-            "kind": "generate_direct",
-            "kwargs": {
-                "token_ids": list(prompt_ids),
-                "prompt_text": prompt_text,
-                "sampling_params": sp,
-                "request_id": str(request_id),
-            },
-            "timeout": 600,
+        payload: dict[str, Any] = {
+            "model": model,
+            "prompt": tokenizer.decode(list(prompt_ids), skip_special_tokens=False),
+            "max_tokens": int(max_tokens),
+            "stream": False,
         }
+        # vLLM's OpenAI server does not accept verl's boolean logprobs shape.
+        sp.pop("logprobs", None)
+        sp.pop("prompt_logprobs", None)
+        for key, value in sp.items():
+            if value is not None:
+                payload[key] = value
+        return payload
 
-        import pickle
+    def _completion_response_to_token_output(self, data: dict[str, Any]):
+        from verl.workers.rollout.replica import TokenOutput
 
-        import zmq
-        import zmq.asyncio
-
-        ctx = zmq.asyncio.Context.instance()
-        sock = ctx.socket(zmq.REQ)
-        sock.setsockopt(zmq.LINGER, 0)
-        try:
-            sock.connect(control_endpoint)
-            await sock.send(pickle.dumps(request))
-            reply_bytes = await asyncio.wait_for(sock.recv(), timeout=600)
-        except Exception as e:
-            logger.exception("[generate] sidecar dispatch failed (request_id=%s)", request_id)
-            return TokenOutput(
-                token_ids=[],
-                stop_reason=f"error: {type(e).__name__}: {e}",
-                extra_fields={"global_steps": self.global_steps or 0},
-            )
-        finally:
-            sock.close()
-
-        reply = pickle.loads(reply_bytes)
-        if not reply.get("ok"):
-            logger.warning("[generate] sidecar returned error: %s", reply.get("error"))
-            return TokenOutput(
-                token_ids=[],
-                stop_reason=f"error: {reply.get('error', 'unknown')}",
-                extra_fields={"global_steps": self.global_steps or 0},
-            )
-
-        result = reply.get("result") or {}
-        token_ids = list(result.get("token_ids") or [])
-        finish_reason = result.get("finish_reason")
+        choices = data.get("choices") or []
+        if not choices:
+            raise RuntimeError(f"frontend response has no choices: {data}")
+        choice = choices[0]
+        if "text" in choice:
+            text = choice.get("text") or ""
+        else:
+            text = ((choice.get("message") or {}).get("content")) or ""
+        tokenizer = getattr(self.model_config, "tokenizer", None)
+        if tokenizer is None:
+            raise RuntimeError("model_config.tokenizer is required for Dynamo frontend generation")
+        token_ids = list(tokenizer.encode(text, add_special_tokens=False))
+        finish_reason = choice.get("finish_reason")
         if finish_reason == "stop" or finish_reason == "length":
             stop_reason = "completed"
         elif finish_reason == "abort":
@@ -972,6 +1060,7 @@ class DynamoHttpServer:
         state["_watchdog_task"] = None
         state["_frontend_log_fp"] = None
         state["_vllm_log_fps"] = []
+        state["_vllm_log_paths"] = []
         return state
 
     def __setstate__(self, state):
@@ -1019,15 +1108,23 @@ class DynamoReplica(RolloutReplica):
     def _get_server_name_prefix(self) -> str:
         return "dynamo_"
 
-    async def launch_servers(self):
-        """Same shape as vLLMReplica.launch_servers, with master/slave split."""
+    async def init_hybrid_worker_pool(self, worker_group):
+        """Initialize Dynamo as worker pool for all rollout GPUs."""
+        self.rollout_mode = RolloutMode.HYBRID
+        self.workers = list(worker_group.workers)
+
+        assert len(self.workers) % self.world_size == 0, (
+            f"worker_group size {len(self.workers)} must be divisible by "
+            f"dynamo logical replica world_size {self.world_size}"
+        )
+        num_logical_replicas = len(self.workers) // self.world_size
+        await self._launch_shared_worker_pool(num_logical_replicas=num_logical_replicas)
+
+    async def _launch_shared_worker_pool(self, num_logical_replicas: int):
+        """Launch a single frontend backed by all logical replica workers."""
         from verl.utils.device import get_resource_name
 
-        assert len(self.workers) == self.world_size, (
-            f"worker number {len(self.workers)} != world size {self.world_size}"
-        )
-
-        # gather (node_id, GPU id) per worker
+        tp = self.config.tensor_model_parallel_size
         worker_infos = await asyncio.gather(
             *[
                 worker.__ray_call__.remote(
@@ -1039,18 +1136,59 @@ class DynamoReplica(RolloutReplica):
                 for worker in self.workers
             ]
         )
-        worker_node_ids = [info[0] for info in worker_infos]
-        worker_cvds = [info[1] for info in worker_infos]
 
-        nnodes = self.nnodes
-        gppn = self.gpus_per_replica_node
+        node_order: list[str] = []
+        node_to_workers: dict[str, list[ActorHandle]] = {}
+        node_to_specs: dict[str, list[dict[str, Any]]] = {}
+
+        def ensure_node(node_id: str):
+            if node_id not in node_to_specs:
+                node_order.append(node_id)
+                node_to_workers[node_id] = []
+                node_to_specs[node_id] = []
+
+        for logical_replica_rank in range(num_logical_replicas):
+            start = logical_replica_rank * self.world_size
+            end = start + self.world_size
+            replica_infos = worker_infos[start:end]
+            replica_workers = self.workers[start:end]
+            per_node_gpu_ids: dict[str, list[str]] = {}
+            per_node_workers: dict[str, list[ActorHandle]] = {}
+            for (node_id, gpu_id), worker in zip(replica_infos, replica_workers, strict=True):
+                ensure_node(node_id)
+                per_node_gpu_ids.setdefault(node_id, []).append(str(gpu_id))
+                per_node_workers.setdefault(node_id, []).append(worker)
+
+            for node_id, gpu_ids in per_node_gpu_ids.items():
+                node_to_workers[node_id].extend(per_node_workers[node_id])
+                assert len(gpu_ids) % tp == 0, (
+                    f"logical_replica={logical_replica_rank} node={node_id} has "
+                    f"{len(gpu_ids)} GPUs, not divisible by TP={tp}: {gpu_ids}"
+                )
+                for shard_idx in range(len(gpu_ids) // tp):
+                    shard_gpus = gpu_ids[shard_idx * tp : (shard_idx + 1) * tp]
+                    node_to_specs[node_id].append(
+                        {
+                            "replica_rank": logical_replica_rank,
+                            "cuda_visible_devices": ",".join(shard_gpus),
+                            "rank_offset": shard_idx * tp,
+                            "label": f"replica{logical_replica_rank}_shard{shard_idx}",
+                        }
+                    )
+
+        expected_workers = sum(len(specs) for specs in node_to_specs.values())
         prefix = self._get_server_name_prefix()
         suffix = self.name_suffix
+        self.servers = []
 
-        for node_rank in range(nnodes):
-            node_workers = self.workers[node_rank * gppn : (node_rank + 1) * gppn]
-            node_cvd = ",".join(worker_cvds[node_rank * gppn : (node_rank + 1) * gppn])
-            node_id = worker_node_ids[node_rank * gppn]
+        for node_rank, node_id in enumerate(node_order):
+            worker_specs = node_to_specs[node_id]
+            node_cvd = ",".join(
+                gpu
+                for spec in worker_specs
+                for gpu in spec["cuda_visible_devices"].split(",")
+                if gpu
+            )
             if self.is_reward_model:
                 name = f"{prefix}server_reward_{self.replica_rank}_{node_rank}{suffix}"
             elif self.is_teacher_model:
@@ -1063,9 +1201,6 @@ class DynamoReplica(RolloutReplica):
                 "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
                 "NCCL_CUMEM_ENABLE": "0",
             }
-            # Forward optional verl-side knobs + PYTHONPATH so the dynamo.vllm
-            # subprocess can ``import recipe.dynamo`` on every node, including
-            # slave nodes where ray actors don't inherit the driver's env.
             for env_key in ("VERL_DYNAMO_LOG_DIR", "PATH", "PYTHONPATH"):
                 if os.environ.get(env_key):
                     actor_env_vars[env_key] = os.environ[env_key]
@@ -1082,38 +1217,40 @@ class DynamoReplica(RolloutReplica):
                 config=self.config,
                 model_config=self.model_config,
                 rollout_mode=self.rollout_mode,
-                workers=node_workers,
+                workers=node_to_workers[node_id],
                 replica_rank=self.replica_rank,
                 node_rank=node_rank,
-                gpus_per_node=gppn,
-                nnodes=nnodes,
+                gpus_per_node=self.gpus_per_node,
+                nnodes=len(node_order),
                 cuda_visible_devices=node_cvd,
+                worker_specs=worker_specs,
+                expected_workers=expected_workers,
             )
             self.servers.append(server)
 
-        # 1) bring up master so it can publish etcd/nats/frontend.
         master = self.servers[0]
-        await master.launch_server.remote()
+        await master.launch_server.remote(start_healthcheck=False)
         master_host, master_etcd_port, master_nats_port = await master.get_master_address.remote()
         fe_host, fe_port = await master.get_server_address.remote()
 
-        # 2) bring up slaves (in parallel) using master's etcd/nats.
-        slave_launches = []
-        for server in self.servers[1:]:
-            slave_launches.append(
-                server.launch_server.remote(
-                    master_address=master_host,
-                    master_port=master_etcd_port,
-                    dp_rpc_port=master_nats_port,
-                )
+        slave_launches = [
+            server.launch_server.remote(
+                master_address=master_host,
+                master_port=master_etcd_port,
+                dp_rpc_port=master_nats_port,
             )
-            # And tell them the master frontend so get_server_address answers.
-            slave_launches.append(server.set_master_frontend.remote(fe_host, fe_port))
+            for server in self.servers[1:]
+        ]
         if slave_launches:
             await asyncio.gather(*slave_launches)
+            await asyncio.gather(
+                *[
+                    server.set_master_frontend.remote(fe_host, fe_port)
+                    for server in self.servers[1:]
+                ]
+            )
 
-        # 3) advertise the master frontend to the trainer. All ranks talk to
-        # the same URL regardless of which node they're on.
+        await master.wait_frontend_ready.remote(expected_workers=expected_workers)
         self._server_handle = master
         self._server_address = (
             f"[{fe_host}]:{fe_port}"
@@ -1121,8 +1258,20 @@ class DynamoReplica(RolloutReplica):
             else f"{fe_host}:{fe_port}"
         )
         logger.info(
-            "[DynamoReplica %s] ready: server_address=%s",
-            self.replica_rank, self._server_address,
+            "[DynamoReplica pool] ready: server_address=%s logical_replicas=%s workers=%s nodes=%s",
+            self._server_address,
+            num_logical_replicas,
+            expected_workers,
+            len(node_order),
+        )
+
+    async def launch_servers(self):
+        """Dynamo uses a NeMo-style worker-pool entrypoint instead."""
+        raise RuntimeError(
+            "DynamoReplica.launch_servers() is disabled because the dynamo "
+            "backend uses a single shared worker pool. Call "
+            "DynamoReplica.init_hybrid_worker_pool(worker_group) via "
+            "AgentLoopManager instead."
         )
 
 

@@ -21,7 +21,9 @@ rather than ``vllm_server_*``.
 """
 
 from collections.abc import Generator
+from typing import Any, Optional
 
+import ray
 import torch
 
 from verl.workers.rollout.vllm_rollout.vllm_rollout import (
@@ -39,6 +41,47 @@ class ServerAdapter(_VllmServerAdapter):
 
     def _get_server_name_prefix(self) -> str:
         return "dynamo_"
+
+    def _get_control_actor_name(self) -> str:
+        """Return the shared Dynamo server actor name for control RPCs."""
+        dynamo_cfg = (self.config.engine_kwargs or {}).get("dynamo", {}) or {}
+        shared_replica_rank = int(dynamo_cfg.get("shared_pool_replica_rank", 0))
+        return f"{self._get_server_name_prefix()}server_{shared_replica_rank}_{self.node_rank}"
+
+    async def _execute_method(
+        self,
+        method: str,
+        non_block: bool = False,
+        timeout: Optional[float] = None,
+        args: tuple = (),
+        kwargs: Optional[dict] = None,
+    ) -> Any:
+        """Execute control RPCs against the shared Dynamo pool actor.
+
+        Native vLLM has one named server actor per rollout replica. All logical rollout
+        replicas on a node share ``dynamo_server_0_<node_rank>``.
+        """
+        if self.rollout_rank != 0:
+            return None
+
+        if self.server_handle is None:
+            self.server_handle = ray.get_actor(self._get_control_actor_name())
+
+        future = self.server_handle.collective_rpc.remote(
+            method,
+            timeout=timeout,
+            args=args,
+            kwargs=kwargs,
+        )
+        return future if non_block else await future
+
+    async def resume(self, tags: list[str]):
+        """Dynamo no-refit mode keeps rollout workers loaded; no wake_up needed."""
+        return None
+
+    async def release(self):
+        """Dynamo no-refit mode does not sleep rollout workers between updates."""
+        return None
 
     @torch.no_grad()
     async def update_weights(
