@@ -14,7 +14,6 @@
 
 import argparse
 import random
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import NamedTuple
 
 import torch
@@ -26,8 +25,8 @@ from vllm.v1.engine.logprobs import LogprobsProcessor
 
 
 def _update_prompt_logprobs(
-  self,
-  prompt_logprobs_tensors,
+    self,
+    prompt_logprobs_tensors,
 ) -> None:
     """Update with prompt logprobs from EngineCore.
 
