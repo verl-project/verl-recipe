@@ -105,6 +105,7 @@ class OnPolicyDistillTrainer(RayPPOTrainer):
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
         assert not self.hybrid_engine
 
+        self.use_critic = False
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
         self.ray_worker_group_cls = ray_worker_group_cls
