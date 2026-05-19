@@ -89,9 +89,16 @@ class CustomRLHFDataset(RLHFDataset):
 
     def _read_files_and_tokenize(self):
         dataframes = []
+        remaining_samples = self.max_samples if self.max_samples and self.max_samples > 0 else None
         for parquet_file in self.data_files:
             # read parquet files and cache
             dataframe = datasets.load_dataset(parquet_file)["train"]
+            if remaining_samples is not None:
+                if remaining_samples <= 0:
+                    break
+                select_count = min(remaining_samples, len(dataframe))
+                dataframe = dataframe.select(range(select_count))
+                remaining_samples -= select_count
             data_source = "/".join(parquet_file.split("/")[-2:])
             if data_source in ["Maxwell-Jia/AIME_2024", "yentinglin/aime_2025", "retool_dataset/aime_2025"]:
                 dataframe = dataframe.map(
@@ -100,6 +107,8 @@ class CustomRLHFDataset(RLHFDataset):
             else:
                 dataframe = dataframe.map(_map_fn_default)
             dataframes.append(dataframe)
+        if not dataframes:
+            raise ValueError(f"No samples loaded from {self.data_files} with max_samples={self.max_samples}")
         self.dataframe: datasets.Dataset = datasets.concatenate_datasets(dataframes)
 
         print(f"dataset len: {len(self.dataframe)}")

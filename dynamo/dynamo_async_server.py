@@ -189,6 +189,9 @@ class DynamoHttpServer:
         self._frontend_log_fp = None
         self._vllm_log_fps: list = []
         self._vllm_log_paths: list[str] = []
+        self._allocated_tcp_ports: set[int] = set()
+        self._direct_generate_idx: int = 0
+        self._direct_generate_lock = asyncio.Lock()
 
         # Per-subprocess control sidecar endpoints (filled in
         # _start_vllm_workers); used by collective_rpc bridge in v2.
@@ -218,6 +221,10 @@ class DynamoHttpServer:
     def _dynamo_cfg(self) -> dict:
         """Return ``rollout.engine_kwargs.dynamo`` dict (or empty)."""
         return (self.config.engine_kwargs or {}).get("dynamo", {}) or {}
+
+    def _skip_refit(self) -> bool:
+        checkpoint_engine = getattr(self.config, "checkpoint_engine", None)
+        return bool(getattr(checkpoint_engine, "skip_refit", False))
 
     def _dynamo_env_vars(self) -> dict[str, str]:
         """Common env vars for all dynamo subprocesses on this node.
@@ -311,12 +318,11 @@ class DynamoHttpServer:
     async def _launch_master(self, start_healthcheck: bool = True):
         """Master: etcd + nats + vllm workers + frontend + healthcheck."""
         # Reserve ports up-front so we know all of them before starting.
-        self._etcd_port = self._dynamo_cfg().get("etcd_port") or get_free_port(self._server_address)[0]
-        self._etcd_peer_port = self._dynamo_cfg().get("etcd_peer_port") or get_free_port(self._server_address)[0]
-        self._nats_port = self._dynamo_cfg().get("nats_port") or get_free_port(self._server_address)[0]
+        self._etcd_port = self._configured_or_allocated_port("etcd_port")
+        self._etcd_peer_port = self._configured_or_allocated_port("etcd_peer_port")
+        self._nats_port = self._configured_or_allocated_port("nats_port")
         # Frontend port: 0 = auto, else honor config.
-        cfg_fe = self._dynamo_cfg().get("frontend_http_port", 0) or 0
-        self._frontend_port = cfg_fe if cfg_fe else get_free_port(self._server_address)[0]
+        self._frontend_port = self._configured_or_allocated_port("frontend_http_port")
 
         self._start_etcd()
         self._start_nats()
@@ -470,11 +476,11 @@ class DynamoHttpServer:
 
         for spec_idx, spec in enumerate(worker_specs):
             worker_cvd = spec.cuda_visible_devices
-            control_port = get_free_port(self._server_address)[0]
+            control_port = self._allocate_tcp_port(bind_wildcard=False)
             control_endpoint = f"tcp://{self._server_address}:{control_port}"
             self._control_endpoints.append(control_endpoint)
 
-            kv_event_port = get_free_port(self._server_address)[0]
+            kv_event_port = self._allocate_tcp_port(bind_wildcard=True)
             kv_events_config_json = self._build_kv_events_config_json(kv_event_port)
 
             env = os.environ.copy()
@@ -538,6 +544,32 @@ class DynamoHttpServer:
                 stderr=subprocess.STDOUT,
             )
             self._vllm_processes.append(proc)
+
+    def _allocate_tcp_port(self, bind_wildcard: bool = False) -> int:
+        """Allocate a port for a subprocess and avoid duplicates in this actor.
+
+        vLLM KV event publishers bind ``tcp://*:<port>``. Checking only the
+        node IP can miss conflicts with wildcard listeners, so those ports are
+        probed on 0.0.0.0. We also keep a local reservation set so a burst of
+        shard launches does not accidentally reuse a just-released port.
+        """
+        address = "0.0.0.0" if bind_wildcard and not is_valid_ipv6_address(self._server_address) else self._server_address
+        for _ in range(128):
+            port = get_free_port(address)[0]
+            if port in self._allocated_tcp_ports:
+                continue
+            self._allocated_tcp_ports.add(port)
+            return port
+        raise RuntimeError(f"failed to allocate unique TCP port for address={address}")
+
+    def _configured_or_allocated_port(self, key: str, bind_wildcard: bool = False) -> int:
+        configured = int(self._dynamo_cfg().get(key, 0) or 0)
+        if configured:
+            if configured in self._allocated_tcp_ports:
+                raise RuntimeError(f"duplicate configured Dynamo port {configured} for {key}")
+            self._allocated_tcp_ports.add(configured)
+            return configured
+        return self._allocate_tcp_port(bind_wildcard=bind_wildcard)
 
     @staticmethod
     def _build_kv_events_config_json(kv_event_port: int) -> str:
@@ -718,16 +750,16 @@ class DynamoHttpServer:
         subprocess stack, while token generation goes through the OpenAI-style
         frontend so Dynamo can route across registered workers.
         """
-        from verl.workers.rollout.replica import TokenOutput
-
         if image_data is not None or video_data is not None:
-            return TokenOutput(
-                token_ids=[],
+            return self._build_token_output(
                 stop_reason="error: Dynamo frontend generate does not support multimodal inputs",
-                extra_fields={"global_steps": self.global_steps or 0},
             )
 
+        if self._use_direct_generate():
+            return await self._generate_direct(prompt_ids, sampling_params, request_id)
+
         try:
+            include_log_probs = bool(sampling_params.get("logprobs", False))
             payload = self._build_frontend_completion_payload(prompt_ids, sampling_params)
             resp = await asyncio.to_thread(
                 requests.post,
@@ -736,26 +768,18 @@ class DynamoHttpServer:
                 timeout=self._frontend_request_timeout_s(),
             )
             if resp.status_code != 200:
-                return TokenOutput(
-                    token_ids=[],
-                    stop_reason=f"error: frontend HTTP {resp.status_code}: {resp.text[:500]}",
-                    extra_fields={"global_steps": self.global_steps or 0},
+                raise RuntimeError(
+                    "Dynamo frontend /v1/completions failed "
+                    f"status={resp.status_code} body={resp.text[:2000]!r} "
+                    f"payload_summary={self._payload_debug_summary(payload)}"
                 )
-            return self._completion_response_to_token_output(resp.json())
+            return self._completion_response_to_token_output(resp.json(), include_log_probs=include_log_probs)
         except requests.RequestException as e:
             logger.exception("[generate] frontend request failed (request_id=%s)", request_id)
-            return TokenOutput(
-                token_ids=[],
-                stop_reason=f"error: {type(e).__name__}: {e}",
-                extra_fields={"global_steps": self.global_steps or 0},
-            )
+            raise
         except Exception as e:
             logger.exception("[generate] frontend dispatch failed (request_id=%s)", request_id)
-            return TokenOutput(
-                token_ids=[],
-                stop_reason=f"error: {type(e).__name__}: {e}",
-                extra_fields={"global_steps": self.global_steps or 0},
-            )
+            raise
 
     def _frontend_completions_url(self) -> str:
         assert self._server_port is not None, "frontend server not ready"
@@ -781,10 +805,13 @@ class DynamoHttpServer:
         return timeout
 
     def _build_frontend_completion_payload(self, prompt_ids, sampling_params) -> dict[str, Any]:
+        from verl.utils.tokenizer import normalize_token_ids
+
         tokenizer = getattr(self.model_config, "tokenizer", None)
         if tokenizer is None:
             raise RuntimeError("model_config.tokenizer is required for Dynamo frontend generation")
         model = self._served_model_name or self.model_config.local_path
+        prompt_token_ids = normalize_token_ids(prompt_ids)
         sp = dict(sampling_params)
         max_tokens = sp.pop("max_tokens", None) or sp.pop("max_new_tokens", None)
         if max_tokens is None:
@@ -792,25 +819,160 @@ class DynamoHttpServer:
                 0,
                 min(
                     self.config.response_length,
-                    self.config.prompt_length + self.config.response_length - len(prompt_ids),
+                    self.config.prompt_length + self.config.response_length - len(prompt_token_ids),
                 ),
             )
+        sp.pop("logprobs", None)
         payload: dict[str, Any] = {
             "model": model,
-            "prompt": tokenizer.decode(list(prompt_ids), skip_special_tokens=False),
+            # vLLM's OpenAI completions endpoint accepts token-id prompts. Keep
+            # Dynamo on the same token-in path as the native vLLM backend.
+            "prompt": prompt_token_ids,
             "max_tokens": int(max_tokens),
             "stream": False,
         }
-        # vLLM's OpenAI server does not accept verl's boolean logprobs shape.
-        sp.pop("logprobs", None)
+        if sampling_params.get("logprobs", False):
+            # Native vLLM uses SamplingParams(logprobs=0) to return generated
+            # token logprobs only. Avoid requesting logprobs on the common path:
+            # the Dynamo OpenAI frontend can spend a long time formatting token
+            # logprob payloads even when verl will discard them.
+            payload["logprobs"] = 0
         sp.pop("prompt_logprobs", None)
         for key, value in sp.items():
             if value is not None:
                 payload[key] = value
         return payload
 
-    def _completion_response_to_token_output(self, data: dict[str, Any]):
+    def _use_direct_generate(self) -> bool:
+        value = self._dynamo_cfg().get("direct_generate", os.getenv("VERL_DYNAMO_DIRECT_GENERATE", "0"))
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+    async def _generate_direct(self, prompt_ids, sampling_params, request_id):
+        """Generate through the per-shard control sidecar instead of the frontend.
+
+        This is primarily for smoke tests and debugging ai-dynamo/vLLM
+        integration. It still exercises the spawned Dynamo vLLM shards but
+        bypasses the OpenAI frontend path that has been observed to hang.
+        """
+        if not self._control_endpoints:
+            raise RuntimeError("direct_generate=True requires Dynamo control sidecars")
+
+        import pickle
+
+        import zmq
+        import zmq.asyncio
+        from verl.utils.tokenizer import normalize_token_ids
+
+        tokenizer = getattr(self.model_config, "tokenizer", None)
+        if tokenizer is None:
+            raise RuntimeError("model_config.tokenizer is required for direct Dynamo generation")
+
+        prompt_token_ids = normalize_token_ids(prompt_ids)
+        prompt_text = tokenizer.decode(prompt_token_ids, skip_special_tokens=False)
+        include_log_probs = bool(sampling_params.get("logprobs", False))
+        direct_sampling_params = self._build_direct_sampling_params(prompt_token_ids, sampling_params)
+
+        async with self._direct_generate_lock:
+            endpoint = self._control_endpoints[self._direct_generate_idx % len(self._control_endpoints)]
+            self._direct_generate_idx += 1
+
+        req = {
+            "kind": "generate_direct",
+            "kwargs": {
+                "token_ids": prompt_token_ids,
+                "prompt_text": prompt_text,
+                "sampling_params": direct_sampling_params,
+                "request_id": request_id or f"direct-{time.time_ns()}",
+                "include_log_probs": include_log_probs,
+            },
+        }
+
+        ctx = zmq.asyncio.Context.instance()
+        sock = ctx.socket(zmq.REQ)
+        sock.setsockopt(zmq.LINGER, 0)
+        try:
+            sock.connect(endpoint)
+            await sock.send(pickle.dumps(req))
+            timeout = self._direct_request_timeout_s()
+            reply_bytes = await asyncio.wait_for(sock.recv(), timeout=timeout)
+            reply = pickle.loads(reply_bytes)
+            if not reply.get("ok"):
+                raise RuntimeError(f"direct_generate @ {endpoint} failed: {reply.get('error')}")
+            result = reply.get("result") or {}
+            token_ids = normalize_token_ids(result.get("token_ids") or [])
+            if not token_ids:
+                raise RuntimeError(f"direct_generate @ {endpoint} returned no tokens: {result}")
+            log_probs = result.get("log_probs") if include_log_probs else None
+            return self._build_token_output(
+                token_ids=token_ids,
+                log_probs=log_probs,
+                stop_reason="completed" if result.get("finish_reason") else None,
+            )
+        except Exception:
+            logger.exception("[generate] direct sidecar request failed (request_id=%s)", request_id)
+            raise
+        finally:
+            sock.close()
+
+    def _build_direct_sampling_params(self, prompt_token_ids: list[int], sampling_params: dict[str, Any]) -> dict[str, Any]:
+        sp = dict(sampling_params)
+        max_tokens = sp.pop("max_tokens", None) or sp.pop("max_new_tokens", None)
+        if max_tokens is None:
+            max_tokens = max(
+                0,
+                min(
+                    self.config.response_length,
+                    self.config.prompt_length + self.config.response_length - len(prompt_token_ids),
+                ),
+            )
+        max_possible_tokens = max(0, self.config.prompt_length + self.config.response_length - len(prompt_token_ids))
+        sp["max_tokens"] = int(max(0, min(max_tokens, max_possible_tokens)))
+        sp["logprobs"] = 0 if sp.pop("logprobs", False) else None
+        sp.pop("prompt_logprobs", None)
+        sp.setdefault("repetition_penalty", getattr(self.config, "repetition_penalty", 1.0))
+        return {key: value for key, value in sp.items() if value is not None}
+
+    def _direct_request_timeout_s(self) -> float:
+        value = self._dynamo_cfg().get("direct_request_timeout_s", self._frontend_request_timeout_s())
+        try:
+            timeout = float(value)
+        except (TypeError, ValueError) as e:
+            raise ValueError(
+                f"rollout.engine_kwargs.dynamo.direct_request_timeout_s must be a positive number, got {value!r}"
+            ) from e
+        if timeout <= 0:
+            raise ValueError(
+                f"rollout.engine_kwargs.dynamo.direct_request_timeout_s must be positive, got {value!r}"
+            )
+        return timeout
+
+    @staticmethod
+    def _payload_debug_summary(payload: dict[str, Any]) -> dict[str, Any]:
+        prompt = payload.get("prompt")
+        if isinstance(prompt, list):
+            prompt_summary = {
+                "type": "list",
+                "len": len(prompt),
+                "head": prompt[:8],
+            }
+        else:
+            prompt_summary = {
+                "type": type(prompt).__name__,
+                "len": len(prompt) if hasattr(prompt, "__len__") else None,
+            }
+        return {
+            "keys": sorted(payload.keys()),
+            "model": payload.get("model"),
+            "prompt": prompt_summary,
+            "max_tokens": payload.get("max_tokens"),
+            "logprobs": payload.get("logprobs"),
+        }
+
+    def _completion_response_to_token_output(self, data: dict[str, Any], include_log_probs: bool = False):
         from verl.workers.rollout.replica import TokenOutput
+        from verl.utils.tokenizer import normalize_token_ids
 
         choices = data.get("choices") or []
         if not choices:
@@ -823,7 +985,16 @@ class DynamoHttpServer:
         tokenizer = getattr(self.model_config, "tokenizer", None)
         if tokenizer is None:
             raise RuntimeError("model_config.tokenizer is required for Dynamo frontend generation")
-        token_ids = list(tokenizer.encode(text, add_special_tokens=False))
+        token_ids = self._extract_completion_token_ids(choice, data, tokenizer)
+        if token_ids is None:
+            logger.warning(
+                "Dynamo frontend response did not include parseable token ids; falling back to text encode. "
+                "For strict token-in/token-out parity, expose generated token ids in the frontend response."
+            )
+            token_ids = normalize_token_ids(tokenizer.encode(text, add_special_tokens=False))
+        if not token_ids:
+            raise RuntimeError(f"Dynamo frontend returned an empty completion: {data}")
+        log_probs = self._extract_completion_log_probs(choice, len(token_ids)) if include_log_probs else None
         finish_reason = choice.get("finish_reason")
         if finish_reason == "stop" or finish_reason == "length":
             stop_reason = "completed"
@@ -832,11 +1003,164 @@ class DynamoHttpServer:
         else:
             stop_reason = finish_reason
 
+        return self._build_token_output(
+            token_ids=token_ids,
+            log_probs=log_probs,
+            stop_reason=stop_reason,
+        )
+
+    def _build_token_output(
+        self,
+        token_ids: Optional[list[int]] = None,
+        log_probs: Optional[list[float]] = None,
+        stop_reason: Optional[str] = None,
+    ):
+        """Build a verl TokenOutput while preserving AgentLoop shape invariants."""
+        from verl.workers.rollout.replica import TokenOutput
+
+        token_ids = token_ids or self._fallback_token_ids()
+        if log_probs is not None:
+            if len(log_probs) < len(token_ids):
+                log_probs = log_probs + [0.0] * (len(token_ids) - len(log_probs))
+            elif len(log_probs) > len(token_ids):
+                log_probs = log_probs[: len(token_ids)]
         return TokenOutput(
             token_ids=token_ids,
+            log_probs=log_probs,
             stop_reason=stop_reason,
             extra_fields={"global_steps": self.global_steps or 0},
         )
+
+    def _fallback_token_ids(self) -> list[int]:
+        """Return one harmless token so Dynamo never emits an empty response."""
+        tokenizer = getattr(self.model_config, "tokenizer", None)
+        for attr in ("eos_token_id", "pad_token_id"):
+            token_id = getattr(tokenizer, attr, None) if tokenizer is not None else None
+            if token_id is not None:
+                return [int(token_id)]
+        return [0]
+
+    @staticmethod
+    def _extract_completion_token_ids(
+        choice: dict[str, Any],
+        response: Optional[dict[str, Any]] = None,
+        tokenizer: Optional[Any] = None,
+    ) -> Optional[list[int]]:
+        """Extract vLLM OpenAI extension token ids when available."""
+        from verl.utils.tokenizer import normalize_token_ids
+
+        candidates = [
+            choice.get("token_ids"),
+            choice.get("output_token_ids"),
+            choice.get("completion_token_ids"),
+        ]
+        logprobs = choice.get("logprobs")
+        if isinstance(logprobs, dict):
+            candidates.extend(
+                [
+                    logprobs.get("token_ids"),
+                    logprobs.get("output_token_ids"),
+                    logprobs.get("completion_token_ids"),
+                ]
+            )
+            token_strings = logprobs.get("tokens")
+            token_ids_from_strings = DynamoHttpServer._parse_token_id_strings(token_strings)
+            if token_ids_from_strings is not None:
+                candidates.append(token_ids_from_strings)
+            elif tokenizer is not None:
+                token_ids_from_strings = DynamoHttpServer._encode_logprob_token_strings(token_strings, tokenizer)
+                if token_ids_from_strings is not None:
+                    candidates.append(token_ids_from_strings)
+
+        nvext = (response or {}).get("nvext")
+        if isinstance(nvext, dict):
+            candidates.extend(
+                [
+                    nvext.get("completion_token_ids"),
+                    nvext.get("output_token_ids"),
+                    nvext.get("generated_token_ids"),
+                ]
+            )
+        choice_nvext = choice.get("nvext")
+        if isinstance(choice_nvext, dict):
+            candidates.extend(
+                [
+                    choice_nvext.get("completion_token_ids"),
+                    choice_nvext.get("output_token_ids"),
+                    choice_nvext.get("generated_token_ids"),
+                    choice_nvext.get("token_ids"),
+                ]
+            )
+
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            try:
+                return normalize_token_ids(candidate)
+            except TypeError:
+                logger.warning("Ignoring non-token-id completion field: %r", candidate)
+        return None
+
+    @staticmethod
+    def _parse_token_id_strings(tokens: Any) -> Optional[list[int]]:
+        """Parse Dynamo logprob token strings formatted as ``token_id:<id>``."""
+        if not isinstance(tokens, list) or not tokens:
+            return None
+        token_ids: list[int] = []
+        for token in tokens:
+            if not isinstance(token, str):
+                return None
+            prefix, sep, suffix = token.partition(":")
+            if prefix.strip() != "token_id" or not sep:
+                return None
+            try:
+                token_ids.append(int(suffix.strip()))
+            except ValueError:
+                return None
+        return token_ids
+
+    @staticmethod
+    def _encode_logprob_token_strings(tokens: Any, tokenizer: Any) -> Optional[list[int]]:
+        """Encode OpenAI logprob token strings when explicit token ids are absent.
+
+        This is a best-effort bridge for frontends that return
+        ``choice.logprobs.tokens`` as decoded token strings. To avoid silently
+        changing sequence length, only accept the result when each token string
+        maps to exactly one tokenizer id. Otherwise the caller falls back to
+        encoding the full completion text.
+        """
+        if not isinstance(tokens, list) or not tokens:
+            return None
+        token_ids: list[int] = []
+        for token in tokens:
+            if not isinstance(token, str):
+                return None
+            ids = tokenizer.encode(token, add_special_tokens=False)
+            if hasattr(ids, "tolist"):
+                ids = ids.tolist()
+            if len(ids) != 1:
+                logger.warning("Cannot map logprob token %r to one token id: %r", token, ids)
+                return None
+            token_ids.append(int(ids[0]))
+        return token_ids
+
+    @staticmethod
+    def _extract_completion_log_probs(choice: dict[str, Any], token_count: int) -> Optional[list[float]]:
+        """Extract selected-token logprobs from OpenAI completions response."""
+        logprobs = choice.get("logprobs")
+        if not isinstance(logprobs, dict):
+            return None
+        values = logprobs.get("token_logprobs")
+        if values is None:
+            values = logprobs.get("logprobs")
+        if values is None:
+            return None
+        result: list[float] = []
+        for value in values[:token_count]:
+            result.append(0.0 if value is None else float(value))
+        if len(result) < token_count:
+            result.extend([0.0] * (token_count - len(result)))
+        return result
 
     async def collective_rpc(
         self,
@@ -906,6 +1230,9 @@ class DynamoHttpServer:
     async def wake_up(self, **kwargs):
         if self.node_rank != 0:
             return
+        if self._skip_refit():
+            logger.info("[DynamoHttpServer] wake_up: skip_refit=True, leaving Dynamo workers loaded")
+            return
         if not self._control_endpoints:
             logger.info("[DynamoHttpServer] wake_up: no control sidecar, skipping")
             return
@@ -915,6 +1242,9 @@ class DynamoHttpServer:
 
     async def sleep(self, **kwargs):
         if self.node_rank != 0:
+            return
+        if self._skip_refit():
+            logger.info("[DynamoHttpServer] sleep: skip_refit=True, leaving Dynamo workers loaded")
             return
         if not self._control_endpoints:
             logger.info("[DynamoHttpServer] sleep: no control sidecar, skipping")
