@@ -202,7 +202,7 @@ You can also start a multi-node teacher server: start the main node using `start
 Connects to an existing vLLM serve API server. Start the vLLM server separately first:
 
 ```bash
-vllm serve Qwen/Qwen2.5-72B --tensor-parallel-size 8 --port 8000
+vllm serve Qwen/Qwen3-32B --tensor-parallel-size 4 --port 8000 --max-logprobs 256
 ```
 
 Then launch the teacher worker connecting to it:
