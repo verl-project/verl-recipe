@@ -30,14 +30,19 @@ def main():
     parser.add_argument("--ckpt-path", type=str)
     parser.add_argument("--max-model-len", type=int, default=8192)
     parser.add_argument("--dtype", type=str, default="bfloat16")
-    parser.add_argument("--api-base", type=str, default="http://localhost:8000",
-                        help="vLLM serve API base URL (for vllm api backend)")
-    parser.add_argument("--serve-model", type=str, default="default",
-                        help="Model name for vLLM serve API requests (for vllm api backend)")
+    parser.add_argument(
+        "--api-base", type=str, default="http://localhost:8000", help="vLLM serve API base URL (for vllm api backend)"
+    )
+    parser.add_argument(
+        "--serve-model",
+        type=str,
+        default="default",
+        help="Model name for vLLM serve API requests (for vllm api backend)",
+    )
     parser.add_argument("--timeout", type=int, default=600)
 
     args = parser.parse_args()
-    print('worker args:', args)
+    print("worker args:", args)
 
     if args.backend == "vllm_engine":
         from vllm_engine import VLLMEngine
@@ -47,7 +52,7 @@ def main():
             n_logprobs=args.n_logprobs,
             tp_size=args.tp_size,
             max_model_len=args.max_model_len,
-            dtype=args.dtype
+            dtype=args.dtype,
         )
 
     elif args.backend == "vllm_api":

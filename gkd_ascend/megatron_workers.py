@@ -5,17 +5,17 @@
 import logging
 import os
 import time
-
 from typing import Iterable
+
 import numpy as np
 import torch
+from distributed_util import vllm_stateless_init_process_group
 from megatron.core import parallel_state as mpu
 from megatron.core.pipeline_parallel import get_forward_backward_func
+from megatron_kl_loss import vocab_parallel_kl_divergence
 from omegaconf import DictConfig, OmegaConf
 from ray.util.collective import collective
 
-from megatron_kl_loss import vocab_parallel_kl_divergence
-from distributed_util import vllm_stateless_init_process_group
 from verl import DataProto
 from verl.single_controller.base.decorator import (
     Dispatch,
@@ -23,21 +23,21 @@ from verl.single_controller.base.decorator import (
     register,
 )
 from verl.utils.checkpoint.megatron_checkpoint_manager import MegatronCheckpointManager
-from verl.utils.device import get_device_id, get_device_name, get_torch_device, is_npu_available
+from verl.utils.device import get_device_id, get_device_name, get_torch_device
 from verl.utils.flops_counter import FlopsCounter
 from verl.utils.megatron.pipeline_parallel import make_batch_generator
-from verl.utils.megatron_utils import load_megatron_model_to_gpu, offload_megatron_model_to_cpu
-from verl.utils.profiler import log_gpu_memory_usage
-from verl.utils.py_functional import append_to_dict
-from verl.utils.seqlen_balancing import rearrange_micro_batches
-from verl.workers.megatron_workers import AsyncActorRolloutRefWorker
-from verl.workers.actor.megatron_actor import MegatronPPOActor
-from verl.utils.ray_utils import get_event_loop
-from verl.utils.torch_functional import broadcast_dict_tensor
 from verl.utils.megatron.router_replay_utils import (
     RouterReplayHelper,
     reorder_and_merge_vpp_layers,
 )
+from verl.utils.megatron_utils import load_megatron_model_to_gpu, offload_megatron_model_to_cpu
+from verl.utils.profiler import log_gpu_memory_usage
+from verl.utils.py_functional import append_to_dict
+from verl.utils.ray_utils import get_event_loop
+from verl.utils.seqlen_balancing import rearrange_micro_batches
+from verl.utils.torch_functional import broadcast_dict_tensor
+from verl.workers.actor.megatron_actor import MegatronPPOActor
+from verl.workers.megatron_workers import AsyncActorRolloutRefWorker
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -99,7 +99,7 @@ class TensorBuffer:
 
     def append(self, key, shape, weight=None):
         if weight is not None:
-            self.tensor[self.size: self.size + shape.numel()] = weight.view(-1)
+            self.tensor[self.size : self.size + shape.numel()] = weight.view(-1)
         self.keys.append(key)
         self.shapes.append(shape)
 
@@ -107,7 +107,7 @@ class TensorBuffer:
         tensors = []
         start = 0
         for key_, shape_ in zip(self.keys, self.shapes, strict=False):
-            tensors.append((key_, self.tensor[start: start + shape_.numel()].view(shape_)))
+            tensors.append((key_, self.tensor[start : start + shape_.numel()].view(shape_)))
             start += shape_.numel()
         return tensors
 
@@ -173,15 +173,15 @@ class OnPolicyDistillActor(MegatronPPOActor):
         )
 
     def forward_backward_batch(
-      self,
-      data: DataProto,
-      forward_only=False,
-      post_process_fn=None,
-      calculate_entropy=False,
-      use_dynamic_bsz=False,
-      micro_batch_size=None,
-      max_token_len=None,
-      mini_batch_size=None,
+        self,
+        data: DataProto,
+        forward_only=False,
+        post_process_fn=None,
+        calculate_entropy=False,
+        use_dynamic_bsz=False,
+        micro_batch_size=None,
+        max_token_len=None,
+        mini_batch_size=None,
     ):
         """
         We assume:
@@ -234,8 +234,8 @@ class OnPolicyDistillActor(MegatronPPOActor):
                 for partition in indices:
                     curr_logp_micro_batch, curr_idx_micro_batch = [], []
                     for idx in partition:
-                        curr_logp_micro_batch.append(teacher_topk_logps_tensor[idx: idx + 1])
-                        curr_idx_micro_batch.append(teacher_topk_indices_tensor[idx: idx + 1])
+                        curr_logp_micro_batch.append(teacher_topk_logps_tensor[idx : idx + 1])
+                        curr_idx_micro_batch.append(teacher_topk_indices_tensor[idx : idx + 1])
                     curr_logp_micro_batch = torch.cat(curr_logp_micro_batch)
                     curr_idx_micro_batch = torch.cat(curr_idx_micro_batch)
 
@@ -261,10 +261,12 @@ class OnPolicyDistillActor(MegatronPPOActor):
             # total_seqlen = micro_batch_size * seq_len
 
             if mpu.is_pipeline_last_stage():
-                teacher_topk_logps = np.array_split(mini_batch.non_tensor_batch["teacher_topk_logps"],
-                                                    len(micro_batches))
-                teacher_topk_indices = np.array_split(mini_batch.non_tensor_batch["teacher_topk_indices"],
-                                                      len(micro_batches))
+                teacher_topk_logps = np.array_split(
+                    mini_batch.non_tensor_batch["teacher_topk_logps"], len(micro_batches)
+                )
+                teacher_topk_indices = np.array_split(
+                    mini_batch.non_tensor_batch["teacher_topk_indices"], len(micro_batches)
+                )
 
                 for i, mb in enumerate(micro_batches):
                     responses = mb["responses"]
@@ -578,7 +580,6 @@ class MegatronOnPolicyDistillActorWorker(DetachSync):
             optimizer_scheduler=self.actor_optimizer_scheduler,
             use_distributed_optimizer=self.config.actor.megatron.use_distributed_optimizer,
             use_checkpoint_opt_param_scheduler=self.config.actor.optim.use_checkpoint_opt_param_scheduler,
-
             bridge=self.bridge,
             provider=self.provider,
             use_dist_checkpointing=self.config.actor.megatron.use_dist_checkpointing,
@@ -623,9 +624,7 @@ class MegatronOnPolicyDistillRolloutWorker(DetachSync):
 
         super().__init__(config, role, **kwargs)
         assert self.role == "rollout"
-        assert self._is_rollout and not self._is_actor and not self._is_ref, (
-            "Rollout worker must be rollout-only."
-        )
+        assert self._is_rollout and not self._is_actor and not self._is_ref, "Rollout worker must be rollout-only."
 
         # Cached locally because the parent class only sets `self.local_path`
         # inside `_init_hf_config_and_tf_config`, which we still want to call

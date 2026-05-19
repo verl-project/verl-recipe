@@ -24,8 +24,8 @@ import hydra
 import ray
 
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager
-from verl.utils.device import auto_set_ascend_device_name
 from verl.trainer.ppo.utils import Role
+from verl.utils.device import auto_set_ascend_device_name
 
 
 def create_resource_pool_manager(config, roles: list) -> ResourcePoolManager:
@@ -81,24 +81,24 @@ def create_role_worker_mapping(config):
     #   ``recipe.one_step_off_policy.fsdp_workers``.
     actor_strategy = config.actor_rollout_ref.actor.strategy
     if actor_strategy == "megatron":
-        from verl.single_controller.ray import RayWorkerGroup
-
         from megatron_workers import (
             MegatronOnPolicyDistillActorWorker,
             MegatronOnPolicyDistillRolloutWorker,
         )
+
+        from verl.single_controller.ray import RayWorkerGroup
 
         rollout_cls = MegatronOnPolicyDistillRolloutWorker
         actor_cls = MegatronOnPolicyDistillActorWorker
         ray_worker_group_cls = RayWorkerGroup
 
     elif actor_strategy in ("fsdp", "fsdp2"):
-        from verl.single_controller.ray import RayWorkerGroup
-
         from fsdp_workers import (
             FSDPOnPolicyDistillActorWorker,
             FSDPOnPolicyDistillRolloutWorker,
         )
+
+        from verl.single_controller.ray import RayWorkerGroup
 
         rollout_cls = FSDPOnPolicyDistillRolloutWorker
         actor_cls = FSDPOnPolicyDistillActorWorker
@@ -142,11 +142,11 @@ class TaskRunner:
 
         from omegaconf import OmegaConf
 
-        from verl.utils.fs import copy_to_local
-
         # Lazy import to avoid heavy deps (e.g. megatron) when only the entry
         # point is loaded for hydra config resolution.
         from ray_trainer import OnPolicyDistillTrainer
+
+        from verl.utils.fs import copy_to_local
 
         print(f"TaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
 
@@ -221,6 +221,7 @@ def main(config):
         config_dict: Hydra configuration dictionary containing training parameters.
     """
     from time import time
+
     from verl.trainer.main_ppo import run_ppo
 
     start_time = time()

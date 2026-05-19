@@ -36,27 +36,27 @@ import os
 import numpy as np
 import torch
 import torch.distributed
+from fsdp_kl_loss import topk_kl_divergence
 from omegaconf import DictConfig, OmegaConf
 from ray.util.collective import collective
+from recipe.one_step_off_policy.distributed_util import vllm_stateless_init_process_group
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
-from fsdp_kl_loss import topk_kl_divergence
-
-from verl.workers.fsdp_workers import AsyncActorRolloutRefWorker
 from verl import DataProto
 from verl.single_controller.base.decorator import (
     Dispatch,
     make_nd_compute_dataproto_dispatch_fn,
     register,
 )
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from verl.utils import hf_processor, hf_tokenizer
+from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_device_id, get_device_name, get_torch_device
+from verl.utils.fs import copy_to_local
 from verl.utils.fsdp_utils import (
     fsdp_version,
     load_fsdp_model_to_gpu,
     offload_fsdp_model_to_cpu,
 )
-
-from verl.utils.ray_utils import get_event_loop
 from verl.utils.import_utils import import_external_libs
 from verl.utils.profiler import (
     DistProfiler,
@@ -66,14 +66,12 @@ from verl.utils.profiler import (
 )
 from verl.utils.profiler.performance import gather_timing
 from verl.utils.py_functional import append_to_dict
+from verl.utils.ray_utils import get_event_loop
 from verl.utils.seqlen_balancing import prepare_dynamic_batch
 from verl.utils.torch_dtypes import PrecisionType
-from recipe.one_step_off_policy.distributed_util import vllm_stateless_init_process_group
-from verl.utils.fs import copy_to_local
-from verl.utils.config import omega_conf_to_dataclass
-from verl.utils import hf_processor, hf_tokenizer
-from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.actor import DataParallelPPOActor
+from verl.workers.config import HFModelConfig, RolloutConfig
+from verl.workers.fsdp_workers import AsyncActorRolloutRefWorker
 from verl.workers.rollout import get_rollout_class
 
 logger = logging.getLogger(__file__)
@@ -326,9 +324,7 @@ class _GKDFSDPDistillActor(DataParallelPPOActor):
             if masked_logits.numel() == 0:
                 kl_loss = logits_fp32.sum() * 0.0  # keep the grad graph
             else:
-                per_token_kl = topk_kl_divergence(
-                    masked_logits, masked_teacher_logps, masked_teacher_indices
-                )
+                per_token_kl = topk_kl_divergence(masked_logits, masked_teacher_logps, masked_teacher_indices)
                 kl_loss = per_token_kl.mean()
 
             (kl_loss * loss_scale).backward()
@@ -357,9 +353,7 @@ class FSDPOnPolicyDistillActorWorker(DetachSync):
     def __init__(self, config: DictConfig, role: str = "actor", **kwargs):
         _ensure_required_actor_rollout_fields(config)
         super().__init__(config=config, role=role, **kwargs)
-        assert self._is_actor and not self._is_rollout, (
-            "FSDPOnPolicyDistillActorWorker must be actor-only."
-        )
+        assert self._is_actor and not self._is_rollout, "FSDPOnPolicyDistillActorWorker must be actor-only."
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
@@ -477,13 +471,11 @@ class FSDPOnPolicyDistillRolloutWorker(DetachSync):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
-
         from torch.distributed.device_mesh import init_device_mesh
 
         self.param_dtype = torch.bfloat16
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get("external_lib", None))
-        override_model_config = OmegaConf.to_container(OmegaConf.create(self.config.model.get("override_config", {})))
 
         use_shm = self.config.model.get("use_shm", False)
         local_path = copy_to_local(self.config.model.path, use_shm=use_shm)
@@ -498,7 +490,7 @@ class FSDPOnPolicyDistillRolloutWorker(DetachSync):
             else:
                 self.tokenizer.chat_template = self.config.model.custom_chat_template
 
-        from verl.utils.model import get_generation_config, print_model_size, update_model_config
+        from verl.utils.model import get_generation_config
 
         self.generation_config = get_generation_config(local_path, trust_remote_code=trust_remote_code)
 

@@ -18,8 +18,8 @@ FSDP PPO Trainer with Ray-based single controller.
 This trainer supports model-agonistic model initialization with huggingface
 """
 
-import time
 import asyncio
+import time
 import uuid
 
 import numpy as np
@@ -27,6 +27,8 @@ import ray
 import torch
 from omegaconf import OmegaConf
 from ray.util.collective import collective
+from teacher import TeacherClient
+from teacher_utils import get_teacher_knowledge
 from torch.utils.data import Dataset, Sampler
 from tqdm import tqdm
 
@@ -38,19 +40,13 @@ from verl.trainer.ppo.metric_utils import (
     compute_throughout_metrics,
     compute_timing_metrics,
 )
-from verl.trainer.ppo.ray_trainer import (
-    RayPPOTrainer,
-    ResourcePoolManager
-)
+from verl.trainer.ppo.ray_trainer import RayPPOTrainer, ResourcePoolManager
 from verl.trainer.ppo.utils import Role, WorkerType
 from verl.utils.debug import marked_timer
 from verl.utils.metric import (
     reduce_metrics,
 )
 from verl.utils.tracking import ValidationGenerationsLogger
-
-from teacher import TeacherClient
-from teacher_utils import get_teacher_knowledge
 
 
 class OnPolicyDistillTrainer(RayPPOTrainer):
@@ -64,18 +60,18 @@ class OnPolicyDistillTrainer(RayPPOTrainer):
     # TODO: support each role have individual ray_worker_group_cls,
     # i.e., support different backend of different role
     def __init__(
-      self,
-      config,
-      tokenizer,
-      role_worker_mapping: dict[Role, WorkerType],
-      resource_pool_manager: ResourcePoolManager,
-      ray_worker_group_cls: RayWorkerGroup = RayWorkerGroup,
-      processor=None,
-      train_dataset: Dataset | None = None,
-      val_dataset: Dataset | None = None,
-      collate_fn=None,
-      train_sampler: Sampler | None = None,
-      device_name="cuda",
+        self,
+        config,
+        tokenizer,
+        role_worker_mapping: dict[Role, WorkerType],
+        resource_pool_manager: ResourcePoolManager,
+        ray_worker_group_cls: RayWorkerGroup = RayWorkerGroup,
+        processor=None,
+        train_dataset: Dataset | None = None,
+        val_dataset: Dataset | None = None,
+        collate_fn=None,
+        train_sampler: Sampler | None = None,
+        device_name="cuda",
     ):
         """
         Initialize distributed PPO trainer with Ray backend.
@@ -167,8 +163,8 @@ class OnPolicyDistillTrainer(RayPPOTrainer):
             # Only require nsight worker options when tool is nsys
             if OmegaConf.select(self.config.global_profiler, "tool") == "nsys":
                 assert (
-                  OmegaConf.select(self.config.global_profiler.global_tool_config.nsys, "worker_nsight_options")
-                  is not None
+                    OmegaConf.select(self.config.global_profiler.global_tool_config.nsys, "worker_nsight_options")
+                    is not None
                 ), "worker_nsight_options must be set when using nsys with profile_steps"
                 wg_kwargs["worker_nsight_options"] = OmegaConf.to_container(
                     OmegaConf.select(self.config.global_profiler.global_tool_config.nsys, "worker_nsight_options")
@@ -267,9 +263,7 @@ class OnPolicyDistillTrainer(RayPPOTrainer):
         batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
 
         # add uid to batch
-        batch.non_tensor_batch["uid"] = np.array(
-            [str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object
-        )
+        batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object)
 
         gen_batch = self._get_gen_batch(batch)
         gen_batch.meta_info["global_steps"] = self.global_steps
@@ -297,8 +291,9 @@ class OnPolicyDistillTrainer(RayPPOTrainer):
         """
         epoch, batch, gen_batch_output = await gen_res
         gen_batch_output.meta_info["response_length"] = self.config.data.max_response_length
-        teacher_batch_output = get_teacher_knowledge(gen_batch_output, self.teacher_client, self.n_server_workers,
-                                                     is_async=False)
+        teacher_batch_output = get_teacher_knowledge(
+            gen_batch_output, self.teacher_client, self.n_server_workers, is_async=False
+        )
         return epoch, batch, gen_batch_output, teacher_batch_output
 
     async def one_step_off_scheduler(self, continuous_iterator):
@@ -339,7 +334,8 @@ class OnPolicyDistillTrainer(RayPPOTrainer):
                 # we don't need to sync weights here because we have not trained the actor yet
                 # start second async rollout
                 rollout_future = asyncio.create_task(
-                    self._async_gen_next_batch(epoch, batch_dict, sync_before_generation=False))
+                    self._async_gen_next_batch(epoch, batch_dict, sync_before_generation=False)
+                )
                 # wait for generating teacher knowledge finish
                 # and get previous result including rollout and teacher knowledge
                 with marked_timer("wait_prev_teacher", timing):
@@ -413,7 +409,8 @@ class OnPolicyDistillTrainer(RayPPOTrainer):
             elif i == 1:
                 teacher_future = asyncio.create_task(self._async_get_teacher_knowledge(rollout_future))
                 rollout_future = asyncio.create_task(
-                    self._async_gen_next_batch(epoch, batch_dict, sync_before_generation=False))
+                    self._async_gen_next_batch(epoch, batch_dict, sync_before_generation=False)
+                )
                 continue
             elif i == 2:
                 with marked_timer("wait_prev_prev_teacher", timing):
@@ -422,7 +419,8 @@ class OnPolicyDistillTrainer(RayPPOTrainer):
                     teacher_future = asyncio.create_task(self._async_get_teacher_knowledge(rollout_future))
 
                 rollout_future = asyncio.create_task(
-                    self._async_gen_next_batch(epoch, batch_dict, sync_before_generation=False))
+                    self._async_gen_next_batch(epoch, batch_dict, sync_before_generation=False)
+                )
                 yield *result, timing
                 timing = {}
             else:
@@ -509,7 +507,7 @@ class OnPolicyDistillTrainer(RayPPOTrainer):
                 if teacher_batch_output is None:
                     # save model
                     if self.config.trainer.save_freq > 0 and (
-                      is_last_step or self.global_steps % self.config.trainer.save_freq == 0
+                        is_last_step or self.global_steps % self.config.trainer.save_freq == 0
                     ):
                         self._save_checkpoint()
                     print("Error in getting teacher knowledge. Skip this batch.")
@@ -573,7 +571,7 @@ class OnPolicyDistillTrainer(RayPPOTrainer):
 
                 # save model
                 if self.config.trainer.save_freq > 0 and (
-                  is_last_step or self.global_steps % self.config.trainer.save_freq == 0
+                    is_last_step or self.global_steps % self.config.trainer.save_freq == 0
                 ):
                     with marked_timer("save_checkpoint", timing_raw, color="green"):
                         self._save_checkpoint()

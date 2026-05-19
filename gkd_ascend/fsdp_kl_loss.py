@@ -30,9 +30,9 @@ import torch
 
 
 def topk_kl_divergence(
-  logits: torch.Tensor,
-  teacher_topk_logps: torch.Tensor,
-  teacher_topk_indices: torch.Tensor,
+    logits: torch.Tensor,
+    teacher_topk_logps: torch.Tensor,
+    teacher_topk_indices: torch.Tensor,
 ) -> torch.Tensor:
     """Compute the per-token KL(P||Q) loss restricted to the teacher's top-k.
 
@@ -47,8 +47,7 @@ def topk_kl_divergence(
         Per-token KL loss with shape ``logits.shape[:-1]``.
     """
     assert logits.shape[:-1] == teacher_topk_logps.shape[:-1], (
-        f"logits/teacher_topk_logps leading dims mismatch: "
-        f"{logits.shape} vs {teacher_topk_logps.shape}"
+        f"logits/teacher_topk_logps leading dims mismatch: {logits.shape} vs {teacher_topk_logps.shape}"
     )
     assert teacher_topk_logps.shape == teacher_topk_indices.shape, (
         f"teacher_topk_logps/teacher_topk_indices shape mismatch: "

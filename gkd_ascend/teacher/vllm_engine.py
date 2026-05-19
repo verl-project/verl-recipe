@@ -14,21 +14,20 @@
 
 import argparse
 import random
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import NamedTuple
 
 import torch
 from codetiming import Timer
 from transformers import AutoConfig
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
 from vllm import LLM, SamplingParams
 from vllm.inputs import TokensPrompt
 from vllm.v1.engine.logprobs import LogprobsProcessor
 
 
 def _update_prompt_logprobs(
-  self,
-  prompt_logprobs_tensors,
+    self,
+    prompt_logprobs_tensors,
 ) -> None:
     """Update with prompt logprobs from EngineCore.
 
@@ -117,7 +116,7 @@ class VLLMEngine:
             max_model_len=max_model_len,
             dtype=dtype,
             async_scheduling=True,
-            compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"}
+            compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"},
         )
 
     def get_topk_logprobs(self, prompt_token_ids, temperature=0.8, max_new_tokens=1, only_response=False):
@@ -128,7 +127,7 @@ class VLLMEngine:
                 detokenize=False,
                 logprobs=self.n_logprobs,
                 prompt_logprobs=None if only_response else self.n_logprobs,
-                max_tokens=max_new_token  # max_new_tokens[i] if (i is not None) else max_new_tokens,
+                max_tokens=max_new_token,  # max_new_tokens[i] if (i is not None) else max_new_tokens,
             )
 
         batch_size = len(prompt_token_ids)
@@ -136,11 +135,10 @@ class VLLMEngine:
         def process_single(idx):
             single_prompt = [TokensPrompt(prompt_token_ids=prompt_token_ids[idx])]
             single_sampling_params = [
-                make_sampling_params(max_new_tokens[idx] if isinstance(max_new_tokens, list) else max_new_tokens)]
+                make_sampling_params(max_new_tokens[idx] if isinstance(max_new_tokens, list) else max_new_tokens)
+            ]
             # Call API
-            output = self.llm.generate(
-                single_prompt, sampling_params=single_sampling_params
-            )
+            output = self.llm.generate(single_prompt, sampling_params=single_sampling_params)
             return idx, single_prompt, output
 
         results = [None] * batch_size

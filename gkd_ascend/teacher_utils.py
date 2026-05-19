@@ -69,7 +69,7 @@ def get_teacher_knowledge(batch: DataProto, teacher_client, n_server_workers=1, 
         tok1 = max(tok1, time.time())
 
     for i in range(0, batch_size, micro_batch_size):
-        fut = teacher_client.submit(input_ids[i: i + micro_batch_size])
+        fut = teacher_client.submit(input_ids[i : i + micro_batch_size])
         fut.add_done_callback(cb)
         futures.append(fut)
 
@@ -98,18 +98,18 @@ def get_teacher_knowledge(batch: DataProto, teacher_client, n_server_workers=1, 
 
         global teacher_topk_logps_padded, teacher_topk_indices_padded
         if (
-          teacher_topk_logps_padded is None
-          or teacher_topk_logps_padded.dtype != logp_dtype
-          or teacher_topk_logps_padded.shape != torch.Size(teacher_knowledge_shape)
+            teacher_topk_logps_padded is None
+            or teacher_topk_logps_padded.dtype != logp_dtype
+            or teacher_topk_logps_padded.shape != torch.Size(teacher_knowledge_shape)
         ):
             teacher_topk_logps_padded = torch.zeros(*teacher_knowledge_shape, dtype=logp_dtype)
         else:
             teacher_topk_logps_padded.zero_()
 
         if (
-          teacher_topk_indices_padded is None
-          or teacher_topk_indices_padded.dtype != idx_dtype
-          or teacher_topk_indices_padded.shape != torch.Size(teacher_knowledge_shape)
+            teacher_topk_indices_padded is None
+            or teacher_topk_indices_padded.dtype != idx_dtype
+            or teacher_topk_indices_padded.shape != torch.Size(teacher_knowledge_shape)
         ):
             teacher_topk_indices_padded = torch.zeros(*teacher_knowledge_shape, dtype=idx_dtype)
         else:

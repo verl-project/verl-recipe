@@ -26,12 +26,11 @@ Usage:
     python worker.py --backend vllm_serve --api-base http://localhost:8000 --n-logprobs 256
 """
 
-from typing import List, Optional, Union
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urljoin
 
 import requests
 import torch
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 class VLLMAPIBackend:
@@ -50,12 +49,7 @@ class VLLMAPIBackend:
     """
 
     def __init__(
-      self,
-      api_base: str,
-      n_logprobs: int = 256,
-      timeout: int = 1800,
-      max_retries: int = 3,
-      model: str = "default"
+        self, api_base: str, n_logprobs: int = 256, timeout: int = 1800, max_retries: int = 3, model: str = "default"
     ):
         self.api_base = api_base.rstrip("/")
         self.n_logprobs = n_logprobs
@@ -77,17 +71,17 @@ class VLLMAPIBackend:
                     return
             except requests.exceptions.RequestException as e:
                 if attempt == self.max_retries - 1:
-                    raise RuntimeError(f"Failed to connect to vLLM server at {self.api_base}: {e}")
+                    raise RuntimeError(f"Failed to connect to vLLM server at {self.api_base}: {e}") from e
                 time.sleep(1)
 
         raise RuntimeError(f"vLLM server at {self.api_base} is not healthy")
 
     def _call_completions_api(
-      self,
-      prompt_token_ids: List[List[int]],
-      temperature: float,
-      max_tokens: Union[int, List[int]],
-      only_response: bool,
+        self,
+        prompt_token_ids: list[list[int]],
+        temperature: float,
+        max_tokens: int | list[int],
+        only_response: bool,
     ) -> dict:
         """Call the vLLM completions API with logprobs."""
         url = urljoin(self.api_base, "/v1/completions")
@@ -138,7 +132,7 @@ class VLLMAPIBackend:
                     time.sleep(1)
             except requests.exceptions.RequestException as e:
                 if attempt == self.max_retries - 1:
-                    raise RuntimeError(f"vLLM API request failed: {e}")
+                    raise RuntimeError(f"vLLM API request failed: {e}") from e
                 time.sleep(1)
 
         raise RuntimeError("Failed to get response from vLLM API")
@@ -164,7 +158,6 @@ class VLLMAPIBackend:
         all_indices = []
 
         for token_pos in top_logprobs[1:]:
-
             token_dict = token_pos  # {token_id_str: logprob, ...}
             # Convert to sorted list by logprob (descending)
             items = sorted(token_dict.items(), key=lambda x: x[1], reverse=True)
@@ -194,11 +187,11 @@ class VLLMAPIBackend:
         )
 
     def get_topk_logprobs(
-      self,
-      prompt_token_ids: List[List[int]],
-      temperature: float = 0.8,
-      max_new_tokens: Union[int, List[int]] = 1,
-      only_response: bool = False,
+        self,
+        prompt_token_ids: list[list[int]],
+        temperature: float = 0.8,
+        max_new_tokens: int | list[int] = 1,
+        only_response: bool = False,
     ):
         """
         Get top-k logprobs for given prompts using vLLM serve API.
@@ -228,9 +221,7 @@ class VLLMAPIBackend:
             single_prompt = [prompt_token_ids[idx]]
             single_max_new_tokens = max_new_tokens[idx] if isinstance(max_new_tokens, list) else max_new_tokens
             # Call API
-            api_response = self._call_completions_api(
-                single_prompt, temperature, single_max_new_tokens, only_response
-            )
+            api_response = self._call_completions_api(single_prompt, temperature, single_max_new_tokens, only_response)
             return idx, single_prompt, api_response
 
         results = [None] * batch_size
@@ -244,7 +235,6 @@ class VLLMAPIBackend:
         responses, teacher_topk_logprobs, teacher_topk_indices = [], [], []
 
         for single_prompt, api_response in results:
-
             # Process response
             choices = api_response.get("choices", [])
             choice = choices[0] if choices else {}
@@ -314,8 +304,7 @@ if __name__ == "__main__":
     for _ in range(args.batch_size):
         prompt_token_ids.append([random.randint(1, 10000) for _ in range(args.seq_len)])
 
-    backend = VLLMAPIBackend(api_base=args.api_base, n_logprobs=args.n_logprobs,
-                             model=args.model)
+    backend = VLLMAPIBackend(api_base=args.api_base, n_logprobs=args.n_logprobs, model=args.model)
 
     print("Testing get_topk_logprobs...")
     import time
