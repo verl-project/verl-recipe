@@ -293,6 +293,8 @@ class VLLMAPIBackend:
                 teacher_topk_logprobs.append(None)
                 teacher_topk_indices.append(None)
 
+        return responses, teacher_topk_logprobs, teacher_topk_indices
+
 
 if __name__ == "__main__":
     import argparse
