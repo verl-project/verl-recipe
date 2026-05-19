@@ -371,7 +371,7 @@ class OnPolicyDistillTrainer(RayPPOTrainer):
             result = await teacher_future
         yield *result, timing
 
-    def two_step_off_scheduler(self, continuous_iterator):
+    async def two_step_off_scheduler(self, continuous_iterator):
         """Two-step-off scheduler implementation for GKD training with optimized pipeline.
 
         This scheduler implements a double-buffered pipeline that overlaps:
