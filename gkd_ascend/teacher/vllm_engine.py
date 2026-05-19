@@ -26,8 +26,8 @@ from vllm.v1.engine.logprobs import LogprobsProcessor
 
 
 def _update_prompt_logprobs(
-    self,
-    prompt_logprobs_tensors,
+  self,
+  prompt_logprobs_tensors,
 ) -> None:
     """Update with prompt logprobs from EngineCore.
 
@@ -127,31 +127,22 @@ class VLLMEngine:
                 detokenize=False,
                 logprobs=self.n_logprobs,
                 prompt_logprobs=None if only_response else self.n_logprobs,
-                max_tokens=max_new_token,  # max_new_tokens[i] if (i is not None) else max_new_tokens,
+                max_tokens=max_new_token,
             )
 
-        batch_size = len(prompt_token_ids)
+        prompts = [TokensPrompt(prompt_token_ids=item_prompt_token_ids) for item_prompt_token_ids in prompt_token_ids]
+        if isinstance(max_new_tokens, list):
+            assert len(prompt_token_ids) == len(max_new_tokens)
+        else:
+            max_new_tokens = [max_new_tokens] * len(prompt_token_ids)
 
-        def process_single(idx):
-            single_prompt = [TokensPrompt(prompt_token_ids=prompt_token_ids[idx])]
-            single_sampling_params = [
-                make_sampling_params(max_new_tokens[idx] if isinstance(max_new_tokens, list) else max_new_tokens)
-            ]
-            # Call API
-            output = self.llm.generate(single_prompt, sampling_params=single_sampling_params)
-            return idx, single_prompt, output
+        sampling_params = [make_sampling_params(item_max_new_tokens) for item_max_new_tokens in max_new_tokens]
 
-        results = [None] * batch_size
-
-        with ThreadPoolExecutor(max_workers=batch_size) as executor:
-            futures = {executor.submit(process_single, i): i for i in range(batch_size)}
-            for future in as_completed(futures):
-                idx, single_prompt, output = future.result()
-                results[idx] = (single_prompt, output)
+        results = self.llm.generate(prompts, sampling_params=sampling_params)
 
         responses, teacher_topk_logprobs, teacher_topk_indices = [], [], []
 
-        for single_prompt, output in results:
+        for output in results:
             response_tensor = torch.tensor(output.outputs[0].token_ids, dtype=torch.int32).cpu()
 
             responses.append(response_tensor)
