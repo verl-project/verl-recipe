@@ -1,13 +1,15 @@
 NVIDIA NeMo Gym Integration
 ==================================
 
-`NVIDIA NeMo Gym <https://github.com/NVIDIA-NeMo/Gym>`_ is a framework for building training
-and evaluation environment for multi-modal models and agentic systems. It is tested at scale, supports
+`NVIDIA NeMo Gym <https://github.com/NVIDIA-NeMo/Gym>`_ is a framework for building environments for 
+training, evaluation, data generation, and downstream use, including agentic and multi modal systems.
+It is tested at scale, supports
 multi-environment training, and provides a unified interface for training and evaluation.
 Environments can be tested in NeMo Gym alone before training with verl. 
 Visit the `NeMo Gym docs <https://docs.nvidia.com/nemo/gym/latest/index.html>`_
 to learn more. This recipe demonstrates offline rollout collection, and single and multi-environment 
-training on math and agentic workplace tasks with DAPO.
+training on math and agentic workplace tasks with sync DAPO. Async requires minor changes included 
+in a future bump.
 
 Quickstart
 ----------
@@ -22,39 +24,30 @@ Clone verl alongside NeMo Gym. The recipe lives in a submodule of verl, so
 
 .. code-block:: bash
 
-    cd $WORKSPACE  # wherever you want
     git clone --recurse-submodules https://github.com/verl-project/verl.git
     git clone https://github.com/NVIDIA-NeMo/Gym.git
 
-If you already cloned verl without submodules:
-
-.. code-block:: bash
-
-    cd $WORKSPACE/verl
-    git submodule update --init --recursive
 
 **2. Set up NeMo Gym for local development (note: PyPI installation is also supported)**
 
 .. code-block:: bash
 
-    cd $WORKSPACE/Gym
+    cd Gym
 
     # Install uv if needed
     curl -LsSf https://astral.sh/uv/install.sh | sh
     source $HOME/.local/bin/env
 
-    export UV_CACHE_DIR=/path/to/cache  # optional, useful on shared filesystems
-    uv venv --python 3.12
+    uv venv
     source .venv/bin/activate
-    uv sync --extra dev
+    uv sync
 
-**3. Create an env.yaml with your policy model**
+**3. Configure an env.yaml with an inference endpoint**
 
-For standalone testing, point at a local vllm instance (or an endpoint like OpenAI):
+For standalone testing, point at a local vllm instance or an endpoint like OpenAI:
 
 .. code-block:: bash
 
-    cd $WORKSPACE/Gym
     cat > env.yaml <<'EOF'
     policy_base_url: https://localhost:8000/v1
     policy_api_key: empty
@@ -65,30 +58,24 @@ For standalone testing, point at a local vllm instance (or an endpoint like Open
 
 .. code-block:: bash
 
-    cd $WORKSPACE/Gym
-    source .venv/bin/activate
-
     config_paths="resources_servers/workplace_assistant/configs/workplace_assistant.yaml,\
     responses_api_models/vllm_model/configs/vllm_model.yaml"
 
     ng_run "+config_paths=[${config_paths}]"
 
-**5. Collect and inspect rollouts**
+**5. Collect and inspect a single rollout**
 
 In a separate terminal:
 
 .. code-block:: bash
 
-    cd $WORKSPACE/Gym
-    source .venv/bin/activate
-
     ng_collect_rollouts \
         +agent_name=workplace_assistant_simple_agent \
         +input_jsonl_fpath=resources_servers/workplace_assistant/data/example.jsonl \
-        +output_jsonl_fpath=results/rollouts.jsonl \
-        +limit=5
+        +output_jsonl_fpath=workplace_rollout.jsonl \
+        +limit=1
 
-    head -1 results/rollouts.jsonl | jq
+    head -1 workplace_rollout.jsonl | jq
 
 **6. Prepare training data**
 
@@ -119,7 +106,8 @@ The submit scripts source a ``config.env`` file for secrets and paths. Copy
 
 .. code-block:: bash
 
-    cd $WORKSPACE/verl
+    cd ../verl                                             # or wherever you cloned verl
+    cd recipe ; git checkout main ; cd ..                  # checkout main for the latest version of the recipe
     cp recipe/nemo_gym/config.env.example config.env
 
 .. code-block:: bash
@@ -138,7 +126,6 @@ See ``submit_math.sh``, ``submit_workplace.sh``, or ``submit_multienv.sh`` for S
 
 .. code-block:: bash
 
-    cd $WORKSPACE/verl
     sbatch recipe/nemo_gym/submit_workplace.sh
 
 The primary arguments relevant to NeMo Gym:
