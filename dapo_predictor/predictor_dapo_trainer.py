@@ -394,7 +394,6 @@ class PredictorRayDAPOTrainer(RayDAPOTrainer):
                             predictor_input_batch = gen_batch_output.select(deepcopy=True)
                             predictor_input_batch = self._hydrate_gen_batch_model_inputs(predictor_input_batch)
                         predictor_order = self._build_predictor_order(predictor_input_batch)
-                        # predictor_scores = self.actor_rollout_wg.compute_predictor_score(predictor_input_batch)
                         self._apply_predictor_order(gen_batch_output, predictor_order)
                         # print(f'predictor_scores{predictor_scores}')
                     # generate a batch
