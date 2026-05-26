@@ -72,7 +72,6 @@ class PredictorDataParallelPPOActor(DataParallelPPOActor):
 
         # Concatenate hidden states from all micro batches
         all_hidden_states = torch.concat(hidden_states_list, dim=0)  # [total_batch_size, hidden_size]
-        # print(f'compute_all_hidden{ all_hidden_states.shape} {all_hidden_states}')
 
         return all_hidden_states
 
@@ -311,11 +310,8 @@ class PredictorAsyncActorRolloutRefWorker(AsyncActorRolloutRefWorker):
         )
         sampled_data.meta_info = data.meta_info.copy()
         with self.ulysses_sharding_manager:
-            # print(sampled_data)
-            # sample_data=sample_data.to("cpu")
             sampled_hidden_states = self.actor.extract_hidden_states(data=sampled_data)
-            # sampled_hidden_states = DataProto.from_dict(tensors={"sampled_hidden_states": sampled_hidden_states})
-            # sampled_hidden_states = sampled_hidden_states.batch["sampled_hidden_states"]
+
         scores = self.actor.predictor_scorer(sampled_hidden_states).squeeze(-1)
 
         predictor_scores = torch.zeros(batch_size, device=scores.device, dtype=scores.dtype)
