@@ -1,9 +1,9 @@
 UPSTREAM=https://github.com/verl-project/verl.git
 MODE=rolling
 BRANCH=main
-VERL_COMMIT=bcb638649a50e58494a8ddd92085ad1174f674b8
-PIP_INSTALL=pip install verl@git+https://github.com/verl-project/verl.git@bcb638649a50e58494a8ddd92085ad1174f674b8
-GIT_SETUP=git clone https://github.com/verl-project/verl.git && cd verl && git checkout bcb638649a50e58494a8ddd92085ad1174f674b8 && git submodule update --init --recursive recipe
+VERL_COMMIT=695ac0ebcb5d4e1ca7bcb88fd952b0214daf199f
+PIP_INSTALL=pip install verl@git+https://github.com/verl-project/verl.git@695ac0ebcb5d4e1ca7bcb88fd952b0214daf199f
+GIT_SETUP=git clone https://github.com/verl-project/verl.git && cd verl && git checkout 695ac0ebcb5d4e1ca7bcb88fd952b0214daf199f && git submodule update --init --recursive recipe
 RECIPE_SUBMODULE_COMMIT=ba246418f4de12b845a09bba975f1a5242adc898
 RECIPE_FOLDER=nemo_gym
 RECIPE_FOLDER_LAST_COMMIT=e1128e325f38b6d62fcf9e09efbe5d1cda61b8d0

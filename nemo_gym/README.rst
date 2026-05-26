@@ -81,9 +81,6 @@ In a separate terminal:
 
 .. code-block:: bash
 
-    cd $WORKSPACE/Gym
-    source .venv/bin/activate
-
     config_paths="resources_servers/workplace_assistant/configs/workplace_assistant.yaml,\
     responses_api_models/vllm_model/configs/vllm_model_for_training.yaml"
 
@@ -101,13 +98,23 @@ Training
 
 **7. Configure paths and secrets**
 
+The submit scripts mount your verl clone into the container via ``VERL_ROOT`` and run verl
+from there — the container's built-in verl is not used. Clone verl at the pinned commit from
+``REQUIRED_VERL.txt`` and point ``VERL_ROOT`` at it:
+
+.. code-block:: bash
+
+    git clone https://github.com/verl-project/verl.git
+    cd verl
+    git checkout 695ac0ebcb5d4e1ca7bcb88fd952b0214daf199f
+    git submodule update --init --recursive recipe
+    cd recipe && git checkout main && cd ..
+
 The submit scripts source a ``config.env`` file for secrets and paths. Copy
 ``config.env.example`` and fill in your values:
 
 .. code-block:: bash
 
-    cd ../verl                                             # or wherever you cloned verl
-    cd recipe ; git checkout main ; cd ..                  # checkout main for the latest version of the recipe
     cp recipe/nemo_gym/config.env.example config.env
 
 .. code-block:: bash
@@ -166,6 +173,11 @@ to its environment via the ``agent_ref`` field.
 
 Note that some NeMo Gym environments such as SWE-RL launch containers and may require additional
 setup (e.g. Apptainer). See each environment's README in the NeMo Gym repo for details.
+
+Required ``verl`` version
+-------------------------
+
+See `REQUIRED_VERL.txt <REQUIRED_VERL.txt>`_ for the upstream repository, install mode (rolling ``main``, pinned release tag, or pinned git commit), and copy-pastable ``pip`` / ``git`` instructions where they exist.
 
 Requirements
 ------------
