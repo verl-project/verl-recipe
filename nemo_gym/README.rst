@@ -99,12 +99,10 @@ Training
 **7. Configure paths and secrets**
 
 The submit scripts mount your verl clone into the container via ``VERL_ROOT`` and run verl
-from there — the container's built-in verl is not used. Clone verl at the pinned commit from
-``REQUIRED_VERL.txt`` and point ``VERL_ROOT`` at it:
+from there. Clone verl at the pinned commit from``REQUIRED_VERL.txt`` and point ``VERL_ROOT`` at it:
 
 .. code-block:: bash
 
-    git clone https://github.com/verl-project/verl.git
     cd verl
     git checkout 695ac0ebcb5d4e1ca7bcb88fd952b0214daf199f
     git submodule update --init --recursive recipe
@@ -216,7 +214,7 @@ Implementation Details
     preventing retokenization drift in multi-step rollouts (matches NeMo RL's approach).
   - ``patch_hermes_tool_parser_thread_safety()`` — caches the tokenizer encode/decode results
     in ``Hermes2ProToolParser.__init__`` so concurrent requests don't race the Rust tokenizer
-    and crash with ``RuntimeError: Already borrowed``. Based on prime-rl PR #1837.
+    and crash with ``RuntimeError: Already borrowed``.
 
   **Tested with vLLM 0.17.0** (``verlai/verl:vllm017.latest``). The ``_preprocess_chat`` return
-  structure may change between vLLM versions — see comment in ``server_patch.py``.
+  structure may change between vLLM versions, so stay with vllm 0.17.0 for now.
