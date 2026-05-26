@@ -262,7 +262,7 @@ class PredictorAsyncActorRolloutRefWorker(AsyncActorRolloutRefWorker):
         """Override to keep actor loaded on GPU when predictor needs it afterward."""
         cfg = self._predictor_cfg()
         keep_actor_loaded = bool(cfg.get("predictor_keep_actor_loaded", False))
-        # print(f'keep_actor_loaded{keep_actor_loaded}')
+
         if not (keep_actor_loaded and self._is_offload_param):
             return super().update_actor(data)
         load_fsdp_model_to_gpu(self.actor_module_fsdp)
@@ -321,7 +321,7 @@ class PredictorAsyncActorRolloutRefWorker(AsyncActorRolloutRefWorker):
         predictor_scores = torch.zeros(batch_size, device=scores.device, dtype=scores.dtype)
         for i, sample_idx in enumerate(sample_indices):
             predictor_scores[sample_idx : min(sample_idx + n, batch_size)] = scores[i]
-        # print(f'predictor_scores{predictor_scores}')
+
         output = DataProto.from_dict(tensors={"predictor_scores": predictor_scores}).to("cpu")
         if self._pending_offload_param_restore is not None:
             self._is_offload_param = self._pending_offload_param_restore
@@ -340,9 +340,7 @@ class PredictorAsyncActorRolloutRefWorker(AsyncActorRolloutRefWorker):
         """
         assert self._is_actor
         cfg = self._predictor_cfg()
-        # if not cfg.get("enable", False):
-        #     return DataProto(meta_info={"metrics": {}})
-
+        
         loaded_actor_for_predictor = self._is_offload_param and self._actor_params_are_offloaded()
         if loaded_actor_for_predictor:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
