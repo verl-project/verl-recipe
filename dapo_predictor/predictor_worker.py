@@ -338,7 +338,7 @@ class PredictorAsyncActorRolloutRefWorker(AsyncActorRolloutRefWorker):
         cfg = self._predictor_cfg()
         if not cfg.get("enable", False):
             return DataProto(meta_info={"metrics": {}})
-            
+
         loaded_actor_for_predictor = self._is_offload_param and self._actor_params_are_offloaded()
         if loaded_actor_for_predictor:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
