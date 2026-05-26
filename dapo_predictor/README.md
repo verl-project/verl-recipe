@@ -102,7 +102,6 @@ PYTHONPATH=/workspace/verl python recipe/dapo_predictor/main_dapo_predictor_reor
   +trainer.predictor_reorder.batch_size=32 \
   +trainer.predictor_reorder.lr=3e-5 \
   +trainer.predictor_reorder.weight_decay=1e-4 \
-  +trainer.predictor_reorder.seed=1
 ```
 
 Use the same DAPO data, model, rollout, critic, and trainer overrides as the normal `recipe.dapo` entrypoint. This package only adds predictor reorder-specific overrides.
