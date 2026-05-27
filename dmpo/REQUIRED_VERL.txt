@@ -1,0 +1,10 @@
+# dmpo — rolling; exact commits refreshed from this workspace
+UPSTREAM=https://github.com/verl-project/verl.git
+MODE=rolling
+BRANCH=main
+# Exact upstream verl commit this file was refreshed against (core library).
+VERL_COMMIT=2eb9cb867a31fd1cae282600c474f440ca3c0167
+PIP_INSTALL=pip install verl@git+https://github.com/verl-project/verl.git@2eb9cb867a31fd1cae282600c474f440ca3c0167
+GIT_SETUP=git clone https://github.com/verl-project/verl.git && cd verl && git checkout 2eb9cb867a31fd1cae282600c474f440ca3c0167 && git submodule update --init --recursive recipe
+RECIPE_FOLDER=dmpo
+NOTES=DMPO relies on the model-engine PPO path and patches the actor loss wrapper to pass prompt uid groups to the registered policy loss.
