@@ -1,4 +1,4 @@
-set -x
+set -xe
 
 # echo "127.0.0.1 localhost" >> /etc/hosts # Add localhost for container environments if needed
 export VLLM_USE_V1=1
