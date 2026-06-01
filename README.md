@@ -80,6 +80,7 @@ The script requires only `bash`, `git`, `awk`, and `pip`/`pip3` on `PATH`. It do
 | minicpmo | [`recipe/minicpmo/REQUIRED_VERL.txt`](minicpmo/REQUIRED_VERL.txt) |
 | nemo_gym | [`recipe/nemo_gym/REQUIRED_VERL.txt`](nemo_gym/REQUIRED_VERL.txt) |
 | open_math_reasoning | [`recipe/open_math_reasoning/REQUIRED_VERL.txt`](open_math_reasoning/REQUIRED_VERL.txt) |
+| partial_rollout | [`recipe/partial_rollout/REQUIRED_VERL.txt`](partial_rollout/REQUIRED_VERL.txt) |
 | prime | [`recipe/prime/REQUIRED_VERL.txt`](prime/REQUIRED_VERL.txt) |
 | qat | [`recipe/qat/REQUIRED_VERL.txt`](qat/REQUIRED_VERL.txt) |
 | r1 | [`recipe/r1/REQUIRED_VERL.txt`](r1/REQUIRED_VERL.txt) |
@@ -97,6 +98,7 @@ The script requires only `bash`, `git`, `awk`, and `pip`/`pip3` on `PATH`. It do
 - [retool](https://github.com/verl-project/verl-recipe/tree/main/retool): Reinforcement Learning for Strategic Tool Use in LLMs
 - [langgraph_agent](https://github.com/verl-project/verl-recipe/tree/main/langgraph_agent): A tiny example to demonstrate multi-turn rollout with [LangGraph ReactAgent](https://langchain-ai.github.io/langgraph/agents/overview/) to solve math expression.
 - [spo](https://github.com/verl-project/verl-recipe/tree/main/spo): [Single-stream Policy Optimization](https://arxiv.org/abs/2509.13232).
+- [partial_rollout](./partial_rollout/): synchronous RL with cross-step rollout interruption + resume to reclaim long-tail GPU bubbles ([APRIL](https://arxiv.org/pdf/2509.18521)-style).
 - TBA...
 
 ## Contribution
