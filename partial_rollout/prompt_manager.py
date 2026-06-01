@@ -11,380 +11,261 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 import asyncio
-import logging
-import time
-import uuid
+import itertools
 from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
-import numpy as np
 import ray
-import torch
 from omegaconf import DictConfig
-from tensordict import TensorDict
-from torch.utils.data import DataLoader
-from torchdata.stateful_dataloader import StatefulDataLoader
 
-from verl import DataProto
-from verl.experimental.agent_loop.agent_loop import AgentLoopOutput
-from verl.trainer.ppo.ray_trainer import compute_response_mask
+from verl.experimental.fully_async_policy.detach_utils import RolloutSample, assemble_batch_from_rollout_samples
+from verl.protocol import DataProto
 
-logger = logging.getLogger(__file__)
-logger.setLevel("INFO")
+# Cap total in-flight prompts (pending + ongoing + done) at ~2x batch_size.
+# Originally sized to keep workers fed during long-running prompts; now also
+# acts as a hard ceiling on done_queue growth — see push_batch's backpressure
+# block for the trade-off rationale.
+_PREFETCH_FACTOR = 2
 
 
 @dataclass
 class RolloutPrompt:
-    """Enhanced rollout prompt (with n rollout samples) containing both original batch info and AgentLoopOutput"""
+    """A trainer-supplied prompt as it flows through the partial-rollout queue.
 
-    # Original batch information
-    full_batch: DataProto
+    `batch` is the un-repeated trainer batch (one row); `gen_batch_output`
+    starts as the raw gen-side fields (prompt tokens etc., repeated n times)
+    and is replaced by the worker's postprocessed DataProto (prompts /
+    responses / response_mask / attention_mask / position_ids + meta_info
+    fields) once all n rollouts complete. `pull_batch` unions `batch.repeat(n)`
+    with `gen_batch_output` to form one training-side sample row.
+    """
 
-    # AgentLoopOutput from generation
-    agent_loop_output_list: list[AgentLoopOutput]  # length: n
-
-    # Metadata
+    batch: DataProto
+    gen_batch_output: DataProto
     prompt_id: str
-    epoch: int
-
-    # Processing metadata
-    processing_times: list[float]  # length: n
-    tool_calls: list[float]  # length: n
-    param_version: int
-    param_version_start: list[int]  # length: n
-    param_version_end: list[int]  # length: n
-    rollout_status: dict[str, Any]
-    original_batch: DataProto
-
-
-def dict_of_list_to_list_of_dict(metrics: dict) -> list[dict]:
-    """
-    Convert:
-        {k: [v1, v2, ...]}
-    to:
-        [{k: v1}, {k: v2}, ...]
-    """
-    if not metrics:
-        return []
-
-    keys = list(metrics.keys())
-    length = len(next(iter(metrics.values())))
-
-    for k, v in metrics.items():
-        assert len(v) == length, f"Length mismatch for key '{k}'"
-
-    return [{k: metrics[k][i] for k in keys} for i in range(length)]
-
-
-def assemble_batch_from_rollout_prompts(
-    rollout_prompts: list[RolloutPrompt], current_param_version: int = None
-) -> DataProto:
-    """
-    Assemble gen_batch_output from RolloutPrompt objects
-    Assembles batches from RolloutPrompt objects, similar to the _post_generate_batch logic in ray_trainer.
-
-    Args:
-        rollout_prompts: List of RolloutPrompt objects
-        current_param_version: Current parameter version
-    Returns:
-        DataProto: Assembled gen_batch_output
-
-    Raises:
-        ValueError: If rollout_prompts is empty
-    """
-    try:
-        start_time = time.time()
-
-        if not rollout_prompts:
-            print("[Warning!!!] Empty rollout_prompts provided for batch assembly")
-            return DataProto(batch=TensorDict({}, batch_size=(0,)), meta_info={})
-
-        print(f"[BatchUtils] Assembling batch from {len(rollout_prompts)} RolloutPrompt objects")
-
-        rollout_prompts_batch = []
-        processing_times = []
-        tool_calls = []
-        rollout_status = rollout_prompts[0].rollout_status
-        # Add a prefix to all rollout_status keys
-        rollout_status = {f"partial_rollout/{key}": value for key, value in rollout_status.items()}
-
-        for rp in rollout_prompts:
-            rollout_prompts_batch.append(rp.full_batch)
-
-        final_batch = DataProto.concat(rollout_prompts_batch)
-
-        # Calculate response_mask (if not present)
-        if "response_mask" not in final_batch.batch.keys():
-            final_batch.batch["response_mask"] = compute_response_mask(final_batch)
-
-        # Calculate the global valid token number
-        if "attention_mask" in final_batch.batch:
-            final_batch.meta_info["global_token_num"] = torch.sum(final_batch.batch["attention_mask"], dim=-1).tolist()
-
-        processing_times = final_batch.non_tensor_batch["processing_times"]
-        tool_calls = final_batch.non_tensor_batch["tool_calls_times"]
-        # Collect statistics
-
-        processing_time_stats = {
-            "processing_time/avg": np.mean(processing_times),
-            "processing_time/max": np.max(processing_times),
-            "processing_time/min": np.min(processing_times),
-            "processing_time/tp50": np.percentile(processing_times, 50),
-            "processing_time/tp99": np.percentile(processing_times, 99),
-            "processing_time/tp95": np.percentile(processing_times, 95),
-        }
-        tool_calls_stats = {}
-        if len(tool_calls) > 0:
-            tool_calls_stats = {
-                # "timing_s/agent_loop/tool_calls/max": np.max(tool_calls),
-                # "timing_s/agent_loop/tool_calls/min": np.min(tool_calls),
-                # "timing_s/agent_loop/tool_calls/mean": np.mean(tool_calls),
-            }
-        processing_time_stats = {f"partial_rollout/{key}": value for key, value in processing_time_stats.items()}
-
-        param_version_start = final_batch.non_tensor_batch["param_version_start"]
-        param_version_end = final_batch.non_tensor_batch["param_version_end"]
-        param_version_diff = [abs(a - b) for a, b in zip(param_version_end, param_version_start, strict=False)]
-        num_diff0 = param_version_diff.count(0)
-        partial_stats = {
-            "partial_rollout/partial/total_partial_num": len(param_version_diff) - num_diff0,
-            "partial_rollout/partial/partial_ratio": (len(param_version_diff) - num_diff0) / len(param_version_diff),
-            "partial_rollout/partial/max_partial_span": max(param_version_diff),
-        }
-        staleness_stats = {}
-        if current_param_version is not None:
-            staleness = [current_param_version - version_start for version_start in param_version_start]
-            staleness_stats.update(
-                {
-                    "partial_rollout/partial/staleness_max": np.max(staleness),
-                    "partial_rollout/partial/staleness_min": np.min(staleness),
-                    "partial_rollout/partial/staleness_avg": np.mean(staleness),
-                    "partial_rollout/partial/staleness_tp50": np.percentile(staleness, 50),
-                    "partial_rollout/partial/staleness_tp99": np.percentile(staleness, 99),
-                    "partial_rollout/partial/staleness_tp95": np.percentile(staleness, 95),
-                }
-            )
-        # add meta_info
-        param_versions = [rp.param_version for rp in rollout_prompts]
-        trajectorys_param_versions = final_batch.non_tensor_batch["param_version_end"]
-
-        final_batch.meta_info.update(
-            {
-                "rollout_param_versions": param_versions,
-                "param_version_diversity": len(set(param_versions)) if param_versions else 0,
-                "trajectory_param_versions": trajectorys_param_versions,
-                **processing_time_stats,
-                **rollout_status,
-                **partial_stats,
-                **staleness_stats,
-                **tool_calls_stats,
-            }
-        )
-
-        final_batch.meta_info["metrics"] = dict_of_list_to_list_of_dict(final_batch.meta_info["metrics"])
-
-        print(f"[BatchUtils] Batch assembly completed in {time.time() - start_time:.2f}s")
-
-    except Exception as e:
-        logger.error(f"[BatchUtils] Batch assembly failed: {e}")
-        raise e
-
-    return final_batch
 
 
 @ray.remote
 class RolloutPromptManager:
-    """
-    Ray-based asynchronous rollout prompt manager for communication between AgentLoop and Trainer
+    """Ray actor coordinating partial-rollout prompt scheduling.
+
+    Three data structures track each prompt's state:
+
+      - pending_queue : prompts waiting for a worker (FIFO).
+      - ongoing_set   : prompt_ids currently being rolled out by some worker.
+      - done_queue    : prompts whose n rollouts all completed and are ready
+                        to be assembled into a training batch.
+
+    Transitions:
+
+      trainer → push_batch    : (new)         → pending_queue
+      worker  → pull_prompts  : pending_queue → ongoing_set
+      worker  → push_prompts  : ongoing_set   → done_queue
+      trainer → pull_batch    : done_queue    → assembled DataProto
+
+    `FullyLLMServerClient` makes abort/resume transparent at the LLM-client
+    layer, so workers always return fully-postprocessed prompts — there is no
+    `aborted → pending` re-queue path. Ray actors are single-threaded, so all
+    method bodies execute serially with no locking inside this class.
     """
 
-    def __init__(self, config: DictConfig, tokenizer, processor, dataloader: DataLoader):
+    def __init__(self, config: DictConfig, tokenizer: Any):
         self.config = config
-        self.cancellation_event = asyncio.Event()
-        self._lock = asyncio.Lock()
-        self.epoch = 0
-        self.current_param_version = 0
-        self.ongoing_set = set()
-        self.pending_queue = deque()
-        self.done_queue = deque()
+        # tokenizer is passed straight through to assemble_batch_from_rollout_samples
+        # in pull_batch; this class never reads it. Kept on self only because the
+        # downstream call needs it. If assemble_batch_from_rollout_samples ever
+        # stops needing a tokenizer, this field can be dropped entirely.
+        self.tokenizer = tokenizer
+        self.batch_size = self.config.data.get("gen_batch_size", self.config.data.train_batch_size)
+        self.n = self.config.actor_rollout_ref.rollout.n
+        # Fail-fast: invalid batch_size makes pull_batch silently never return.
+        assert self.batch_size > 0, f"batch_size must be > 0, got {self.batch_size}"
+        assert self.n >= 1, f"rollout.n must be >= 1, got {self.n}"
+        self.ongoing_set: set[str] = set()
+        self.pending_queue: deque[RolloutPrompt] = deque()
+        self.done_queue: deque[RolloutPrompt] = deque()
+        # Set when done_queue first reaches batch_size; cleared by pull_batch
+        # after it drains a batch and done_queue falls back below the threshold.
+        # Lets pull_batch await readiness instead of being polled, eliminating
+        # the per-step ~10k empty Ray RPCs the manager used to fire while
+        # waiting on the first batch's tail end.
+        self._batch_ready: asyncio.Event = asyncio.Event()
+        # Set by push_batch when pending_queue gains prompts; cleared by
+        # pull_prompts when it drains pending. Replaces the worker-side
+        # sleep/poll with a one-way notification — idle workers consume zero
+        # CPU and there are no per-empty-pull Ray RPCs.
+        self._prompts_pending: asyncio.Event = asyncio.Event()
 
-        from recipe.partial_rollout.main_ppo import create_rl_dataset, create_rl_sampler
+    def _maybe_signal_batch_ready(self) -> None:
+        # Single edge for any push that may have grown done_queue to threshold.
+        # asyncio.Event.set() is idempotent — fine to call when already set.
+        if len(self.done_queue) >= self.batch_size:
+            self._batch_ready.set()
 
-        from verl.utils.dataset.rl_dataset import collate_fn
+    def push_batch(self, batch: DataProto, gen_batch: DataProto) -> bool:
+        """Enqueue a trainer-supplied batch into pending_queue.
 
-        self.dataset = create_rl_dataset(
-            config.data.train_files,
-            config.data,
-            tokenizer,
-            processor,
-            max_samples=config.data.get("train_max_samples", -1),
+        Returns True iff the manager wants more prompts — i.e. total in-flight
+        (pending + ongoing + done) is still below the prefetch buffer. The
+        trainer uses this as a backpressure signal to decide whether to keep
+        feeding.
+        """
+        num_prompts = batch.batch.size(0)
+        # gen_batch is split row-wise in lockstep with batch; mismatched row
+        # counts would silently mis-pair prompts with their generation inputs.
+        # Read from non_tensor_batch["uid"]: upstream `_get_gen_batch` doesn't pop
+        # any tensor keys (designed for agent-loop, which only consumes
+        # non_tensor_batch), so `gen_batch.batch` is None — but uid is always
+        # carried over via the reward_keys union.
+        gen_num_prompts = len(gen_batch.non_tensor_batch["uid"])
+        assert gen_num_prompts == num_prompts, f"gen_batch row count {gen_num_prompts} != batch row count {num_prompts}"
+        batch_list = batch.chunk(num_prompts)
+        gen_batch_list = gen_batch.chunk(num_prompts)
+        n = self.n
+
+        # Validate all UIDs first, then mutate. This makes push_batch atomic:
+        # if any UID collides (with another in-flight prompt or a duplicate
+        # within this same batch) the assert fires before any state changes,
+        # so the actor is left in a clean state for the caller to react to.
+        in_flight_ids = (
+            self.ongoing_set | {p.prompt_id for p in self.pending_queue} | {p.prompt_id for p in self.done_queue}
         )
-        self.sampler = create_rl_sampler(config.data, self.dataset)
-        self.dataloader = StatefulDataLoader(
-            dataset=self.dataset,
-            batch_size=config.data.get("gen_batch_size", config.data.train_batch_size),
-            num_workers=config.data.get("dataloader_num_workers", 8),
-            drop_last=True,
-            collate_fn=collate_fn,
-            sampler=self.sampler,
-        )
-
-        self.dataiter = iter(self.dataloader)
-        self.is_dataiter_exhausted = False
-
-    def on_epoch_start(self, epoch: int):
-        """On epoch start for the rollout prompt manager."""
-        self.epoch = epoch
-        if self.is_dataiter_exhausted:
-            self.dataiter = iter(self.dataloader)
-            self.is_dataiter_exhausted = False
-
-    def prepare_generation(self, param_version: int):
-        """Prepare generation for the rollout prompt manager."""
-        self.cancellation_event.clear()
-        self.ongoing_set.clear()
-        self.current_param_version = param_version
-
-    def check_generation_once(self, num_rollout_prompts: int) -> bool:
-        """Check generation for the rollout prompt manager."""
-        done = len(self.done_queue) >= num_rollout_prompts or (
-            len(self.ongoing_set) == 0 and len(self.pending_queue) == 0 and self.is_dataiter_exhausted
-        )
-
-        if done:
-            logger.info(
-                f"[RolloutPromptManager] check_generation_once:\n"
-                f"  - num_rollout_prompts: {num_rollout_prompts}\n"
-                f"  - num_done_queue: {len(self.done_queue)}\n"
-                f"  - num_pending_queue: {len(self.pending_queue)}\n"
-                f"  - num_ongoing_set: {len(self.ongoing_set)}\n"
+        # Element type is whatever non_tensor_batch["uid"] holds — usually
+        # numpy.str_ (a str subclass), occasionally a python str depending on
+        # how the upstream dataset built the column. Annotated as Any to avoid
+        # implying a stricter contract than what we actually rely on (just
+        # hashability + equality for ongoing/pending/done lookups).
+        prompt_ids: list[Any] = []
+        for sample_batch in batch_list:
+            prompt_id = sample_batch.non_tensor_batch["uid"][0]
+            assert prompt_id not in in_flight_ids, (
+                f"push_batch received prompt_id {prompt_id!r} already in flight "
+                "(ongoing/pending/done); UID collisions across calls are not supported"
             )
-            self.cancellation_event.set()
-        return done
+            in_flight_ids.add(prompt_id)
+            prompt_ids.append(prompt_id)
 
-    def check_generation_post_state(self, num_rollout_prompts: int) -> bool:
-        """Check generation post state for the rollout prompt manager."""
-        logger.info(
-            "==========================================================\n"
-            f"[RolloutPromptManager] check_generation_post_state:\n"
-            f"  - num_rollout_prompts: {num_rollout_prompts}\n"
-            f"  - num_done_queue: {len(self.done_queue)}\n"
-            f"  - num_pending_queue: {len(self.pending_queue)}\n"
-            f"  - num_ongoing_set: {len(self.ongoing_set)}\n"
-            "==========================================================\n"
-        )
-        return len(self.ongoing_set) == 0 and len(self.done_queue) >= num_rollout_prompts
-
-    def pull_done_prompts(self, num_rollout_prompts: int) -> list[DataProto]:
-        """Pull done prompts from the rollout prompt manager."""
-        n = min(num_rollout_prompts, len(self.done_queue))
-        return [
-            assemble_batch_from_rollout_prompts(
-                [self.done_queue.popleft() for _ in range(n)],
-                self.current_param_version,
+        for i in range(num_prompts):
+            prompt_batch = batch_list[i]
+            prompt_gen_batch = gen_batch_list[i]
+            self.pending_queue.append(
+                RolloutPrompt(
+                    batch=prompt_batch,
+                    gen_batch_output=prompt_gen_batch.repeat(repeat_times=n, interleave=True),
+                    prompt_id=prompt_ids[i],
+                )
             )
-        ]
+        # Backpressure: count total in-flight (pending + ongoing + done), not
+        # just pending. Otherwise a fast worker / slow trainer pattern keeps
+        # pending empty while done_queue grows unbounded.
+        #
+        # This is a deliberate trade-off: bounding total in-flight prioritizes
+        # memory safety over keeping every worker saturated. In steady state
+        # workers may briefly idle when done_queue is near the cap — that is
+        # expected, not a starvation bug. Don't "fix" it by reverting to a
+        # pending-only check without addressing the OOM risk.
+        in_flight = len(self.pending_queue) + len(self.ongoing_set) + len(self.done_queue)
+        # Wake any worker awaiting pull_prompts. Idempotent — symmetric to
+        # _maybe_signal_batch_ready called from push_prompts.
+        self._prompts_pending.set()
+        return in_flight < _PREFETCH_FACTOR * self.batch_size
 
-    def push_done_prompt(self, rollout_prompt: RolloutPrompt, is_cancel: bool = False):
-        """Push done prompts to the rollout prompt manager."""
-        try:
-            if is_cancel:
-                self.pending_queue.appendleft(rollout_prompt)
-            else:
-                rollout_prompt.full_batch.non_tensor_batch["uid"] = np.array(
-                    [f"uid_{rollout_prompt.prompt_id}"] * len(rollout_prompt.full_batch), dtype=object
-                )
-                rollout_prompt.full_batch.union(rollout_prompt.original_batch)
-                rollout_prompt.param_version = self.current_param_version
-                param_version_start = rollout_prompt.full_batch.non_tensor_batch["param_version_start"]
-                param_version_end = rollout_prompt.full_batch.non_tensor_batch["param_version_end"]
-                param_version_diff = [abs(a - b) for a, b in zip(param_version_end, param_version_start, strict=False)]
-                if max(param_version_diff) < 10:
-                    self.done_queue.append(rollout_prompt)
+    async def pull_batch(self) -> DataProto:
+        """Assemble one training batch once done_queue has accumulated batch_size prompts.
 
-                assert rollout_prompt.prompt_id in self.ongoing_set, (
-                    f"prompt {rollout_prompt.prompt_id} not in ongoing_set"
-                )
+        Awaits self._batch_ready instead of returning None on under-fill, so the
+        manager-side caller can `await pull_batch.remote()` once and resume
+        immediately on readiness — no manager-side polling, no per-step
+        thousands of empty Ray RPCs.
+        """
+        await self._batch_ready.wait()
+        # Peek-then-commit: assemble can OOM during repeat/union/cat. If we
+        # popleft up front and then fail, the prompts are lost; the caller
+        # has no way to retry. Instead build the result first, only mutate
+        # done_queue once assemble has returned successfully.
+        rollout_prompts = list(itertools.islice(self.done_queue, self.batch_size))
+        rollout_samples = []
+        for rp in rollout_prompts:
+            # DataProto.chunk hands every chunk the same meta_info dict reference
+            # (protocol.py:900), so all rp.batch in this iteration alias one dict.
+            # The first union(...) below mutates that shared dict (e.g. injects
+            # "metrics"); the second rp's union then trips union_two_dict's
+            # equality assert because its own gen_batch_output.meta_info["metrics"]
+            # is a different list object. Snapshot per-iteration to break the
+            # alias before union mutates anything.
+            repeated = rp.batch.repeat(repeat_times=self.n, interleave=True)
+            repeated.meta_info = dict(repeated.meta_info)
+            full_batch = repeated.union(rp.gen_batch_output)
+            # epoch=0 is a placeholder: RolloutSample.epoch is required by the
+            # dataclass but not read by assemble_batch_from_rollout_samples,
+            # and partial rollout doesn't propagate epoch through this queue.
+            rollout_samples.append(
+                RolloutSample(full_batch=full_batch, sample_id=rp.prompt_id, epoch=0, rollout_status={})
+            )
 
-            self.ongoing_set.remove(rollout_prompt.prompt_id)
-        except Exception as e:
-            logger.error(f"[RolloutPromptManager] push_done_prompt: {e}")
+        result = assemble_batch_from_rollout_samples(
+            rollout_samples,
+            self.tokenizer,
+            self.config,
+        )
+        for _ in range(self.batch_size):
+            self.done_queue.popleft()
+        # Re-arm the gate: if push_prompts hasn't yet topped done_queue back up
+        # to batch_size, the next pull_batch must block again.
+        if len(self.done_queue) < self.batch_size:
+            self._batch_ready.clear()
+        return result
 
-    def pull_pending_prompts(self, num_rollout_prompts: int) -> list[RolloutPrompt]:
-        """Pull pending prompts from the rollout prompt manager."""
-        try:
-            pending_prompts = []
+    async def pull_prompts(self, prompt_count: int) -> list[RolloutPrompt]:
+        """Block until push_batch has added at least one prompt, then move up
+        to `prompt_count` prompts from pending → ongoing.
 
-            while len(pending_prompts) < num_rollout_prompts:
-                if self.is_dataiter_exhausted or self.cancellation_event.is_set():
-                    break
+        Outer `while` handles two workers waking from one `set()`: whoever runs
+        first drains, the loser re-blocks on the next push_batch's set().
+        """
+        while not self.pending_queue:
+            await self._prompts_pending.wait()
 
-                n = min(num_rollout_prompts - len(pending_prompts), len(self.pending_queue))
-                if len(self.pending_queue) > 0:
-                    pending_prompts.extend([self.pending_queue.popleft() for _ in range(n)])
-                else:
-                    try:
-                        batch_dict = next(self.dataiter)
-                        batch = DataProto.from_single_dict(batch_dict)
-                        batch: list[DataProto] = batch.chunk(batch.batch.size(0))
-                        self.pending_queue.extend(self._prepare_single_rollout_prompt(data) for data in batch)
-                    except StopIteration:
-                        self.is_dataiter_exhausted = True
+        for prompt in self.pending_queue:
+            assert prompt.prompt_id not in self.ongoing_set, f"prompt {prompt.prompt_id} already in ongoing_set"
 
-            for prompt in pending_prompts:
-                assert prompt.prompt_id not in self.ongoing_set, f"prompt {prompt.prompt_id} already in ongoing_set"
-                self.ongoing_set.add(prompt.prompt_id)
-
-        except Exception as e:
-            logger.error(f"[RolloutPromptManager] pull_pending_prompts: {e}")
-
+        pending_prompts = []
+        while prompt_count > 0 and self.pending_queue:
+            pending_prompts.append(self.pending_queue.popleft())
+            prompt_count -= 1
+        self.ongoing_set.update(p.prompt_id for p in pending_prompts)
+        # Clear so the next pull blocks until push_batch supplies more.
+        if not self.pending_queue:
+            self._prompts_pending.clear()
         return pending_prompts
 
-    def _prepare_single_rollout_prompt(self, data: DataProto) -> RolloutPrompt:
-        """Prepare a single rollout prompt."""
-        import copy
+    def push_prompts(self, prompts: list[RolloutPrompt]) -> None:
+        """Return fully-rolled-out prompts from a worker; ongoing_set → done_queue.
 
-        config = self.config
-        original_batch = copy.deepcopy(data)
-
-        reward_model_keys = (
-            set({"data_source", "reward_model", "extra_info", "uid"}) & original_batch.non_tensor_batch.keys()
-        )
-
-        batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
-        non_tensor_batch_keys_to_pop = set(original_batch.non_tensor_batch.keys()) - reward_model_keys
-        gen_batch = original_batch.pop(
-            batch_keys=batch_keys_to_pop,
-            non_tensor_batch_keys=list(non_tensor_batch_keys_to_pop),
-        )
-
-        # For agent loop, we need reward model keys to compute score.
-        gen_batch.non_tensor_batch.update(original_batch.non_tensor_batch)
-
-        # Setting selected agent, that supports partial
-        if config.actor_rollout_ref.rollout.multi_turn.enable:
-            gen_batch.non_tensor_batch["agent_name"] = np.array(["partial_tool_agent"] * len(gen_batch), dtype=object)
-        else:
-            gen_batch.non_tensor_batch["agent_name"] = np.array(
-                ["partial_single_turn_agent"] * len(gen_batch), dtype=object
+        With `FullyLLMServerClient` absorbing abort/resume inside `client.generate()`,
+        every prompt the worker pushes is terminal (all n rollouts done +
+        postprocessed). No aborted-back-to-pending path.
+        """
+        # Validate first, then mutate — same atomicity discipline as push_batch.
+        # Catches "prompt was never pulled" and "same prompt pushed twice in
+        # one call" before any state changes.
+        seen: set[str] = set()
+        for prompt in prompts:
+            assert prompt.prompt_id in self.ongoing_set, (
+                f"push_prompts: {prompt.prompt_id!r} was never pulled (not in ongoing_set)"
             )
+            assert prompt.prompt_id not in seen, f"push_prompts: {prompt.prompt_id!r} appears twice in the same call"
+            seen.add(prompt.prompt_id)
 
-        original_batch = original_batch.repeat(repeat_times=config.actor_rollout_ref.rollout.n, interleave=True)
-        gen_batch = gen_batch.repeat(repeat_times=config.actor_rollout_ref.rollout.n, interleave=True)
-        gen_batch.non_tensor_batch["param_version"] = [self.current_param_version] * len(gen_batch)
-
-        return RolloutPrompt(
-            full_batch=gen_batch,
-            agent_loop_output_list=[None] * self.config.actor_rollout_ref.rollout.n,
-            prompt_id=f"prompt_{uuid.uuid4()}",
-            epoch=self.epoch,
-            param_version=self.current_param_version,  # finish param version
-            param_version_start=[],  # len()=n, start param version
-            param_version_end=[],  # len()=n, end param version
-            processing_times=[],
-            tool_calls=[],
-            rollout_status={},
-            original_batch=original_batch,
-        )
+        for prompt in prompts:
+            # remove (not discard): assert above guarantees membership, so a
+            # KeyError here would mean an internal bug we want to surface.
+            self.ongoing_set.remove(prompt.prompt_id)
+            self.done_queue.append(prompt)
+        # Wake any pull_batch waiter if this push pushed done_queue over the
+        # threshold. Hot path for throughput — without this, pull_batch would
+        # block on _batch_ready forever even after the batch is ready.
+        self._maybe_signal_batch_ready()

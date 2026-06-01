@@ -11,140 +11,108 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 import asyncio
-import logging
-from typing import Any, Optional, Sequence
+from typing import Any, Optional
 
 import ray
-from ray.actor import ActorHandle
-from vllm import SamplingParams
-from vllm.inputs import TokensPrompt
-from vllm.outputs import RequestOutput
 
-from verl.workers.config import HFModelConfig, RolloutConfig
-from verl.workers.rollout.replica import RolloutMode
-from verl.workers.rollout.vllm_rollout.vllm_async_server import (
-    _qwen2_5_vl_dedup_image_tokens,
-    vLLMHttpServerBase,
-    vLLMReplica,
-)
-
-logger = logging.getLogger(__file__)
-logger.setLevel(logging.INFO)
+from verl.workers.rollout.replica import TokenOutput
+from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer, vLLMReplica
 
 
-@ray.remote(num_cpus=1)
-class vLLMHttpServerForPartial(vLLMHttpServerBase):
-    def __init__(
-        self,
-        config: RolloutConfig,
-        model_config: HFModelConfig,
-        rollout_mode: RolloutMode,
-        workers: list[ActorHandle],
-        replica_rank: int,
-        node_rank: int,
-        gpus_per_node: int,
-        nnodes: int,
-    ):
-        super().__init__(config, model_config, rollout_mode, workers, replica_rank, node_rank, gpus_per_node, nnodes)
+@ray.remote
+class PartialRolloutvLLMHttpServer(vLLMHttpServer):
+    """vLLM HTTP server with a Python-side resume-gate.
 
-        # for cancel LLMServer
-        self.paused = False
-        self.lock = asyncio.Lock()
-        self.cancel_event: dict[str, asyncio.Event] = {}
-        self.req_output: dict[str, Optional[RequestOutput]] = {}
+    Why this exists: vLLM <0.12 has no `pause_generation` primitive — its
+    `abort_all_requests` only signals abort on currently-tracked requests,
+    leaving the engine free to accept new ones immediately after. PartialRollout's
+    workers retry aborted `client.generate(...)` calls inside
+    `FullyLLMServerClient`, so the moment `cancel()` returns, fresh
+    requests start hitting the engine again — and the next
+    `sleep_replicas` → `update_weights` → wake_up sequence races those
+    requests' kernels, surfacing as `CUDA error: an illegal memory access`.
 
-    async def _generate_step(
-        self,
-        prompt_ids: list[int],
-        sampling_params: dict[str, Any],
-        request_id: str,
-        image_data: Optional[list[Any]] = None,
-    ):
-        max_tokens = self.config.max_model_len - len(prompt_ids)
-        sampling_params["logprobs"] = 1
-        sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
-        sampling_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
-        prompt_ids = _qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
-        prompt = TokensPrompt(
-            prompt_token_ids=prompt_ids, multi_modal_data={"image": image_data} if image_data else None
-        )
-        generator = self.engine.generate(prompt=prompt, sampling_params=sampling_params, request_id=request_id)
+    `_resume_event` is the gate: every `generate(...)` first awaits the
+    event before reaching vLLM. While `cancel()` holds the gate cleared,
+    new requests hang at the entry instead of touching the engine and
+    instead of retry-storming through `FullyLLMServerClient` (which would
+    just bounce off the gate each iteration). `cancel()` then drives
+    `abort_all_requests(reset_prefix_cache=False)` in a loop until any
+    in-flight requests that beat the gate have drained. `resume()` sets
+    the gate; all queued callers proceed at once.
 
-        # Get final response
-        async for output in generator:
-            self.req_output[request_id] = output
-        assert self.req_output[request_id] is not None
+    TODO: drop this whole wrapper (and the `rollout_replica_class` swap in
+    `PartialRolloutLLMServerManager`) once verl's minimum vLLM is ≥0.12 — upstream's
+    `pause_generation(wait_for_inflight_requests=False)` provides the same
+    gate-then-drain semantics at the engine layer.
+    """
 
-    async def generate_for_partial(
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.inflight: int = 0
+        # Set == open (generate proceeds), cleared == closed (generate hangs
+        # until resume sets it). Initial state open so startup generates
+        # immediately.
+        self._resume_event: asyncio.Event = asyncio.Event()
+        self._resume_event.set()
+
+    async def generate(
         self,
         prompt_ids: list[int],
         sampling_params: dict[str, Any],
         request_id: str,
         image_data: Optional[list[Any]] = None,
-    ) -> tuple[list[Any], list[Any], bool] | tuple[Sequence[int], list[float], Any]:
-        async with self.lock:
-            if self.paused:
-                # After cancel, all tasks will return directly and wait for the next submission
-                return [], [], True
-            self.req_output[request_id]: Optional[RequestOutput] = None
-            self.cancel_event[request_id] = asyncio.Event()
-            cancel_handle = asyncio.create_task(self.cancel_event[request_id].wait())
-            generation_handle = asyncio.create_task(
-                self._generate_step(prompt_ids, sampling_params, request_id, image_data)
+        video_data: Optional[list[Any]] = None,
+        audio_data: Optional[list[Any]] = None,
+        mm_processor_kwargs: Optional[dict[str, Any]] = None,
+        priority: int = 0,
+    ) -> TokenOutput:
+        await self._resume_event.wait()
+        self.inflight += 1
+        try:
+            return await vLLMHttpServer.generate(
+                self,
+                prompt_ids,
+                sampling_params,
+                request_id,
+                image_data=image_data,
+                video_data=video_data,
+                audio_data=audio_data,
+                mm_processor_kwargs=mm_processor_kwargs,
+                priority=priority,
             )
-
-        done, pend = await asyncio.wait([generation_handle, cancel_handle], return_when=asyncio.FIRST_COMPLETED)
-
-        for task in done:
-            await task
-
-        for task in pend:
-            task.cancel()
-
-        async with self.lock:
-            if self.req_output[request_id] is None:
-                return [], [], True
-            token_ids = self.req_output[request_id].outputs[0].token_ids
-            log_probs: list[float] = []
-            for i, x in enumerate(self.req_output[request_id].outputs[0].logprobs):
-                # In sampling_params, logprobs is set to 1, which should return 1,
-                # but in practice there are multiple. Take the log_prob corresponding to token_id
-                token_id = self.req_output[request_id].outputs[0].token_ids[i]
-                log_probs.append(x[token_id].logprob)
-            is_cancel = generation_handle not in done
-            self.cancel_event.pop(request_id, None)
-            self.req_output.pop(request_id, None)
-            await self.engine.abort(request_id)
-        return token_ids, log_probs, is_cancel
+        finally:
+            self.inflight -= 1
 
     async def cancel(self):
-        async with self.lock:
-            self.paused = True
-            for request_id in self.cancel_event:
-                self.cancel_event[request_id].set()
+        self._resume_event.clear()
+        while self.inflight:
+            # `reset_prefix_cache=False`: clearing the prefix cache leaves
+            # the engine in a state that corrupts the subsequent
+            # update_weights wake_up. The prefix cache holds prompt tokens,
+            # not weight-dependent activations, so keeping it is safe.
+            await self.abort_all_requests(reset_prefix_cache=False)
+            await asyncio.sleep(0)
 
     async def resume(self):
-        async with self.lock:
-            self.paused = False
+        self._resume_event.set()
 
 
-class PRv3vLLMReplica(vLLMReplica):
-    def __init__(
-        self,
-        replica_rank: int,
-        config: RolloutConfig,
-        model_config: HFModelConfig,
-        gpus_per_node: int = 8,
-        is_reward_model: bool = False,
-    ):
-        super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model)
-        self.server_class = vLLMHttpServerForPartial
+class PartialRolloutvLLMReplica(vLLMReplica):
+    """vLLM replica using `PartialRolloutvLLMHttpServer` and fanning `cancel`/`resume`/
+    `set_global_steps` out to every server."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.server_class = PartialRolloutvLLMHttpServer
 
     async def cancel(self):
-        """Cancel each rollout server."""
         await asyncio.gather(*[server.cancel.remote() for server in self.servers])
 
     async def resume(self):
-        """Resume each rollout server."""
         await asyncio.gather(*[server.resume.remote() for server in self.servers])
+
+    async def set_global_steps(self, global_steps: int):
+        await asyncio.gather(*[server.set_global_steps.remote(global_steps) for server in self.servers])

@@ -1,0 +1,11 @@
+working_dir: ./
+excludes: ["/.git/"]
+env_vars:
+  TORCH_NCCL_AVOID_RECORD_STREAMS: "1"
+  CUDA_DEVICE_MAX_CONNECTIONS: "1"
+  HCCL_HOST_SOCKET_PORT_RANGE: "auto"
+  HCCL_NPU_SOCKET_PORT_RANGE: "auto"
+  GLOO_SOCKET_IFNAME: "enp189s0f0"
+  HCCL_SOCKET_IFNAME: "enp189s0f0"
+  PYTHONPATH: "path_to_conda_env/lib/python3.11/site-packages:$PYTHONPATH"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"

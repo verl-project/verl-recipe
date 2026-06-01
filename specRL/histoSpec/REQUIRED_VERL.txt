@@ -1,0 +1,5 @@
+# histoSpec — README pins a specific commit
+UPSTREAM=https://github.com/verl-project/verl.git
+MODE=pinned_commit
+COMMIT=ccd7d934f91be98bb3732c78bd1870fa39c399ad
+PIP_INSTALL=pip install verl@git+https://github.com/verl-project/verl.git@ccd7d934f91be98bb3732c78bd1870fa39c399ad

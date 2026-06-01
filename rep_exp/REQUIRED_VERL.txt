@@ -1,0 +1,5 @@
+# rep_exp — README pins a specific commit
+UPSTREAM=https://github.com/verl-project/verl.git
+MODE=pinned_commit
+COMMIT=b9bd00efba253ea90072555c45692054cf703de2
+PIP_INSTALL=pip install verl@git+https://github.com/verl-project/verl.git@b9bd00efba253ea90072555c45692054cf703de2

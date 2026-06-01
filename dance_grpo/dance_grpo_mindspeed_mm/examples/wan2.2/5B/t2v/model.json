@@ -1,0 +1,94 @@
+{
+    "pipeline_config": {
+        "input_size": [45, 704, 1280],
+        "vae_scale_factor_spatial": 16,
+        "expand_timesteps": true
+    },
+    "tokenizer":{
+        "autotokenizer_name": "AutoTokenizer",
+        "hub_backend": "hf",
+        "from_pretrained": "Wan2.2-TI2V-5B-Diffusers/tokenizer"
+    },
+    "load_video_features": false,
+    "load_text_features": false,
+    "task": "t2v",
+    "diffusion": {
+        "model_id": "UniPCMultistepScheduler",
+        "num_train_steps": 1000,
+        "num_inference_steps": 50,
+        "guidance_scale": 5.0,
+        "beta_end": 0.02,
+        "beta_schedule": "linear",
+        "beta_start": 0.0001,
+        "disable_corrector": [],
+        "dynamic_thresholding_ratio": 0.995,
+        "final_sigmas_type": "zero",
+        "flow_shift": 5.0,
+        "lower_order_final": true,
+        "predict_x0": true,
+        "prediction_type": "flow_prediction",
+        "rescale_betas_zero_snr": false,
+        "sample_max_value": 1.0,
+        "solver_order": 2,
+        "solver_p": null,
+        "solver_type": "bh2",
+        "steps_offset": 0,
+        "thresholding": false,
+        "timestep_spacing": "linspace",
+        "trained_betas": null,
+        "use_beta_sigmas": false,
+        "use_exponential_sigmas": false,
+        "use_flow_sigmas": true,
+        "use_karras_sigmas": false
+    },
+    "predictor": {
+        "model_id": "wandit",
+        "dtype": "bf16",
+        "model_type": "t2v",
+        "patch_size": [1, 2, 2],
+        "text_len": 512,
+        "in_dim": 48,
+        "hidden_size": 3072,
+        "ffn_dim": 14336,
+        "freq_dim": 256,
+        "text_dim": 4096,
+        "img_dim": 1280,
+        "out_dim": 48,
+        "num_heads": 24,
+        "num_layers": 30,
+        "pipeline_num_layers": [30],
+        "qk_norm": true,
+        "qk_norm_type": "rmsnorm",
+        "cross_attn_norm": true,
+        "eps": 1e-6,
+        "max_seq_len": 1024,
+        "attention_async_offload": false,
+        "use_fused_rmsnorm":true,
+        "seperated_timestep": false
+    },
+    "text_encoder": {
+        "model_id": "UMT5",
+        "hub_backend": "hf",
+        "from_pretrained": "Wan2.2-TI2V-5B-Diffusers/text_encoder/",
+        "dtype": "bf16"
+    },
+    "ae": {
+        "model_id": "wan_video_vae",
+        "from_pretrained": "Wan2.2-TI2V-5B-Diffusers/vae",
+        "dtype": "bf16",
+        "enable_tiling": false,
+        "tiling_param": {
+            "tile_sample_min_height": 256,
+            "tile_sample_min_width": 256,
+            "tile_sample_stride_height": 192,
+            "tile_sample_stride_width": 192
+        },
+        "norm_latents": true,
+        "norm_mode": "channel_specified_shift_scale",
+        "do_sample": false
+    },
+    "patch": {
+        "get_dist_model_load_from_pt": true,
+        "muon_optimizer": false
+    }
+}

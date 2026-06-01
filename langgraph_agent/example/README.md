@@ -2,6 +2,10 @@
 
 MathExpression is a tiny example to demonstrate multi-turn rollout with [LangGraph ReactAgent](https://langchain-ai.github.io/langgraph/agents/overview/).
 
+## Required `verl` version
+
+See [`../REQUIRED_VERL.txt`](../REQUIRED_VERL.txt) for the upstream repository, install mode (rolling `main`, pinned release tag, or pinned git commit), and copy-pastable `pip` / `git` instructions where they exist.
+
 ### Define react agent with tool
 Firstly, to force ReactAgent to evaluate math expression by tool, we define a special operand `@`:
 ```python

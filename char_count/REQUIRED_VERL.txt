@@ -1,0 +1,6 @@
+# char_count — tested PyPI / tag release
+UPSTREAM=https://github.com/verl-project/verl.git
+MODE=pinned_tag
+TAG=v0.6.1
+COMMIT=d62da4950573d7a4b7ef2362337952e7ab59e78d
+PIP_INSTALL=pip install verl==0.6.1

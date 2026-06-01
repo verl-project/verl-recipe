@@ -1,4 +1,8 @@
 # Single-stream Policy Optimization (SPO)
+## Required `verl` version
+
+See [`REQUIRED_VERL.txt`](REQUIRED_VERL.txt) for the upstream repository, install mode (rolling `main`, pinned release tag, or pinned git commit), and copy-pastable `pip` / `git` instructions where they exist.
+
 
 [![arXiv](https://img.shields.io/badge/arXiv-2509.13232-b31b1b.svg)](https://arxiv.org/abs/2509.13232)
 [![Python](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
@@ -28,7 +32,7 @@
 1. **Clone the VERL repository at the specific commit:**
 
 ```bash
-git clone https://github.com/volcengine/verl.git
+git clone https://github.com/verl-project/verl.git
 cd verl
 git checkout d7944c01e63e9eb639c8357648b7958550591158
 ```

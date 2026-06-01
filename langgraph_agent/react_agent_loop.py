@@ -89,22 +89,15 @@ class ReactAgentLoop(AgentLoopBase):
     NODES_PER_TURN = 2  # Each AI turn involves agent + tools nodes
     RECURSION_LIMIT_SAFETY_FACTOR = 1.5  # 50% buffer for edge cases
 
-    @classmethod
-    def init_class(cls, config, tokenizer, **kwargs):
-        if cls._class_initialized:
-            return
-        cls._class_initialized = True
-        print("Performing class-level ReactAgentLoop initialization")
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.graph = self.build_graph()
 
-        # build graph
-        cls.graph = cls.build_graph()
-
-    @classmethod
-    def build_graph(cls) -> StateGraph:
+    def build_graph(self) -> StateGraph:
         workflow = StateGraph(MessagesState)
 
         workflow.add_node("agent", call_model)
-        workflow.add_node("tools", ToolNode(cls.tools))
+        workflow.add_node("tools", ToolNode(self.tools))
         workflow.set_entry_point("agent")
         workflow.add_conditional_edges(
             "agent",

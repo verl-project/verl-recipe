@@ -1,0 +1,7 @@
+# GVPO — README documents verl v0.6.0
+UPSTREAM=https://github.com/verl-project/verl.git
+MODE=pinned_tag
+TAG=v0.6.0
+COMMIT=ddd86f527a4af75095e4677b02b5aa272913a088
+PIP_INSTALL=pip install verl==0.6.0
+NOTES=GRPO example alignment referenced in README uses the same v0.6.0 tag commit.

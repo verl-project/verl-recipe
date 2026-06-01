@@ -1,0 +1,65 @@
+diff --git a/mammothmoda2/utils/t2i_utils.py b/mammothmoda2/utils/t2i_utils.py
+index 08e33e7..694c09c 100644
+--- a/mammothmoda2/utils/t2i_utils.py
++++ b/mammothmoda2/utils/t2i_utils.py
+@@ -86,7 +86,7 @@ def extract_condition_tokens(
+     return condition_tokens_compact, condition_attention_mask
+ 
+ 
+-@torch.inference_mode()
++@torch.no_grad()
+ def encode_full_prompts(
+     model,
+     tokenizer,
+@@ -184,7 +184,7 @@ def retrieve_timesteps(
+     return timesteps, num_inference_steps
+ 
+ 
+-@torch.inference_mode()
++@torch.no_grad()
+ def processing(
+     latents,
+     ref_latents,
+@@ -273,7 +273,7 @@ def processing(
+     return image
+ 
+ 
+-@torch.inference_mode()
++@torch.no_grad()
+ def decode_diffusion_image(
+     prompt_ids: torch.Tensor,
+     generated_ids: torch.Tensor,
+@@ -295,6 +295,8 @@ def decode_diffusion_image(
+     width: int = 512,
+     device: torch.device = None,
+     index: int | None = 0,
++    init_same_noise = True,
++    return_img_only = False,
+     **kwargs,  # noqa: ARG001
+ ) -> dict:
+     # 1. Get the full condition_features, both positive and negative
+@@ -347,8 +349,13 @@ def decode_diffusion_image(
+ 
+     # 3. Prepare input latents for generated image
+     latent_channels = model.gen_transformer.config.in_channels
+-    shape = (num_images_per_prompt, latent_channels, 2 * h // vae_scale_factor, 2 * w // vae_scale_factor)
+-    latents = randn_tensor(shape, device=device, dtype=text_condition_tokens_compact.dtype)
++    if init_same_noise:
++        shape = (1, latent_channels, 2 * h // vae_scale_factor, 2 * w // vae_scale_factor)
++        latents = randn_tensor(shape, device=device, dtype=text_condition_tokens_compact.dtype)
++        latents = latents.expand(num_images_per_prompt, -1, -1, -1)
++    else:
++        shape = (num_images_per_prompt, latent_channels, 2 * h // vae_scale_factor, 2 * w // vae_scale_factor)
++        latents = randn_tensor(shape, device=device, dtype=text_condition_tokens_compact.dtype)
+ 
+     freqs_cis = RotaryPosEmbedReal.get_freqs_real(
+         model.gen_transformer.config.axes_dim_rope,
+@@ -380,6 +387,8 @@ def decode_diffusion_image(
+ 
+     # 5. Save the generated image
+     images = VAEProcessor().postprocess(image)
++    if return_img_only:
++        return images
+     return_info = []
+     if not Path(output_dir).is_dir():
+         Path(output_dir).mkdir(parents=True, exist_ok=True)

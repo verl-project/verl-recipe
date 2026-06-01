@@ -1,0 +1,110 @@
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+data:
+  train_batch_size: 16
+  max_prompt_length: 1024
+  max_response_length: 1024
+
+actor_rollout_ref:
+  hybrid_engine: true
+  model:
+    path: null
+    trust_remote_code: true
+  actor:
+    strategy: fsdp
+    fsdp_config:
+      fsdp_size: -1
+      param_offload: False
+      optimizer_offload: False
+    optim:
+      lr: 1e-6
+      lr_warmup_steps_ratio: 0.03
+      total_training_steps: -1
+    ppo_mini_batch_size: 1
+    ppo_epochs: 2
+    ppo_micro_batch_size_per_gpu: 4
+  rollout:
+    name: vllm
+    mode: async
+    nnodes: ${trainer.nnodes}
+    n_gpus_per_node: ${trainer.n_gpus_per_node}
+    n: 8
+    top_p: 1.0
+    enforce_eager: true
+    free_cache_engine: false
+    load_format: auto
+    tensor_model_parallel_size: 1
+    pipeline_model_parallel_size: 1
+    log_prob_micro_batch_size_per_gpu: 4
+    temperature: 1.0
+    response_length: 1024
+    checkpoint_engine:
+      backend: hccl
+      update_weights_bucket_megabytes: 2048
+      engine_kwargs: {}
+    agent:
+      default_agent_loop: async_flow_single_turn_agent
+  ref:
+    fsdp_config:
+      fsdp_size: -1
+      param_offload: False
+    log_prob_micro_batch_size_per_gpu: 4
+
+reward_model:
+  enable: false
+  enable_resource_pool: false
+
+rule_reward:
+  enable: true
+  verifier_functions:
+    - acc
+  verifier_weights:
+    - 1.0
+  normalize_by_group: true
+
+trainer:
+  default_local_dir: "checkpoints"
+  project_name: "async_flow_grpo"
+  experiment_name: "test_run"
+  use_legacy_worker_impl: "disable"
+  logger: ["console"]
+  device: npu
+  nnodes: 1          # for rollout
+  n_gpus_per_node: 2 # for rollout
+  save_freq: 20
+  test_freq: -1
+  total_epochs: 5
+
+global_profiler:
+  steps: null
+
+async_flow:
+  _target_: recipe.async_flow.async_flow_trainer.AsyncFlowGRPOConfig
+  experience_topic: "experience"
+  staleness: 1
+  ref_experience_count: 4
+  fwd_experience_count: 4
+  reward_experience_count: 8
+
+async_resources:
+  _target_: recipe.async_flow.async_flow_trainer.AsyncFlowResourceConfig
+  actor_fwd:
+    nnodes: 1
+    n_gpus_per_node: 2
+  ref_fwd:
+    nnodes: 1
+    n_gpus_per_node: 2
+  advantage:
+    nnodes: 1
+    use_gpu: false
+    num_cpus: 4
+    n_gpus_per_node: 0
+  actor_train:
+    nnodes: 1
+    n_gpus_per_node: 4

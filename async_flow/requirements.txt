@@ -1,0 +1,4 @@
+loguru
+tensordict==0.10.0
+vllm==0.13.0
+vllm-ascend==0.13.0

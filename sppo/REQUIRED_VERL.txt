@@ -1,0 +1,16 @@
+# sppo — rolling; exact commits refreshed from this workspace
+UPSTREAM=https://github.com/verl-project/verl.git
+MODE=rolling
+BRANCH=main
+# Exact upstream verl commit this file was refreshed against (core library).
+VERL_COMMIT=bcb638649a50e58494a8ddd92085ad1174f674b8
+PIP_INSTALL=pip install verl@git+https://github.com/verl-project/verl.git@bcb638649a50e58494a8ddd92085ad1174f674b8
+GIT_SETUP=git clone https://github.com/verl-project/verl.git && cd verl && git checkout bcb638649a50e58494a8ddd92085ad1174f674b8 && git submodule update --init --recursive recipe
+# Recipe submodule snapshot at the same verl checkout (see `git ls-tree HEAD recipe` in verl).
+RECIPE_SUBMODULE_COMMIT=ba246418f4de12b845a09bba975f1a5242adc898
+RECIPE_FOLDER=sppo
+# Latest commit in the recipe repo that touched only this recipe subdirectory.
+RECIPE_FOLDER_LAST_COMMIT=21892b9276936efab5375c3f6b8415e472ef7118
+NOTES=VERL_COMMIT pins the core library; RECIPE_SUBMODULE_COMMIT is the `recipe/` submodule gitlink at that verl revision; RECIPE_FOLDER_LAST_COMMIT narrows to this folder inside the submodule.
+REFRESH=Recompute: (cd verl && git rev-parse HEAD); (cd verl/recipe && git rev-parse HEAD); (cd verl/recipe && git log -1 --format=%H -- sppo)
+

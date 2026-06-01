@@ -1,0 +1,13 @@
+# DAPO — published reproduction tables use this commit; main-branch recipe tracks latest verl
+UPSTREAM=https://github.com/verl-project/verl.git
+MODE=reproduction_commit
+REPRODUCTION_COMMIT=4f80e465c2ec79ab9c3c30ec74b9745de61d0490
+PIP_INSTALL=pip install verl@git+https://github.com/verl-project/verl.git@4f80e465c2ec79ab9c3c30ec74b9745de61d0490
+NOTES=For paper reproduction use REPRODUCTION_COMMIT. For the current mainline recipe in this workspace, use the rolling pins below.
+ROLLING_VERL_COMMIT=bcb638649a50e58494a8ddd92085ad1174f674b8
+ROLLING_PIP_INSTALL=pip install verl@git+https://github.com/verl-project/verl.git@bcb638649a50e58494a8ddd92085ad1174f674b8
+RECIPE_SUBMODULE_COMMIT=ba246418f4de12b845a09bba975f1a5242adc898
+RECIPE_FOLDER=dapo
+RECIPE_FOLDER_LAST_COMMIT=8f9e7ac93acac57f6ef7e8dffa3de788d148a09a
+REFRESH=Recompute rolling pins from your verl clone; reproduction SHA is fixed by the DAPO paper run table.
+
