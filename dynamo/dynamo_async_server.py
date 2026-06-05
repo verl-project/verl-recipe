@@ -14,8 +14,6 @@
 """DynamoHttpServer + DynamoReplica.
 
 Reference impl: nemo_rl/models/generation/dynamo/dynamo_generation.py.
-
-Per dynamo_design_0507.md, the actor in this design:
   1. Reserves no GPUs itself; trainer workers in colocated mode already claim
      them. We only forward CUDA_VISIBLE_DEVICES into dynamo.vllm subprocesses.
   2. Spawns + watchdogs etcd / nats-server / dynamo.vllm × N / dynamo.frontend.
@@ -82,6 +80,8 @@ _FRONTEND_READY_POLL_S = 2.0
 _ETCD_READY_TIMEOUT_S = 30.0
 _NATS_READY_TIMEOUT_S = 30.0
 _WATCHDOG_INTERVAL_S = 5.0
+_VLLM_TCPSTORE_PORT_BASE = int(os.getenv("VERL_DYNAMO_VLLM_PORT_BASE", "20000"))
+_KV_EVENT_PORT_BASE = int(os.getenv("VERL_DYNAMO_KV_EVENT_PORT_BASE", "30000"))
 
 
 @dataclass(frozen=True)
@@ -193,6 +193,13 @@ class DynamoHttpServer:
         self._direct_generate_idx: int = 0
         self._direct_generate_lock = asyncio.Lock()
 
+        # Async HTTP client to the Dynamo frontend. Created lazily on the actor
+        # event loop. Replaces the blocking ``asyncio.to_thread(requests.post)``
+        # data plane, whose default thread pool (~32 workers) caps concurrency
+        # far below the hundreds of in-flight turns an agentic-RL step issues.
+        self._http_session: Optional[Any] = None
+        self._http_session_lock = asyncio.Lock()
+
         # Per-subprocess control sidecar endpoints (filled in
         # _start_vllm_workers); used by collective_rpc bridge in v2.
         self._control_endpoints: list[str] = []
@@ -221,6 +228,14 @@ class DynamoHttpServer:
     def _dynamo_cfg(self) -> dict:
         """Return ``rollout.engine_kwargs.dynamo`` dict (or empty)."""
         return (self.config.engine_kwargs or {}).get("dynamo", {}) or {}
+
+    def _dynamo_cfg_bool(self, key: str, default: bool) -> bool:
+        value = self._dynamo_cfg().get(key, default)
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return default
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
     def _skip_refit(self) -> bool:
         checkpoint_engine = getattr(self.config, "checkpoint_engine", None)
@@ -480,14 +495,22 @@ class DynamoHttpServer:
             control_endpoint = f"tcp://{self._server_address}:{control_port}"
             self._control_endpoints.append(control_endpoint)
 
-            kv_event_port = self._allocate_tcp_port(bind_wildcard=True)
+            kv_event_port = self._allocate_kv_event_port(spec_idx)
             kv_events_config_json = self._build_kv_events_config_json(kv_event_port)
+            vllm_port = self._allocate_vllm_tcpstore_port(spec_idx)
 
             env = os.environ.copy()
             env.update(self._dynamo_env_vars())
             env["CUDA_VISIBLE_DEVICES"] = worker_cvd
             env[_RANK_OFFSET_ENV] = str(spec.rank_offset)
             env[_REPLICA_RANK_ENV] = str(spec.replica_rank)
+            # vLLM's multiproc executor uses VLLM_PORT for its local TCPStore.
+            # A node can host many TP=1 Dynamo shards, so leaving this random can
+            # collide under concurrent startup.
+            env["VLLM_PORT"] = str(vllm_port)
+            env["VLLM_HOST_IP"] = self._server_address
+            env["MASTER_ADDR"] = self._server_address
+            env["MASTER_PORT"] = str(vllm_port)
 
             # Ensure subprocess can ``import recipe.dynamo._dynamo_vllm_with_control``
             # even when ray runtime_env doesn't propagate the driver's PYTHONPATH.
@@ -527,12 +550,13 @@ class DynamoHttpServer:
 
             logger.info(
                 "[DynamoHttpServer] starting dynamo.vllm shard %s/%s "
-                "(replica=%s, rank_offset=%s, GPUs=%s, control=%s, log=%s): %s",
+                "(replica=%s, rank_offset=%s, GPUs=%s, vllm_port=%s, control=%s, log=%s): %s",
                 spec_idx,
                 len(worker_specs),
                 spec.replica_rank,
                 spec.rank_offset,
                 worker_cvd,
+                vllm_port,
                 control_endpoint,
                 stdout_path,
                 " ".join(cmd),
@@ -561,6 +585,50 @@ class DynamoHttpServer:
             self._allocated_tcp_ports.add(port)
             return port
         raise RuntimeError(f"failed to allocate unique TCP port for address={address}")
+
+    def _can_bind_tcp_port(self, port: int, bind_wildcard: bool = False) -> bool:
+        address = (
+            "0.0.0.0"
+            if bind_wildcard and not is_valid_ipv6_address(self._server_address)
+            else self._server_address
+        )
+        family = socket.AF_INET6 if is_valid_ipv6_address(address) else socket.AF_INET
+        sock = socket.socket(family=family, type=socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind((address, port))
+            return True
+        except OSError:
+            return False
+        finally:
+            sock.close()
+
+    def _allocate_stable_node_port(self, base: int, shard_idx: int, window: int = 8) -> int:
+        """Pick a stable node-local port for concurrently launched shards.
+
+        vLLM's TCPStore and KV event publisher both bind in child processes.
+        If the parent only probes a random free port and releases it, another
+        shard can claim it before the child binds. Use deterministic,
+        non-ephemeral per-node/per-shard windows to avoid those startup races.
+        """
+        replica_slot = self.replica_rank % 4
+        node_slot = self.node_rank % 16
+        start = base + replica_slot * 2048 + node_slot * 128 + shard_idx * window
+        for port in range(start, start + window):
+            if port in self._allocated_tcp_ports:
+                continue
+            if self._can_bind_tcp_port(port, bind_wildcard=True):
+                self._allocated_tcp_ports.add(port)
+                return port
+        return self._allocate_tcp_port(bind_wildcard=True)
+
+    def _allocate_vllm_tcpstore_port(self, shard_idx: int) -> int:
+        """Pick a stable low port for vLLM's local TCPStore."""
+        return self._allocate_stable_node_port(_VLLM_TCPSTORE_PORT_BASE, shard_idx)
+
+    def _allocate_kv_event_port(self, shard_idx: int) -> int:
+        """Pick a stable port for vLLM's ZMQ KV event publisher."""
+        return self._allocate_stable_node_port(_KV_EVENT_PORT_BASE, shard_idx)
 
     def _configured_or_allocated_port(self, key: str, bind_wildcard: bool = False) -> int:
         configured = int(self._dynamo_cfg().get(key, 0) or 0)
@@ -630,8 +698,14 @@ class DynamoHttpServer:
             "--worker-extension-cls",
             "recipe.dynamo.dynamo_worker_extension.vLLMDynamoColocateWorkerExtension",
         ]
-        # Distributed executor: MP for single-node TP (no Ray inside subprocess).
-        cmd += ["--distributed-executor-backend", "mp"]
+        # For TP=1, avoid vLLM's multiproc executor. Dynamo already launches
+        # one process per shard, and an extra local WorkerProc/TCPStore has
+        # caused EADDRINUSE races during concurrent startup on multi-shard
+        # nodes. TP>1 still needs a local distributed executor.
+        executor_backend = self._dynamo_cfg().get("distributed_executor_backend")
+        if not executor_backend:
+            executor_backend = "uni" if tp == 1 else "mp"
+        cmd += ["--distributed-executor-backend", str(executor_backend)]
         cmd += ["--kv-events-config", kv_events_config_json]
         # Pass through extra args from rollout.engine_kwargs.dynamo.extra_args.
         extra = self._dynamo_cfg().get("extra_args") or []
@@ -655,6 +729,7 @@ class DynamoHttpServer:
             "--discovery-backend", "etcd",
             "--namespace-prefix", self._namespace,
         ]
+        cmd += self._frontend_router_args()
         log_root = os.environ.get("VERL_DYNAMO_LOG_DIR", "/tmp")
         log_path = os.path.join(log_root, f"verl_dynamo_replica{self.replica_rank}_frontend.log")
         self._frontend_log_fp = open(log_path, "w")
@@ -666,6 +741,113 @@ class DynamoHttpServer:
         )
         self._frontend_process = subprocess.Popen(
             cmd, env=env, stdout=self._frontend_log_fp, stderr=subprocess.STDOUT
+        )
+
+    def _frontend_router_args(self) -> list[str]:
+        """Return Dynamo frontend router tuning args.
+
+        Targets Dynamo v1.2.0's ``dynamo.frontend`` router CLI:
+          * ``--active-decode-blocks-threshold`` is now a *fraction* of KV block
+            utilization and must be in ``[0.0, 1.0]`` (the frontend rejects
+            out-of-range values); pass the literal ``"None"`` to disable the
+            check. The prefill thresholds likewise accept ``"None"`` to disable.
+            We default all three to disabled so the KV router routes purely by
+            cache affinity instead of shedding load — the original intent behind
+            the previous (now out-of-range) ``1000.0`` sentinels.
+          * ``--router-predict-on-route`` was removed in v1.2.0. We keep the
+            ``router_predict_on_route`` config knob for compatibility but warn
+            and drop it rather than passing an unknown flag that would crash the
+            frontend at startup.
+
+        Legacy configs in this repo documented the pre-v1.2.0 "disable" sentinels
+        (e.g. ``active_decode_blocks_threshold: 1000.0``). Those are out of v1.2.0's
+        valid range and would now make the frontend exit before healthcheck, so we
+        normalize out-of-range / sentinel values back to ``"None"`` (disabled).
+        """
+        if self._router_mode != "kv" or not self._dynamo_cfg_bool("enable_nemo_router_tuning", True):
+            return self._frontend_extra_args()
+
+        cfg = self._dynamo_cfg()
+        args = [
+            "--active-decode-blocks-threshold",
+            self._normalize_decode_blocks_threshold(cfg.get("active_decode_blocks_threshold", "None")),
+            "--active-prefill-tokens-threshold",
+            self._normalize_prefill_threshold(
+                "active_prefill_tokens_threshold", cfg.get("active_prefill_tokens_threshold", "None")
+            ),
+            "--active-prefill-tokens-threshold-frac",
+            self._normalize_prefill_threshold(
+                "active_prefill_tokens_threshold_frac", cfg.get("active_prefill_tokens_threshold_frac", "None")
+            ),
+        ]
+        if self._dynamo_cfg_bool("router_predict_on_route", False):
+            logger.warning(
+                "rollout.engine_kwargs.dynamo.router_predict_on_route is set but "
+                "Dynamo v1.2.0 removed the --router-predict-on-route frontend flag; "
+                "ignoring it."
+            )
+        return args + self._frontend_extra_args()
+
+    @staticmethod
+    def _is_disabled_threshold(value: Any) -> bool:
+        """True if the configured value means "disable this check"."""
+        if value is None:
+            return True
+        return str(value).strip().lower() in {"none", "null", ""}
+
+    def _normalize_decode_blocks_threshold(self, value: Any) -> str:
+        """Clamp ``--active-decode-blocks-threshold`` to v1.2.0's [0.0, 1.0].
+
+        The frontend rejects out-of-range fractions, and legacy repo configs
+        still carry the pre-v1.2.0 ``1000.0`` "disable" sentinel. Treat anything
+        outside the valid range (including that sentinel) as disabled (``None``).
+        """
+        if self._is_disabled_threshold(value):
+            return "None"
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            logger.warning(
+                "active_decode_blocks_threshold=%r is not a number; disabling the check.",
+                value,
+            )
+            return "None"
+        if 0.0 <= parsed <= 1.0:
+            return str(parsed)
+        logger.warning(
+            "active_decode_blocks_threshold=%r is outside Dynamo v1.2.0's valid "
+            "[0.0, 1.0] range (likely a legacy disable sentinel); disabling the check.",
+            value,
+        )
+        return "None"
+
+    def _normalize_prefill_threshold(self, key: str, value: Any) -> str:
+        """Normalize prefill busy thresholds for v1.2.0.
+
+        v1.2.0 puts no upper bound on the prefill thresholds, so unlike the
+        decode-blocks fraction they never crash the frontend — the legacy repo
+        sentinels (``1000000000000`` / ``1000.0``) still parse and effectively
+        disable the check. So we only coerce explicit ``None``/empty values to
+        ``"None"`` and pass any valid number through unchanged.
+        """
+        if self._is_disabled_threshold(value):
+            return "None"
+        try:
+            float(value)
+        except (TypeError, ValueError):
+            logger.warning("%s=%r is not a number; disabling the check.", key, value)
+            return "None"
+        return str(value)
+
+    def _frontend_extra_args(self) -> list[str]:
+        extra = self._dynamo_cfg().get("frontend_extra_args") or []
+        if isinstance(extra, str):
+            return [extra]
+        if isinstance(extra, list):
+            return [str(x) for x in extra]
+        raise TypeError(
+            "rollout.engine_kwargs.dynamo.frontend_extra_args must be a list "
+            f"or string, got {type(extra).__name__}"
         )
 
     async def _healthcheck_frontend(self, expected_workers: int):
@@ -760,24 +942,30 @@ class DynamoHttpServer:
 
         try:
             include_log_probs = bool(sampling_params.get("logprobs", False))
-            payload = self._build_frontend_completion_payload(prompt_ids, sampling_params)
-            resp = await asyncio.to_thread(
-                requests.post,
-                self._frontend_completions_url(),
-                json=payload,
-                timeout=self._frontend_request_timeout_s(),
-            )
-            if resp.status_code != 200:
+            request_id = request_id or f"dynamo-{time.time_ns()}"
+            payload = self._build_frontend_completion_payload(prompt_ids, sampling_params, request_id)
+            status, body_text = await self._frontend_post(payload, request_id)
+            if status == 400 and "Unsupported parameter" in body_text:
+                fallback_payload = self._drop_frontend_extension_fields(payload)
+                if fallback_payload is not payload:
+                    logger.warning(
+                        "Dynamo frontend rejected optional request extension fields; "
+                        "retrying without them (request_id=%s, removed=%s)",
+                        request_id,
+                        sorted(set(payload) - set(fallback_payload)),
+                    )
+                    payload = fallback_payload
+                    status, body_text = await self._frontend_post(payload, request_id)
+            if status != 200:
                 raise RuntimeError(
                     "Dynamo frontend /v1/completions failed "
-                    f"status={resp.status_code} body={resp.text[:2000]!r} "
+                    f"status={status} body={body_text[:2000]!r} "
                     f"payload_summary={self._payload_debug_summary(payload)}"
                 )
-            return self._completion_response_to_token_output(resp.json(), include_log_probs=include_log_probs)
-        except requests.RequestException as e:
-            logger.exception("[generate] frontend request failed (request_id=%s)", request_id)
-            raise
-        except Exception as e:
+            return self._completion_response_to_token_output(
+                json.loads(body_text), include_log_probs=include_log_probs
+            )
+        except Exception:
             logger.exception("[generate] frontend dispatch failed (request_id=%s)", request_id)
             raise
 
@@ -789,6 +977,47 @@ class DynamoHttpServer:
             else self._server_address
         )
         return f"http://{host}:{self._server_port}/v1/completions"
+
+    async def _get_http_session(self):
+        """Lazily create one keep-alive aiohttp session on the actor loop.
+
+        A single pooled, fully async client lets the async actor keep hundreds
+        of turn-level requests in flight concurrently, instead of serializing
+        them through the default thread pool used by
+        ``asyncio.to_thread(requests.post)``. The connection limit defaults to
+        unlimited (0) so the Dynamo frontend/KV router — not this client — owns
+        load shedding; it can be capped via
+        ``rollout.engine_kwargs.dynamo.frontend_connection_limit``.
+        """
+        if self._http_session is not None and not self._http_session.closed:
+            return self._http_session
+        async with self._http_session_lock:
+            if self._http_session is not None and not self._http_session.closed:
+                return self._http_session
+            import aiohttp
+
+            limit = int(self._dynamo_cfg().get("frontend_connection_limit", 0))
+            connector = aiohttp.TCPConnector(
+                limit=limit,
+                limit_per_host=limit,
+                ttl_dns_cache=300,
+            )
+            self._http_session = aiohttp.ClientSession(connector=connector)
+            return self._http_session
+
+    async def _frontend_post(self, payload: dict[str, Any], request_id: str) -> tuple[int, str]:
+        """POST one completion to the frontend; return ``(status, body_text)``."""
+        import aiohttp
+
+        session = await self._get_http_session()
+        timeout = aiohttp.ClientTimeout(total=self._frontend_request_timeout_s())
+        async with session.post(
+            self._frontend_completions_url(),
+            json=payload,
+            headers={"X-Request-Id": str(request_id)},
+            timeout=timeout,
+        ) as resp:
+            return resp.status, await resp.text()
 
     def _frontend_request_timeout_s(self) -> float:
         value = self._dynamo_cfg().get("request_timeout_s", 600)
@@ -804,7 +1033,14 @@ class DynamoHttpServer:
             )
         return timeout
 
-    def _build_frontend_completion_payload(self, prompt_ids, sampling_params) -> dict[str, Any]:
+    @staticmethod
+    def _drop_frontend_extension_fields(payload: dict[str, Any]) -> dict[str, Any]:
+        extension_keys = {"request_id", "return_tokens_as_token_ids"}
+        if not any(key in payload for key in extension_keys):
+            return payload
+        return {key: value for key, value in payload.items() if key not in extension_keys}
+
+    def _build_frontend_completion_payload(self, prompt_ids, sampling_params, request_id: str) -> dict[str, Any]:
         from verl.utils.tokenizer import normalize_token_ids
 
         tokenizer = getattr(self.model_config, "tokenizer", None)
@@ -831,11 +1067,26 @@ class DynamoHttpServer:
             "max_tokens": int(max_tokens),
             "stream": False,
         }
-        if sampling_params.get("logprobs", False):
+        if self._dynamo_cfg_bool("include_payload_request_id", False):
+            payload["request_id"] = str(request_id)
+        return_tokens_as_token_ids = self._dynamo_cfg_bool("return_tokens_as_token_ids", False)
+        if return_tokens_as_token_ids:
+            payload["return_tokens_as_token_ids"] = True
+        # Dynamo v1.2.0 only emits the ``token_id:<id>`` strings (our token-out
+        # path) inside ``choice.logprobs.tokens``, and that array is dropped
+        # entirely unless ``logprobs`` is requested. So requesting token ids
+        # implies requesting logprobs. ``force_logprobs_for_token_ids`` is kept
+        # as an independent override for callers that want logprobs without the
+        # token-id formatting.
+        if (
+            sampling_params.get("logprobs", False)
+            or return_tokens_as_token_ids
+            or self._dynamo_cfg_bool("force_logprobs_for_token_ids", False)
+        ):
             # Native vLLM uses SamplingParams(logprobs=0) to return generated
-            # token logprobs only. Avoid requesting logprobs on the common path:
-            # the Dynamo OpenAI frontend can spend a long time formatting token
-            # logprob payloads even when verl will discard them.
+            # token logprobs only. The Dynamo OpenAI frontend can spend extra
+            # time formatting logprob payloads; that is the cost of strict
+            # token-in/token-out parity.
             payload["logprobs"] = 0
         sp.pop("prompt_logprobs", None)
         for key, value in sp.items():
@@ -965,9 +1216,11 @@ class DynamoHttpServer:
         return {
             "keys": sorted(payload.keys()),
             "model": payload.get("model"),
+            "request_id": payload.get("request_id"),
             "prompt": prompt_summary,
             "max_tokens": payload.get("max_tokens"),
             "logprobs": payload.get("logprobs"),
+            "return_tokens_as_token_ids": payload.get("return_tokens_as_token_ids"),
         }
 
     def _completion_response_to_token_output(self, data: dict[str, Any], include_log_probs: bool = False):
@@ -1321,6 +1574,12 @@ class DynamoHttpServer:
 
     async def shutdown(self):
         self._shutdown_requested = True
+        if self._http_session is not None and not self._http_session.closed:
+            try:
+                await self._http_session.close()
+            except Exception:
+                pass
+            self._http_session = None
         if self._watchdog_task is not None:
             self._watchdog_task.cancel()
             try:

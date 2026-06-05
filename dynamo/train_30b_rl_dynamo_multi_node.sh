@@ -187,7 +187,7 @@ python3 recipe/dynamo/main_dynamo.py \\
     data.custom_cls.name=CustomRLHFDataset \\
     custom_reward_function.path=/workspace/dynamorl_workspace/verl/recipe/retool/retool.py \\
     custom_reward_function.name=compute_score \\
-    actor_rollout_ref.model.path=Qwen/Qwen3-30B-A3B-Instruct-2507 \\
+    actor_rollout_ref.model.path=/workspace/RL/hf_models/Qwen3-30B-A3B \\
     actor_rollout_ref.model.use_remove_padding=True \\
     actor_rollout_ref.model.enable_gradient_checkpointing=True \\
     actor_rollout_ref.actor.use_kl_loss=False \\
@@ -205,6 +205,7 @@ python3 recipe/dynamo/main_dynamo.py \\
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=73728 \\
     actor_rollout_ref.rollout.name=dynamo \\
     actor_rollout_ref.rollout.mode=async \\
+    ++actor_rollout_ref.rollout.engine_kwargs.dynamo.return_tokens_as_token_ids=true \\
     actor_rollout_ref.rollout.tensor_model_parallel_size=2 \\
     actor_rollout_ref.rollout.multi_turn.enable=True \\
     actor_rollout_ref.rollout.multi_turn.max_user_turns=16 \\

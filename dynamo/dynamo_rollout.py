@@ -99,10 +99,6 @@ class ServerAdapter(_VllmServerAdapter):
         call site), dynamo does not fall into the parent vLLM IPC path,
         which would attempt to call ``update_weights_from_ipc`` on a
         DynamoHttpServer that has no such handler.
-
-        Mirrors NeMo-RL PR #2222 where ``DynamoVllmGeneration.update_weights_*``
-        methods assert False as a safety net while ``NEED_REFIT=False`` keeps
-        them off the hot path.
         """
         # Drain the generator so the upstream BucketedWeightSender (if any
         # caller bypassed the gate) does not block waiting to enqueue bytes.
