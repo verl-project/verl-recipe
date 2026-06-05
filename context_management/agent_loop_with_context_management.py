@@ -269,7 +269,7 @@ class ToolSlidingWindowAgentLoop(AgentLoopWithContextManagement):
         self._validate_text_messages(messages)
 
         multi_modal_data = await self.process_vision_info(messages)
-        if multi_modal_data:
+        if multi_modal_data and (multi_modal_data.get("images") or multi_modal_data.get("videos")):
             raise ValueError("ToolSlidingWindowAgentLoop only supports text prompts.")
 
         prompt_ids = await self.apply_chat_template(messages, tools=self.tool_schemas)
@@ -453,9 +453,9 @@ class ToolSlidingWindowAgentLoop(AgentLoopWithContextManagement):
             return text
 
         if self.tool_response_truncate_side == "left":
-            return text[: self.max_tool_response_length] + "...(truncated)"
-        if self.tool_response_truncate_side == "right":
             return "(truncated)..." + text[-self.max_tool_response_length :]
+        if self.tool_response_truncate_side == "right":
+            return text[: self.max_tool_response_length] + "...(truncated)"
 
         length = self.max_tool_response_length // 2
         return text[:length] + "...(truncated)..." + text[-length:]

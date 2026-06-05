@@ -26,7 +26,6 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.mode=async \
     actor_rollout_ref.rollout.n=8 \
     actor_rollout_ref.rollout.multi_turn.enable=True \
-    `# --- context-management wiring (the point of this recipe) ---` \
     actor_rollout_ref.rollout.agent.agent_loop_config_path="$AGENT_LOOP_CONFIG" \
     actor_rollout_ref.rollout.agent.default_agent_loop=naive_summarizer_agent \
     trainer.logger='["console"]' \
