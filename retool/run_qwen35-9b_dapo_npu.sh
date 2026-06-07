@@ -22,7 +22,7 @@ train_files="['$dapo_math_17k']"
 test_files="['$aime_2024']"
 
 # tool
-tool_config_path=verl-recipe/retool/sandbox_fusion_tool_config.yaml
+tool_config_path="$SCRIPT_DIR/sandbox_fusion_tool_config.yaml"
 
 # wandb
 project_name=retool
