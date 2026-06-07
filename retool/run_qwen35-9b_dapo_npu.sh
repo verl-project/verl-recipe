@@ -74,7 +74,7 @@ python3 -m verl.trainer.main_ppo \
     data.custom_cls.name=CustomRLHFDataset \
     custom_reward_function.path="$SCRIPT_DIR/retool.py" \
     custom_reward_function.name=compute_score \
-    actor_rollout_ref.model.path=$model_path \
+    actor_rollout_ref.model.path="$model_path" \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.use_kl_loss=$use_kl_loss \
