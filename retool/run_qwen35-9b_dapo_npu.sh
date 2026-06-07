@@ -70,9 +70,9 @@ python3 -m verl.trainer.main_ppo \
     data.max_response_length=$max_response_length \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
-    data.custom_cls.path=verl-recipe/retool/retool.py \
+    data.custom_cls.path="$SCRIPT_DIR/retool.py" \
     data.custom_cls.name=CustomRLHFDataset \
-    custom_reward_function.path=verl-recipe/retool/retool.py \
+    custom_reward_function.path="$SCRIPT_DIR/retool.py" \
     custom_reward_function.name=compute_score \
     actor_rollout_ref.model.path=$model_path \
     actor_rollout_ref.model.use_remove_padding=True \
