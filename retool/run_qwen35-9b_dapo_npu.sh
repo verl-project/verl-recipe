@@ -97,7 +97,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.multi_turn.enable=True \
     actor_rollout_ref.rollout.multi_turn.max_user_turns=$max_turns \
     actor_rollout_ref.rollout.multi_turn.max_assistant_turns=$max_turns \
-    actor_rollout_ref.rollout.multi_turn.tool_config_path=$tool_config_path \
+    actor_rollout_ref.rollout.multi_turn.tool_config_path="$tool_config_path" \
     actor_rollout_ref.rollout.multi_turn.format=hermes \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
     actor_rollout_ref.rollout.n=$n_resp_per_prompt \
