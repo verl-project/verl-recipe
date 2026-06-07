@@ -10,6 +10,7 @@ export HCCL_OP_EXPANSION_MODE="AIV"
 # export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 # Specify NPU_IDs if needed
 
 # ================= data/model/tool =================
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HDFS_ROOT=${HDFS_ROOT:-$PWD}
 DATA_ROOT=${DATA_ROOT:-$PWD}
 
