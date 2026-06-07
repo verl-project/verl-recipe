@@ -121,6 +121,6 @@ python3 -m verl.trainer.main_ppo \
     trainer.nnodes=1 \
     trainer.device=npu \
     trainer.save_freq=20 \
-    trainer.default_local_dir=$default_local_dir \
+    trainer.default_local_dir="$default_local_dir" \
     trainer.test_freq=10 \
     trainer.total_epochs=1 $@
