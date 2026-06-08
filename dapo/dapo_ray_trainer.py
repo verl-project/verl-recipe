@@ -40,7 +40,6 @@ from verl.trainer.ppo.reward import extract_reward
 from verl.utils.checkpoint.checkpoint_manager import should_save_ckpt_esi
 from verl.utils.metric import reduce_metrics
 from verl.utils.profiler import marked_timer
-from verl.utils.rollout_skip import RolloutSkip
 
 
 class RayDAPOTrainer(RayPPOTrainer):
@@ -114,10 +113,6 @@ class RayDAPOTrainer(RayPPOTrainer):
             logger.log(data=val_metrics, step=self.global_steps)
             if self.config.trainer.get("val_only", False):
                 return
-
-        if self.config.actor_rollout_ref.rollout.get("skip_rollout", False):
-            rollout_skip = RolloutSkip(self.config, self.async_rollout_manager)
-            rollout_skip.wrap_generate_sequences()
 
         # add tqdm
         progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")

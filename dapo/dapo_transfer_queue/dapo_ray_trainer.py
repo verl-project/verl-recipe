@@ -44,7 +44,6 @@ from verl import DataProto
 from verl.trainer.ppo.core_algos import agg_loss
 from verl.utils.metric import reduce_metrics
 from verl.utils.profiler import marked_timer
-from verl.utils.rollout_skip import RolloutSkip
 from verl.utils.seqlen_balancing import (
     calculate_workload,
     get_seqlen_balanced_partitions,
@@ -133,10 +132,6 @@ class RayDAPOTrainer(RayPPOTrainer):
             logger.log(data=val_metrics, step=self.global_steps)
             if self.config.trainer.get("val_only", False):
                 return
-
-        if self.config.actor_rollout_ref.rollout.get("skip_rollout", False):
-            rollout_skip = RolloutSkip(self.config, self.actor_rollout_wg)
-            rollout_skip.wrap_generate_sequences()
 
         progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
         self.global_steps += 1
