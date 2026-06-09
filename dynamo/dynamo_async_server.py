@@ -241,6 +241,14 @@ class DynamoHttpServer:
         checkpoint_engine = getattr(self.config, "checkpoint_engine", None)
         return bool(getattr(checkpoint_engine, "skip_refit", False))
 
+    def _free_engine_on_train(self) -> bool:
+        """Opt-in: actually sleep/wake the colocated vLLM engine around the
+        train phase to free GPU memory (vLLM sleep level 1: weights->CPU, drop
+        KV; wake restores weights, no refit needed). Off by default — v1 keeps
+        workers resident. Enable with
+        rollout.engine_kwargs.dynamo.free_engine_on_train=True."""
+        return self._dynamo_cfg_bool("free_engine_on_train", False)
+
     def _dynamo_env_vars(self) -> dict[str, str]:
         """Common env vars for all dynamo subprocesses on this node.
 
@@ -768,18 +776,28 @@ class DynamoHttpServer:
             return self._frontend_extra_args()
 
         cfg = self._dynamo_cfg()
-        args = [
-            "--active-decode-blocks-threshold",
-            self._normalize_decode_blocks_threshold(cfg.get("active_decode_blocks_threshold", "None")),
-            "--active-prefill-tokens-threshold",
-            self._normalize_prefill_threshold(
-                "active_prefill_tokens_threshold", cfg.get("active_prefill_tokens_threshold", "None")
-            ),
-            "--active-prefill-tokens-threshold-frac",
-            self._normalize_prefill_threshold(
-                "active_prefill_tokens_threshold_frac", cfg.get("active_prefill_tokens_threshold_frac", "None")
-            ),
-        ]
+        # The installed dynamo.frontend parses these thresholds with type=float and
+        # rejects the literal string "None" (argparse: "invalid float value: 'None'").
+        # So OMIT a threshold flag entirely when it normalizes to disabled, rather
+        # than passing "None": an absent flag is the frontend's disabled default and
+        # matches the intent (route by cache affinity, no load shedding).
+        args: list[str] = []
+        decode = self._normalize_decode_blocks_threshold(
+            cfg.get("active_decode_blocks_threshold", "None")
+        )
+        if decode != "None":
+            args += ["--active-decode-blocks-threshold", decode]
+        prefill = self._normalize_prefill_threshold(
+            "active_prefill_tokens_threshold", cfg.get("active_prefill_tokens_threshold", "None")
+        )
+        if prefill != "None":
+            args += ["--active-prefill-tokens-threshold", prefill]
+        prefill_frac = self._normalize_prefill_threshold(
+            "active_prefill_tokens_threshold_frac",
+            cfg.get("active_prefill_tokens_threshold_frac", "None"),
+        )
+        if prefill_frac != "None":
+            args += ["--active-prefill-tokens-threshold-frac", prefill_frac]
         if self._dynamo_cfg_bool("router_predict_on_route", False):
             logger.warning(
                 "rollout.engine_kwargs.dynamo.router_predict_on_route is set but "
@@ -1481,27 +1499,30 @@ class DynamoHttpServer:
     # ------------------------------------------------------------------ #
 
     async def wake_up(self, **kwargs):
-        if self.node_rank != 0:
-            return
-        if self._skip_refit():
-            logger.info("[DynamoHttpServer] wake_up: skip_refit=True, leaving Dynamo workers loaded")
+        # NB: no node_rank guard — each per-node server wakes its OWN local
+        # workers (self._control_endpoints are node-local), so all nodes must run.
+        if not self._free_engine_on_train():
+            logger.info("[DynamoHttpServer] wake_up: free_engine_on_train disabled, leaving Dynamo workers loaded")
             return
         if not self._control_endpoints:
             logger.info("[DynamoHttpServer] wake_up: no control sidecar, skipping")
             return
-        # v2: bridge to engine.wake_up via control sidecar (engine method,
+        # bridge to engine.wake_up via control sidecar (engine method,
         # not collective_rpc — handled in sidecar).
         await self._engine_method_all("wake_up", kwargs=kwargs)
 
     async def sleep(self, **kwargs):
-        if self.node_rank != 0:
-            return
-        if self._skip_refit():
-            logger.info("[DynamoHttpServer] sleep: skip_refit=True, leaving Dynamo workers loaded")
+        # NB: no node_rank guard — each per-node server sleeps its OWN local
+        # workers (self._control_endpoints are node-local), so all nodes must run.
+        if not self._free_engine_on_train():
+            logger.info("[DynamoHttpServer] sleep: free_engine_on_train disabled, leaving Dynamo workers loaded")
             return
         if not self._control_endpoints:
             logger.info("[DynamoHttpServer] sleep: no control sidecar, skipping")
             return
+        # v1 can't refit weights, so use sleep level 1 (offload weights to CPU +
+        # drop KV); wake_up restores weights from CPU — no refit needed.
+        kwargs.setdefault("level", 1)
         await self._engine_method_all("sleep", kwargs=kwargs)
 
     async def clear_kv_cache(self):
