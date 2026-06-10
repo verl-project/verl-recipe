@@ -18,7 +18,7 @@ answer_format = """\nThe answer format must be: \\boxed{'The final answer goes h
 def map_fn(row: dict, *, data_source: str = None):
     if data_source == "Maxwell-Jia/AIME_2024":
         problem, answer = row["Problem"], row["Answer"]
-    elif data_source in ("yentinglin/aime_2025", "retool_dataset/aime_2025"):
+    elif data_source == "yentinglin/aime_2025":
         problem, answer = row["problem"], row["answer"]
     prompt = problem + answer_format
     data = {
