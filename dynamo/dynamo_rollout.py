@@ -20,9 +20,9 @@ so it lands on ``dynamo_server_*`` (created by DynamoReplica.launch_servers)
 rather than ``vllm_server_*``.
 """
 
-from collections.abc import Generator
 from typing import Any, Optional
 
+import os
 import ray
 import torch
 
@@ -39,6 +39,13 @@ class ServerAdapter(_VllmServerAdapter):
     requests go to the per-replica Ray actor named ``dynamo_server_{r}_{n}``.
     """
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        rank = int(os.environ["RANK"])
+        local_world_size = int(os.environ["RAY_LOCAL_WORLD_SIZE"])
+        self._dynamo_node_rank = rank // local_world_size
+        self._dynamo_node_local_rank = rank % local_world_size
+
     def _get_server_name_prefix(self) -> str:
         return "dynamo_"
 
@@ -46,7 +53,19 @@ class ServerAdapter(_VllmServerAdapter):
         """Return the shared Dynamo server actor name for control RPCs."""
         dynamo_cfg = (self.config.engine_kwargs or {}).get("dynamo", {}) or {}
         shared_replica_rank = int(dynamo_cfg.get("shared_pool_replica_rank", 0))
-        return f"{self._get_server_name_prefix()}server_{shared_replica_rank}_{self.node_rank}"
+        return f"{self._get_server_name_prefix()}server_{shared_replica_rank}_{self._dynamo_node_rank}"
+
+    def _is_node_control_rank(self) -> bool:
+        """True for the one trainer rank that controls Dynamo on this node."""
+        return self._dynamo_node_local_rank == 0
+
+    def _ensure_server_handle(self) -> bool:
+        """Lazy-init the shared Dynamo control actor handle."""
+        if not self._is_node_control_rank():
+            return False
+        if self.server_handle is None:
+            self.server_handle = ray.get_actor(self._get_control_actor_name())
+        return True
 
     async def _execute_method(
         self,
@@ -60,8 +79,13 @@ class ServerAdapter(_VllmServerAdapter):
 
         Native vLLM has one named server actor per rollout replica. All logical rollout
         replicas on a node share ``dynamo_server_0_<node_rank>``.
+
+        Gate on one trainer rank per physical node. Each node has one shared
+        DynamoHttpServer actor whose collective_rpc broadcasts to the node-local
+        sidecars. Firing once per logical replica would duplicate sidecar RPCs;
+        firing only on global rank 0 would miss non-master nodes.
         """
-        if self.rollout_rank != 0:
+        if not self._is_node_control_rank():
             return None
 
         if self.server_handle is None:
@@ -75,36 +99,131 @@ class ServerAdapter(_VllmServerAdapter):
         )
         return future if non_block else await future
 
-    async def resume(self, tags: list[str]):
-        """Dynamo no-refit mode keeps rollout workers loaded; no wake_up needed."""
-        return None
-
-    async def release(self):
-        """Dynamo no-refit mode does not sleep rollout workers between updates."""
-        return None
-
     @torch.no_grad()
-    async def update_weights(
-        self,
-        weights: Generator[tuple[str, torch.Tensor], None, None],
-        global_steps: int = None,
-        **kwargs,
-    ):
-        """Dynamo v1: weight refit is not implemented.
+    async def update_weights(self, weights, global_steps=None, **kwargs):
+        import asyncio
+        import time as _time
 
-        The primary gate is ``checkpoint_engine.skip_refit`` in
-        CheckpointEngineManager, which prevents this method from ever being
-        invoked in normal e2e training. This override is defensive: it
-        ensures that if the gate is bypassed (e.g., from a non-standard
-        call site), dynamo does not fall into the parent vLLM IPC path,
-        which would attempt to call ``update_weights_from_ipc`` on a
-        DynamoHttpServer that has no such handler.
-        """
-        # Drain the generator so the upstream BucketedWeightSender (if any
-        # caller bypassed the gate) does not block waiting to enqueue bytes.
-        for _ in weights:
-            pass
-        return None
+        from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import (
+            BucketedWeightSender,
+        )
+
+        t_enter = _time.time()
+        tag = f"[v4a-4][rank={self.rollout_rank}]"
+        print(f"{tag} ENTER update_weights", flush=True)
+
+        # Fire RPC (only rank 0 actually fires per parent _execute_method gating).
+        future = await self._execute_method(
+            "update_weights_from_ipc",
+            non_block=True,
+            kwargs={**kwargs, "use_shm": self.use_shm},
+        )
+        print(
+            f"{tag} RPC fired +{_time.time() - t_enter:.2f}s "
+            f"future={'present' if future is not None else 'None (non-rank-0)'}",
+            flush=True,
+        )
+
+        # Build sender (every rank has its own zmq_handle to its paired
+        # engine worker; receiver setup on engine side is triggered by
+        # rank 0's RPC, but all ranks then send via their own pair).
+        bucket_size_mb = self.config.checkpoint_engine.update_weights_bucket_megabytes
+        sender = BucketedWeightSender(
+            zmq_handle=self.zmq_handle,
+            bucket_size_mb=bucket_size_mb,
+            use_shm=self.use_shm,
+        )
+        print(f"{tag} sender ready zmq_handle={self.zmq_handle}", flush=True)
+
+        sender_task = asyncio.create_task(sender.async_send_weights(weights))
+
+        # Race future vs sender for 60s. If future errors fast, we catch it.
+        if future is not None:
+            future_task = asyncio.ensure_future(future)
+            done, pending = await asyncio.wait(
+                {sender_task, future_task},
+                timeout=60,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            elapsed = _time.time() - t_enter
+            print(
+                f"{tag} race done={len(done)} pending={len(pending)} "
+                f"+{elapsed:.2f}s",
+                flush=True,
+            )
+            for t in done:
+                which = "future" if t is future_task else "sender"
+                if t.exception():
+                    err = t.exception()
+                    print(
+                        f"{tag} {which} ERROR: {type(err).__name__}: {err}",
+                        flush=True,
+                    )
+                    for p in pending:
+                        p.cancel()
+                    raise err
+                print(f"{tag} {which} completed OK", flush=True)
+
+            # Continue waiting for whatever is still pending
+            if pending:
+                print(f"{tag} waiting for {len(pending)} pending task(s)...", flush=True)
+                more_done, more_pending = await asyncio.wait(
+                    pending,
+                    timeout=600,
+                    return_when=asyncio.ALL_COMPLETED,
+                )
+                if more_pending:
+                    print(
+                        f"{tag} TIMEOUT: {len(more_pending)} task(s) still pending "
+                        f"after 600s +{_time.time() - t_enter:.2f}s",
+                        flush=True,
+                    )
+                    for p in more_pending:
+                        p.cancel()
+                    raise RuntimeError(
+                        f"v4a-4 hung: tasks still pending after 660s total"
+                    )
+                for t in more_done:
+                    which = "future" if t is future_task else "sender"
+                    if t.exception():
+                        err = t.exception()
+                        print(
+                            f"{tag} {which} ERROR (late): "
+                            f"{type(err).__name__}: {err}",
+                            flush=True,
+                        )
+                        raise err
+                    print(f"{tag} {which} completed OK (late)", flush=True)
+        else:
+            # Non-rank-0: only sender (no future to race against).
+            await sender_task
+            print(f"{tag} sender DONE (non-rank-0) +{_time.time() - t_enter:.2f}s", flush=True)
+
+        # Cleanup once per node: every shared Dynamo actor owns node-local
+        # sidecars and caches.
+        if self._is_node_control_rank():
+            try:
+                await asyncio.wait_for(
+                    self.server_handle.clear_kv_cache.remote(),
+                    timeout=30,
+                )
+                print(f"{tag} kv cache cleared", flush=True)
+            except asyncio.TimeoutError:
+                print(
+                    f"{tag} clear_kv_cache TIMEOUT 30s (continuing; "
+                    f"prefix cache may be stale)",
+                    flush=True,
+                )
+            if global_steps is not None:
+                try:
+                    await asyncio.wait_for(
+                        self.server_handle.set_global_steps.remote(global_steps),
+                        timeout=10,
+                    )
+                except asyncio.TimeoutError:
+                    print(f"{tag} set_global_steps TIMEOUT 10s", flush=True)
+
+        print(f"{tag} EXIT +{_time.time() - t_enter:.2f}s", flush=True)
 
 
 __all__ = ["ServerAdapter"]

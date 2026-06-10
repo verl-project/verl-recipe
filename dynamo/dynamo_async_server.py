@@ -81,7 +81,7 @@ _ETCD_READY_TIMEOUT_S = 30.0
 _NATS_READY_TIMEOUT_S = 30.0
 _WATCHDOG_INTERVAL_S = 5.0
 _VLLM_TCPSTORE_PORT_BASE = int(os.getenv("VERL_DYNAMO_VLLM_PORT_BASE", "20000"))
-_KV_EVENT_PORT_BASE = int(os.getenv("VERL_DYNAMO_KV_EVENT_PORT_BASE", "30000"))
+_KV_EVENT_PORT_BASE = int(os.getenv("VERL_DYNAMO_KV_EVENT_PORT_BASE", "42000"))
 
 
 @dataclass(frozen=True)
@@ -237,18 +237,6 @@ class DynamoHttpServer:
             return default
         return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
-    def _skip_refit(self) -> bool:
-        checkpoint_engine = getattr(self.config, "checkpoint_engine", None)
-        return bool(getattr(checkpoint_engine, "skip_refit", False))
-
-    def _free_engine_on_train(self) -> bool:
-        """Opt-in: actually sleep/wake the colocated vLLM engine around the
-        train phase to free GPU memory (vLLM sleep level 1: weights->CPU, drop
-        KV; wake restores weights, no refit needed). Off by default — v1 keeps
-        workers resident. Enable with
-        rollout.engine_kwargs.dynamo.free_engine_on_train=True."""
-        return self._dynamo_cfg_bool("free_engine_on_train", False)
-
     def _dynamo_env_vars(self) -> dict[str, str]:
         """Common env vars for all dynamo subprocesses on this node.
 
@@ -356,6 +344,16 @@ class DynamoHttpServer:
         self._server_port = self._frontend_port
         if start_healthcheck:
             await self.wait_frontend_ready()
+            # v2: verify control-sidecar reachability so refit failures surface
+            # at startup instead of silently dropping weight updates mid-training.
+            # Soft-fail by default; set VERL_DYNAMO_REFIT_STRICT=1 for fail-fast.
+            # IMPORTANT: must run AFTER wait_frontend_ready so dynamo.vllm
+            # subprocesses are fully booted (their control sidecars cannot
+            # serve requests until the captured AsyncLLM is alive). In the
+            # shared-pool path, launch_servers calls wait_frontend_ready
+            # externally (start_healthcheck=False here) and runs
+            # _self_test_refit_path explicitly there.
+            await self._self_test_refit_path()
         logger.info(
             "[DynamoHttpServer] master ready: frontend=http://%s:%s",
             self._server_address,
@@ -512,6 +510,10 @@ class DynamoHttpServer:
             env["CUDA_VISIBLE_DEVICES"] = worker_cvd
             env[_RANK_OFFSET_ENV] = str(spec.rank_offset)
             env[_REPLICA_RANK_ENV] = str(spec.replica_rank)
+            # Match verl's native vLLM colocated path: both trainer-side
+            # BucketedWeightSender and vLLM-side BucketedWeightReceiver include
+            # the Ray job id in their shared /tmp IPC socket name.
+            env["VERL_RAY_JOB_ID"] = ray.get_runtime_context().get_job_id()
             # vLLM's multiproc executor uses VLLM_PORT for its local TCPStore.
             # A node can host many TP=1 Dynamo shards, so leaving this random can
             # collide under concurrent startup.
@@ -635,8 +637,13 @@ class DynamoHttpServer:
         return self._allocate_stable_node_port(_VLLM_TCPSTORE_PORT_BASE, shard_idx)
 
     def _allocate_kv_event_port(self, shard_idx: int) -> int:
-        """Pick a stable port for vLLM's ZMQ KV event publisher."""
-        return self._allocate_stable_node_port(_KV_EVENT_PORT_BASE, shard_idx)
+        """Pick a stable port for vLLM's ZMQ KV event publisher.
+
+        vLLM binds this port inside a child process. A random parent-side probe
+        can race with other listeners before the child binds; stable per-node
+        windows are more predictable on exclusive Slurm nodes.
+        """
+        return self._allocate_stable_node_port(_KV_EVENT_PORT_BASE, shard_idx, window=16)
 
     def _configured_or_allocated_port(self, key: str, bind_wildcard: bool = False) -> int:
         configured = int(self._dynamo_cfg().get(key, 0) or 0)
@@ -1448,8 +1455,7 @@ class DynamoHttpServer:
         AsyncLLM, so the verl WorkerExtension methods (update_weights_from_ipc,
         wake_up, sleep, ...) execute inside vLLM workers.
 
-        v1: control sidecar isn't started yet, so we fail fast — call sites
-        guard with self.config.free_cache_engine etc., so most paths skip.
+        v1: control sidecar isn't started yet, so we fail fast.
         """
         if not self._control_endpoints:
             raise NotImplementedError(
@@ -1467,31 +1473,50 @@ class DynamoHttpServer:
         import zmq
         import zmq.asyncio
 
+        # v4a-6 (Iter 7.5): Iter 7.4 revealed sequential endpoint iteration
+        # deadlocks `update_weights_from_ipc`. That RPC blocks until the
+        # receiver's IPC loop returns, but the loop returns only after
+        # sender finishes; sender depends on cupy NCCL broadcast which
+        # requires ALL replicas' rollout actors to join the group. With
+        # sequential iter, only ep[0]'s workers are ever woken — the
+        # other 3 replicas' receivers never set up, cupy broadcast hangs,
+        # everything deadlocks.
+        #
+        # Fix: dispatch all sidecars CONCURRENTLY via asyncio.gather so
+        # all 4 replicas' workers fire update_weights_from_ipc together,
+        # all REP sockets bind, cupy broadcast progresses, sender unblocks.
+        method_name = method if isinstance(method, str) else method.__name__
+        req = {
+            "method": method_name,
+            "args": args,
+            "kwargs": kwargs or {},
+            "timeout": timeout,
+        }
+        recv_timeout = timeout if timeout else 600
+
         ctx = zmq.asyncio.Context.instance()
-        results: list[Any] = []
-        for ep in self._control_endpoints:
+
+        async def _call_one(idx: int, ep: str) -> Any:
             sock = ctx.socket(zmq.REQ)
             sock.setsockopt(zmq.LINGER, 0)
             try:
                 sock.connect(ep)
-                req = {
-                    "method": method if isinstance(method, str) else method.__name__,
-                    "args": args,
-                    "kwargs": kwargs or {},
-                    "timeout": timeout,
-                }
                 await sock.send(pickle.dumps(req))
                 reply_bytes = await asyncio.wait_for(
-                    sock.recv(), timeout=timeout if timeout else 600
+                    sock.recv(), timeout=recv_timeout
                 )
                 reply = pickle.loads(reply_bytes)
                 if not reply.get("ok"):
                     raise RuntimeError(
                         f"control sidecar @ {ep} returned error: {reply.get('error')}"
                     )
-                results.append(reply.get("result"))
+                return reply.get("result")
             finally:
                 sock.close()
+
+        results = await asyncio.gather(
+            *[_call_one(i, ep) for i, ep in enumerate(self._control_endpoints)]
+        )
         return results
 
     # ------------------------------------------------------------------ #
@@ -1501,9 +1526,6 @@ class DynamoHttpServer:
     async def wake_up(self, **kwargs):
         # NB: no node_rank guard — each per-node server wakes its OWN local
         # workers (self._control_endpoints are node-local), so all nodes must run.
-        if not self._free_engine_on_train():
-            logger.info("[DynamoHttpServer] wake_up: free_engine_on_train disabled, leaving Dynamo workers loaded")
-            return
         if not self._control_endpoints:
             logger.info("[DynamoHttpServer] wake_up: no control sidecar, skipping")
             return
@@ -1514,9 +1536,6 @@ class DynamoHttpServer:
     async def sleep(self, **kwargs):
         # NB: no node_rank guard — each per-node server sleeps its OWN local
         # workers (self._control_endpoints are node-local), so all nodes must run.
-        if not self._free_engine_on_train():
-            logger.info("[DynamoHttpServer] sleep: free_engine_on_train disabled, leaving Dynamo workers loaded")
-            return
         if not self._control_endpoints:
             logger.info("[DynamoHttpServer] sleep: no control sidecar, skipping")
             return
@@ -1526,8 +1545,6 @@ class DynamoHttpServer:
         await self._engine_method_all("sleep", kwargs=kwargs)
 
     async def clear_kv_cache(self):
-        if self.node_rank != 0:
-            return
         if not self._control_endpoints:
             return
         await self._engine_method_all("reset_prefix_cache")
@@ -1557,7 +1574,11 @@ class DynamoHttpServer:
     async def _engine_method_all(self, method: str, kwargs: Optional[dict] = None):
         """Like collective_rpc but invokes a top-level AsyncLLM method
         (wake_up / sleep / reset_prefix_cache / wait_for_requests_to_drain),
-        not a worker-extension RPC. Distinguished by message kind."""
+        not a worker-extension RPC. Distinguished by message kind.
+
+        v4a-6 (Iter 7.5): same parallel-dispatch fix as collective_rpc.
+        Sequential iter deadlocked update_weights_from_ipc and now also
+        deadlocks reset_prefix_cache post-refit."""
         if not self._control_endpoints:
             return None
 
@@ -1566,17 +1587,19 @@ class DynamoHttpServer:
         import zmq
         import zmq.asyncio
 
+
         ctx = zmq.asyncio.Context.instance()
-        for ep in self._control_endpoints:
+        req = {
+            "kind": "engine_method",
+            "method": method,
+            "kwargs": kwargs or {},
+        }
+
+        async def _call_one(idx: int, ep: str) -> None:
             sock = ctx.socket(zmq.REQ)
             sock.setsockopt(zmq.LINGER, 0)
             try:
                 sock.connect(ep)
-                req = {
-                    "kind": "engine_method",
-                    "method": method,
-                    "kwargs": kwargs or {},
-                }
                 await sock.send(pickle.dumps(req))
                 reply_bytes = await asyncio.wait_for(sock.recv(), timeout=120)
                 reply = pickle.loads(reply_bytes)
@@ -1587,7 +1610,110 @@ class DynamoHttpServer:
                     )
             finally:
                 sock.close()
+
+        await asyncio.gather(
+            *[_call_one(i, ep) for i, ep in enumerate(self._control_endpoints)]
+        )
         return None
+
+    # ------------------------------------------------------------------ #
+    # v3 refit: world-size helper for NCCL group setup
+    # ------------------------------------------------------------------ #
+
+    def get_num_engine_workers(self) -> int:
+        """Total number of TP worker processes across all dynamo.vllm shards
+        on this node. Used by DynamoRollout.update_weights to compute the
+        NCCL group world_size = 1 (broadcaster) + N (engine workers)."""
+        tp = int(self.config.tensor_model_parallel_size)
+        return len(self._control_endpoints) * tp
+
+    # ------------------------------------------------------------------ #
+    # refit path self-test (v2 — verifies control sidecar reachability)
+    # ------------------------------------------------------------------ #
+
+    async def _self_test_refit_path(self):
+        """Verify the control-sidecar ⇄ AsyncLLM round-trip is alive.
+
+        Refit (DynamoRollout.update_weights, v2) routes weight bytes through
+        ``collective_rpc("update_weights_from_ipc", ...)`` which depends on
+        a working REQ-REP loop to each ``_dynamo_vllm_with_control``
+        subprocess. A silent failure here (sidecar didn't start, control
+        endpoint port collision, etc.) would let ``update_weights`` appear
+        to succeed while actually losing all updates — that's the exact
+        bug B v4 had pre-fix.
+
+        This self-test sends one ``collective_rpc`` request with a
+        deliberately invalid method name. A reachable sidecar will reply
+        with a structured error response; an unreachable one will time out.
+        Either response proves the IPC path is alive.
+
+        Skipped when no control endpoints are registered (slave node / pre-launch).
+        Soft-fail by default; set env ``VERL_DYNAMO_REFIT_STRICT=1`` to
+        raise on failure (recommended once v2 is the default).
+        """
+        if not self._control_endpoints:
+            return
+
+        import pickle
+
+        import zmq
+        import zmq.asyncio
+
+        strict = os.environ.get("VERL_DYNAMO_REFIT_STRICT", "0") not in (
+            "",
+            "0",
+            "false",
+            "False",
+        )
+
+        # Ping the first endpoint only — one round-trip is sufficient to
+        # prove the sidecar machinery is alive. We do not iterate all
+        # endpoints here to keep startup overhead minimal.
+        ep = self._control_endpoints[0]
+        ctx = zmq.asyncio.Context.instance()
+        sock = ctx.socket(zmq.REQ)
+        sock.setsockopt(zmq.LINGER, 0)
+        try:
+            sock.connect(ep)
+            # Use an UNKNOWN `kind` (not an unknown method under
+            # kind=collective_rpc) so the sidecar bails at the kind-dispatch
+            # `else` branch in _handle_request and returns a structured
+            # error reply WITHOUT ever calling engine.collective_rpc.
+            #
+            # Previously we used kind="collective_rpc" + an invalid method
+            # name, which dispatched into vLLM's worker RPC queue. The
+            # AttributeError on workers got cached/queued and corrupted the
+            # NEXT real engine.collective_rpc call (sleep) — sleep silently
+            # failed, vLLM held its full 128 GiB, and the next trainer
+            # all-gather OOM'd. (Observed in B v5 smoke iter 2, job 2463154.)
+            req = {
+                "kind": "__refit_self_test_probe__",
+                "method": None,
+                "args": (),
+                "kwargs": {},
+                "timeout": 5,
+            }
+            await sock.send(pickle.dumps(req))
+            reply_bytes = await asyncio.wait_for(sock.recv(), timeout=10)
+            reply = pickle.loads(reply_bytes)
+            logger.info(
+                "[DynamoHttpServer] refit self-test PASSED @ %s (sidecar "
+                "responded ok=%s)",
+                ep,
+                reply.get("ok"),
+            )
+        except (asyncio.TimeoutError, Exception) as e:
+            msg = (
+                f"[DynamoHttpServer] refit self-test FAILED @ {ep}: "
+                f"{type(e).__name__}: {e} — DynamoRollout.update_weights "
+                f"will likely lose updates silently. Check that "
+                f"dynamo.vllm control sidecars started."
+            )
+            if strict:
+                raise RuntimeError(msg) from e
+            logger.warning(msg)
+        finally:
+            sock.close()
 
     # ------------------------------------------------------------------ #
     # shutdown
@@ -1861,6 +1987,12 @@ class DynamoReplica(RolloutReplica):
             )
 
         await master.wait_frontend_ready.remote(expected_workers=expected_workers)
+        # v2: refit-path self-test, run here (not inside _launch_master) because
+        # the shared-pool path uses start_healthcheck=False above so the
+        # inline self-test is skipped. Must come AFTER wait_frontend_ready
+        # so all dynamo.vllm subprocesses have captured their AsyncLLM and
+        # control sidecars are serving requests.
+        await master._self_test_refit_path.remote()
         self._server_handle = master
         self._server_address = (
             f"[{fe_host}]:{fe_port}"

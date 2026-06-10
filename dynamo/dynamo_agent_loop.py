@@ -30,7 +30,7 @@ from verl.experimental.agent_loop.agent_loop import AgentLoopManager, AgentLoopW
 from verl.experimental.teacher_loop import MultiTeacherModelManager
 from verl.single_controller.ray.base import RayResourcePool, RayWorkerGroup
 from verl.utils.ray_utils import auto_await
-from verl.workers.rollout.replica import DiffusionOutput, TokenOutput
+from verl.workers.rollout.replica import TokenOutput
 
 
 class DynamoServerManager:
@@ -55,7 +55,7 @@ class DynamoServerManager:
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
         **kwargs: Any,
-    ) -> TokenOutput | DiffusionOutput:
+    ) -> TokenOutput:
         return await self.server.generate.remote(
             request_id=request_id or uuid4().hex,
             prompt_ids=prompt_ids,
@@ -67,15 +67,11 @@ class DynamoServerManager:
 
 
 class DynamoAgentLoopWorker(AgentLoopWorker):
-    """AgentLoopWorker that talks directly to the shared Dynamo actor."""
-
-    def __init__(self, config, servers, load_balancer_handle=None, *args, **kwargs):
-        self.server_manager = DynamoServerManager(servers)
-        super().__init__(config, servers, load_balancer_handle, *args, **kwargs)
+    """Compatibility wrapper for Dynamo agent loop workers."""
 
 
 class DynamoAgentLoopManager(AgentLoopManager):
-    """AgentLoopManager that bypasses verl-side server load balancing."""
+    """AgentLoopManager compatible with the current verl LLMServerClient API."""
 
     def __init__(self, *args, **kwargs):
         self.agent_loop_workers_class = ray.remote(DynamoAgentLoopWorker)
@@ -83,56 +79,13 @@ class DynamoAgentLoopManager(AgentLoopManager):
 
     @classmethod
     @auto_await
-    async def create(
-        cls,
-        config,
-        worker_group: RayWorkerGroup = None,
-        rollout_resource_pool: RayResourcePool = None,
-        reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
-        teacher_model_manager: MultiTeacherModelManager = None,
-    ):
-        instance = cls(
-            config,
-            worker_group,
-            rollout_resource_pool,
-            teacher_model_manager,
-            reward_loop_worker_handles,
-        )
-        await instance._initialize_llm_servers()
-        # Deliberately skip _init_global_load_balancer(); Dynamo frontend/KV
-        # router owns worker routing for the shared pool.
+    async def create(cls, *args, **kwargs):
+        instance = cls(*args, **kwargs)
         await instance._init_agent_loop_workers()
         return instance
 
     async def _init_agent_loop_workers(self):
-        self.agent_loop_workers = []
-        num_workers = self.rollout_config.agent.num_workers
-        servers = list(zip(self.server_addresses, self.server_handles, strict=True))
-
-        if len(servers) != 1:
-            raise RuntimeError(f"DynamoAgentLoopManager expects one shared frontend, got {len(servers)}")
-
-        if self.distillation_enabled:
-            raise NotImplementedError("DynamoAgentLoopManager does not yet support distillation teacher routing")
-
-        node_ids = [node["NodeID"] for node in ray.nodes() if node["Alive"] and node["Resources"].get("CPU", 0) > 0]
-        for i in range(num_workers):
-            node_id = node_ids[i % len(node_ids)]
-            self.agent_loop_workers.append(
-                self.agent_loop_workers_class.options(
-                    name=f"dynamo_agent_loop_worker_{i}_{uuid4().hex[:8]}",
-                    scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
-                        node_id=node_id, soft=True
-                    ),
-                ).remote(
-                    self.config,
-                    servers,
-                    None,
-                    None,
-                    None,
-                    self.reward_loop_worker_handles,
-                )
-            )
+        await super()._init_agent_loop_workers()
 
 
 __all__ = ["DynamoAgentLoopManager", "DynamoAgentLoopWorker", "DynamoServerManager"]

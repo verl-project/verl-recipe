@@ -11,15 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Dynamo training entry point.
-
-Behavior is identical to the standard PPO entry; dynamo only swaps the
-rollout backend, not trainer logic. The dynamo backend is registered
-statically in ``verl.workers.rollout.base._ROLLOUT_REGISTRY`` and
-``verl.workers.rollout.replica.RolloutReplicaRegistry`` (see those
-modules), so no per-entry-point or per-worker-process registration is
-needed here.
-"""
+"""Dynamo training entry point."""
 
 import hydra
 import ray
@@ -29,11 +21,30 @@ from verl.trainer.main_ppo import TaskRunner, run_ppo
 from verl.utils.device import auto_set_device
 
 
+def _register_dynamo_rollout():
+    """Register recipe-side Dynamo rollout support in the current process."""
+    from verl.workers.rollout.replica import RolloutReplicaRegistry
+
+    def _load_dynamo():
+        from recipe.dynamo.dynamo_async_server import DynamoReplica
+
+        return DynamoReplica
+
+    RolloutReplicaRegistry.register("dynamo", _load_dynamo)
+
+
+class DynamoTaskRunner(TaskRunner):
+    def run(self, config):
+        _register_dynamo_rollout()
+        return super().run(config)
+
+
 @hydra.main(config_path="config", config_name="dynamo_trainer", version_base=None)
 def main(config):
+    _register_dynamo_rollout()
     auto_set_device(config)
     config = migrate_legacy_reward_impl(config)
-    run_ppo(config, task_runner_class=ray.remote(num_cpus=1)(TaskRunner))
+    run_ppo(config, task_runner_class=ray.remote(num_cpus=1)(DynamoTaskRunner))
 
 
 if __name__ == "__main__":

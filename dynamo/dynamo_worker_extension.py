@@ -14,7 +14,7 @@
 """vLLM worker_extension_cls for the dynamo backend.
 
 The base ``vLLMColocateWorkerExtension._get_zmq_handle`` (verl/workers/rollout
-/vllm_rollout/utils.py:266-273) uses ``self.local_rank``, which is the rank of
+/vllm_rollout/utils.py) uses ``self.local_rank``, which is the rank of
 the worker *within its TP group*. In the dynamo Route-B topology each DP shard
 is a separate ``dynamo.vllm`` subprocess, so two DP shards' TP rank 0 would
 both compute ``self.local_rank == 0`` and connect to the same IPC socket file.
@@ -22,9 +22,9 @@ both compute ``self.local_rank == 0`` and connect to the same IPC socket file.
 Fix: read ``VERL_DYNAMO_RANK_OFFSET`` from env (set by DynamoHttpServer when
 spawning each DP shard) and add it to ``self.local_rank`` so the IPC handle
 encodes a node-global rank that matches what the trainer side computes
-(``rollout_rank % local_world_size`` in vllm_rollout.py:104).
-
-See dynamo_design_0507.md §11.3 for the full rank mapping table.
+(``rollout_rank % local_world_size`` in vllm_rollout.py). Keep the same Ray
+job id prefix as verl's native vLLM path so sender and receiver build identical
+socket paths.
 """
 
 from __future__ import annotations
@@ -39,16 +39,14 @@ _RANK_OFFSET_ENV = "VERL_DYNAMO_RANK_OFFSET"
 class vLLMDynamoColocateWorkerExtension(vLLMColocateWorkerExtension):
     """vLLM worker mixin for verl × dynamo.
 
-    Identical to ``vLLMColocateWorkerExtension`` except for
-    ``_get_zmq_handle``, which uses a node-local-global rank instead of the
-    per-subprocess TP-local rank.
+    Override ``_get_zmq_handle`` to use a node-global rank (rather than the
+    per-shard TP-local rank), so trainer-side BucketedWeightSender and
+    engine-side BucketedWeightReceiver agree on the IPC socket path.
     """
 
     def _get_zmq_handle(self) -> str:
         replica_rank = os.environ.get("VERL_REPLICA_RANK", "0")
+        job_id = os.environ.get("VERL_RAY_JOB_ID", "0")
         offset = int(os.environ.get(_RANK_OFFSET_ENV, "0"))
         global_rank = self.local_rank + offset
-        return f"ipc:///tmp/rl-colocate-zmq-replica-{replica_rank}-rank-{global_rank}.sock"
-
-
-__all__ = ["vLLMDynamoColocateWorkerExtension"]
+        return f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{replica_rank}-rank-{global_rank}.sock"

@@ -78,7 +78,6 @@ def _build_rollout_config(
         "enable_sleep_mode": False,
         "enable_chunked_prefill": True,
         "enable_prefix_caching": True,
-        "free_cache_engine": True,
         "load_format": "auto",
         "logprobs_mode": "processed_logprobs",
         "scheduling_policy": "fcfs",
