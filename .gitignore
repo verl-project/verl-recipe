@@ -129,3 +129,6 @@ logs
 log
 outputs
 .history
+
+# local Dynamo scratch scripts
+dynamo/scripts/
