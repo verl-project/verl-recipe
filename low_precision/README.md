@@ -55,6 +55,22 @@ actor_rollout_ref.rollout:
   quantization: fp8
 ```
 
+### Qwen3-30B-A3B (Megatron + TRT-LLM)
+
+- **Script**: [run_dapo_qwen3_moe_30b_megatron_trtllm_fp8e2e.sh](./run_dapo_qwen3_moe_30b_megatron_trtllm_fp8e2e.sh)
+- **Training backend**: Megatron + Megatron-Bridge
+- **Rollout engine**: TRT-LLM (async, FP8 quantized, fp8 KV cache)
+- **Min hardware**: GB200/Blackwell (verified 8 nodes × 4 GPUs), CUDA 12.9+
+- **Container**: TRT-LLM 1.3.0rc15 image
+- **Verified verl commit**: `8ebf167e` (branch `fp8e2e`)
+
+This is the TRT-LLM sibling of the Megatron FP8-E2E recipe above. The shared DAPO data preparation covered at the top of this README applies unchanged.
+
+> [!IMPORTANT]
+> On Blackwell, set `NVTE_FP8_BLOCK_SCALING_FP32_SCALES=0` (power-of-two scales) — the **opposite** of the H100 recipe's `=1`. TE blockwise FP8 is emulated via MX-FP8 on Blackwell, which requires power-of-two scales. The script also forwards this variable into the Ray runtime env so it propagates to all worker nodes.
+>
+> Actor and reference `pipeline_model_parallel_size=1` (PP=1) is **required**. PP=2 deadlocks the step-2 backward pass on a `PIPELINE_MODEL_PARALLEL` NCCL collective (hits the 30-min watchdog); PP=1 is memory-safe here thanks to parameter/optimizer offload plus full recompute.
+
 ## FP8 Rollout Only
 
 FP8 rollout-only recipes apply FP8 quantization during rollout inference while keeping BF16 for training. This reduces GPU memory usage during generation without modifying the training precision.
