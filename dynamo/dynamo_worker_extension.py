@@ -50,3 +50,20 @@ class vLLMDynamoColocateWorkerExtension(vLLMColocateWorkerExtension):
         offset = int(os.environ.get(_RANK_OFFSET_ENV, "0"))
         global_rank = self.local_rank + offset
         return f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{replica_rank}-rank-{global_rank}.sock"
+
+    def update_weights_from_ipc(self, *args, **kwargs):
+        """Run verl's weight reload inside vLLM's config context.
+
+        vLLM 0.20's FlashInfer MoE post-load path calls
+        get_current_vllm_config(). Native vLLM sets that context around engine
+        internals, but verl invokes this worker extension through
+        collective_rpc, so set it explicitly in the TP worker process.
+        """
+        vllm_config = getattr(getattr(self, "model_runner", None), "vllm_config", None)
+        if vllm_config is None:
+            return super().update_weights_from_ipc(*args, **kwargs)
+
+        from vllm.config import set_current_vllm_config
+
+        with set_current_vllm_config(vllm_config):
+            return super().update_weights_from_ipc(*args, **kwargs)

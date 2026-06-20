@@ -42,7 +42,7 @@ import requests
 from ray.actor import ActorHandle
 
 from verl.utils.config import omega_conf_to_dataclass
-from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
+from verl.utils.net_utils import is_valid_ipv6_address
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica
 
@@ -192,6 +192,8 @@ class DynamoHttpServer:
         self._allocated_tcp_ports: set[int] = set()
         self._direct_generate_idx: int = 0
         self._direct_generate_lock = asyncio.Lock()
+        self._logged_engine_data_token_ids = False
+        self._logged_missing_engine_data = False
 
         # Async HTTP client to the Dynamo frontend. Created lazily on the actor
         # event loop. Replaces the blocking ``asyncio.to_thread(requests.post)``
@@ -237,6 +239,22 @@ class DynamoHttpServer:
             return default
         return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
+    def _free_engine_on_train(self) -> bool:
+        """Opt-in sleep/wake of colocated vLLM workers around training."""
+        return self._dynamo_cfg_bool("free_engine_on_train", False)
+
+    def _enable_rl_mode(self) -> bool:
+        """Enable Dynamo's RL/TITO-friendly vLLM mode."""
+        return self._dynamo_cfg_bool("enable_rl", True)
+
+    def _request_engine_data(self) -> bool:
+        """Ask Dynamo to return vLLM engine token data via nvext."""
+        return self._dynamo_cfg_bool("request_engine_data", self._enable_rl_mode())
+
+    def _request_completion_token_ids(self) -> bool:
+        """Ask Dynamo to return top-level nvext.completion_token_ids."""
+        return self._dynamo_cfg_bool("request_completion_token_ids", False)
+
     def _dynamo_env_vars(self) -> dict[str, str]:
         """Common env vars for all dynamo subprocesses on this node.
 
@@ -255,7 +273,7 @@ class DynamoHttpServer:
         assert host and etcd_port and nats_port, (
             f"dynamo env vars missing host/ports: {host}/{etcd_port}/{nats_port}"
         )
-        return {
+        env = {
             "ETCD_ENDPOINTS": f"http://{host}:{etcd_port}",
             "NATS_SERVER": f"nats://{host}:{nats_port}",
             "DYN_NAMESPACE": self._namespace,
@@ -268,6 +286,8 @@ class DynamoHttpServer:
                 "dynamo_llm::http::service::service_v2=warn,info",
             ),
         }
+        env["DYN_ENABLE_RL"] = "true" if self._enable_rl_mode() else "false"
+        return env
 
     # ------------------------------------------------------------------ #
     # verl interface — addresses
@@ -329,11 +349,11 @@ class DynamoHttpServer:
     async def _launch_master(self, start_healthcheck: bool = True):
         """Master: etcd + nats + vllm workers + frontend + healthcheck."""
         # Reserve ports up-front so we know all of them before starting.
-        self._etcd_port = self._configured_or_allocated_port("etcd_port")
-        self._etcd_peer_port = self._configured_or_allocated_port("etcd_peer_port")
-        self._nats_port = self._configured_or_allocated_port("nats_port")
+        self._etcd_port = self._configured_or_allocated_port("etcd_port", bind_wildcard=True)
+        self._etcd_peer_port = self._configured_or_allocated_port("etcd_peer_port", bind_wildcard=True)
+        self._nats_port = self._configured_or_allocated_port("nats_port", bind_wildcard=True)
         # Frontend port: 0 = auto, else honor config.
-        self._frontend_port = self._configured_or_allocated_port("frontend_http_port")
+        self._frontend_port = self._configured_or_allocated_port("frontend_http_port", bind_wildcard=True)
 
         self._start_etcd()
         self._start_nats()
@@ -438,15 +458,68 @@ class DynamoHttpServer:
     def _start_nats(self):
         if self._nats_process is not None:
             return
-        cmd = ["nats-server", "-p", str(self._nats_port)]
-        logger.info("[DynamoHttpServer] starting NATS: %s", " ".join(cmd))
-        self._nats_process = subprocess.Popen(cmd)
-        self._wait_for_port(self._nats_port, _NATS_READY_TIMEOUT_S, "NATS")
+        configured_port = int(self._dynamo_cfg().get("nats_port", 0) or 0)
+        max_attempts = 1 if configured_port else 8
+        last_error: Optional[Exception] = None
+        for attempt in range(1, max_attempts + 1):
+            cmd = ["nats-server", "-p", str(self._nats_port)]
+            logger.info(
+                "[DynamoHttpServer] starting NATS (attempt %s/%s): %s",
+                attempt,
+                max_attempts,
+                " ".join(cmd),
+            )
+            self._nats_process = subprocess.Popen(cmd)
+            try:
+                self._wait_for_process_port(
+                    self._nats_process,
+                    self._nats_port,
+                    _NATS_READY_TIMEOUT_S,
+                    "NATS",
+                )
+                return
+            except RuntimeError as exc:
+                last_error = exc
+                logger.warning(
+                    "[DynamoHttpServer] NATS failed on port %s: %s",
+                    self._nats_port,
+                    exc,
+                )
+                self._terminate_process(self._nats_process, "NATS", timeout=5)
+                self._nats_process = None
+                if configured_port:
+                    break
+                self._allocated_tcp_ports.discard(self._nats_port)
+                self._nats_port = self._configured_or_allocated_port(
+                    "nats_port", bind_wildcard=True
+                )
+        raise RuntimeError(f"NATS failed to start after {max_attempts} attempts: {last_error}")
 
     @staticmethod
     def _wait_for_port(port: int, timeout: float, label: str):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
+            try:
+                with socket.create_connection(("localhost", port), timeout=1):
+                    logger.info("[DynamoHttpServer] %s port :%s open", label, port)
+                    return
+            except OSError:
+                time.sleep(0.5)
+        raise RuntimeError(f"{label} did not open port {port} within {timeout}s")
+
+    @staticmethod
+    def _wait_for_process_port(
+        process: subprocess.Popen,
+        port: int,
+        timeout: float,
+        label: str,
+    ):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise RuntimeError(
+                    f"{label} exited with rc={process.returncode} before opening port {port}"
+                )
             try:
                 with socket.create_connection(("localhost", port), timeout=1):
                     logger.info("[DynamoHttpServer] %s port :%s open", label, port)
@@ -560,14 +633,18 @@ class DynamoHttpServer:
 
             logger.info(
                 "[DynamoHttpServer] starting dynamo.vllm shard %s/%s "
-                "(replica=%s, rank_offset=%s, GPUs=%s, vllm_port=%s, control=%s, log=%s): %s",
+                "(replica=%s, rank_offset=%s, GPUs=%s, vllm_port=%s, kv_event_port=%s, control=%s, "
+                "DYN_ENABLE_RL=%s, request_engine_data=%s, log=%s): %s",
                 spec_idx,
                 len(worker_specs),
                 spec.replica_rank,
                 spec.rank_offset,
                 worker_cvd,
                 vllm_port,
+                kv_event_port,
                 control_endpoint,
+                env.get("DYN_ENABLE_RL"),
+                self._request_engine_data(),
                 stdout_path,
                 " ".join(cmd),
             )
@@ -589,7 +666,10 @@ class DynamoHttpServer:
         """
         address = "0.0.0.0" if bind_wildcard and not is_valid_ipv6_address(self._server_address) else self._server_address
         for _ in range(128):
-            port = get_free_port(address)[0]
+            family = socket.AF_INET6 if is_valid_ipv6_address(address) else socket.AF_INET
+            with socket.socket(family=family, type=socket.SOCK_STREAM) as sock:
+                sock.bind((address, 0))
+                port = sock.getsockname()[1]
             if port in self._allocated_tcp_ports:
                 continue
             self._allocated_tcp_ports.add(port)
@@ -604,7 +684,6 @@ class DynamoHttpServer:
         )
         family = socket.AF_INET6 if is_valid_ipv6_address(address) else socket.AF_INET
         sock = socket.socket(family=family, type=socket.SOCK_STREAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             sock.bind((address, port))
             return True
@@ -637,13 +716,15 @@ class DynamoHttpServer:
         return self._allocate_stable_node_port(_VLLM_TCPSTORE_PORT_BASE, shard_idx)
 
     def _allocate_kv_event_port(self, shard_idx: int) -> int:
-        """Pick a stable port for vLLM's ZMQ KV event publisher.
+        """Pick a port for vLLM's ZMQ KV event publisher.
 
-        vLLM binds this port inside a child process. A random parent-side probe
-        can race with other listeners before the child binds; stable per-node
-        windows are more predictable on exclusive Slurm nodes.
+        vLLM binds this port inside a child process after model loading. Fixed
+        node-local ports are easy to collide with stale subprocesses from a
+        previous failed job, so use a random currently-free port by default.
         """
-        return self._allocate_stable_node_port(_KV_EVENT_PORT_BASE, shard_idx, window=16)
+        if self._dynamo_cfg_bool("stable_kv_event_ports", False):
+            return self._allocate_stable_node_port(_KV_EVENT_PORT_BASE, shard_idx, window=16)
+        return self._allocate_tcp_port(bind_wildcard=True)
 
     def _configured_or_allocated_port(self, key: str, bind_wildcard: bool = False) -> int:
         configured = int(self._dynamo_cfg().get(key, 0) or 0)
@@ -749,8 +830,11 @@ class DynamoHttpServer:
         log_path = os.path.join(log_root, f"verl_dynamo_replica{self.replica_rank}_frontend.log")
         self._frontend_log_fp = open(log_path, "w")
         logger.info(
-            "[DynamoHttpServer] starting dynamo.frontend on :%s (log=%s): %s",
+            "[DynamoHttpServer] starting dynamo.frontend on :%s "
+            "(DYN_ENABLE_RL=%s, request_engine_data=%s, log=%s): %s",
             self._frontend_port,
+            env.get("DYN_ENABLE_RL"),
+            self._request_engine_data(),
             log_path,
             " ".join(cmd),
         )
@@ -1084,6 +1168,7 @@ class DynamoHttpServer:
                 ),
             )
         sp.pop("logprobs", None)
+        nvext = sp.pop("nvext", None)
         payload: dict[str, Any] = {
             "model": model,
             # vLLM's OpenAI completions endpoint accepts token-id prompts. Keep
@@ -1092,6 +1177,15 @@ class DynamoHttpServer:
             "max_tokens": int(max_tokens),
             "stream": False,
         }
+        nvext_fields = []
+        if self._request_engine_data():
+            nvext_fields.append("engine_data")
+        if self._request_completion_token_ids():
+            nvext_fields.append("completion_token_ids")
+        if nvext_fields:
+            payload["nvext"] = self._merge_nvext_extra_fields(nvext, nvext_fields)
+        elif nvext is not None:
+            payload["nvext"] = nvext
         if self._dynamo_cfg_bool("include_payload_request_id", False):
             payload["request_id"] = str(request_id)
         return_tokens_as_token_ids = self._dynamo_cfg_bool("return_tokens_as_token_ids", False)
@@ -1246,6 +1340,11 @@ class DynamoHttpServer:
             "max_tokens": payload.get("max_tokens"),
             "logprobs": payload.get("logprobs"),
             "return_tokens_as_token_ids": payload.get("return_tokens_as_token_ids"),
+            "nvext_extra_fields": (
+                payload.get("nvext", {}).get("extra_fields")
+                if isinstance(payload.get("nvext"), dict)
+                else None
+            ),
         }
 
     def _completion_response_to_token_output(self, data: dict[str, Any], include_log_probs: bool = False):
@@ -1263,6 +1362,7 @@ class DynamoHttpServer:
         tokenizer = getattr(self.model_config, "tokenizer", None)
         if tokenizer is None:
             raise RuntimeError("model_config.tokenizer is required for Dynamo frontend generation")
+        self._log_engine_data_token_ids_status(choice, data)
         token_ids = self._extract_completion_token_ids(choice, data, tokenizer)
         if token_ids is None:
             logger.warning(
@@ -1272,7 +1372,11 @@ class DynamoHttpServer:
             token_ids = normalize_token_ids(tokenizer.encode(text, add_special_tokens=False))
         if not token_ids:
             raise RuntimeError(f"Dynamo frontend returned an empty completion: {data}")
-        log_probs = self._extract_completion_log_probs(choice, len(token_ids)) if include_log_probs else None
+        log_probs = (
+            self._extract_completion_log_probs(choice, len(token_ids), data)
+            if include_log_probs
+            else None
+        )
         finish_reason = choice.get("finish_reason")
         if finish_reason == "stop" or finish_reason == "length":
             stop_reason = "completed"
@@ -1286,6 +1390,36 @@ class DynamoHttpServer:
             log_probs=log_probs,
             stop_reason=stop_reason,
         )
+
+    def _log_engine_data_token_ids_status(self, choice: dict[str, Any], response: dict[str, Any]):
+        """Log once whether Dynamo returned RL engine token data."""
+        has_engine_token_ids = False
+        for nvext in (response.get("nvext"), choice.get("nvext")):
+            if not isinstance(nvext, dict):
+                continue
+            engine_data = nvext.get("engine_data")
+            if not isinstance(engine_data, dict):
+                continue
+            token_ids = engine_data.get("completion_token_ids")
+            if isinstance(token_ids, list) and token_ids:
+                has_engine_token_ids = True
+                break
+
+        if has_engine_token_ids and not self._logged_engine_data_token_ids:
+            logger.info("Dynamo response includes nvext.engine_data.completion_token_ids")
+            self._logged_engine_data_token_ids = True
+            return
+
+        if (
+            self._request_engine_data()
+            and not has_engine_token_ids
+            and not self._logged_missing_engine_data
+        ):
+            logger.warning(
+                "Dynamo response did not include nvext.engine_data.completion_token_ids; "
+                "falling back to legacy token-id extraction"
+            )
+            self._logged_missing_engine_data = True
 
     def _build_token_output(
         self,
@@ -1319,6 +1453,21 @@ class DynamoHttpServer:
         return [0]
 
     @staticmethod
+    def _merge_nvext_extra_fields(nvext: Any, fields: list[str]) -> dict[str, Any]:
+        """Return nvext with requested extra_fields added."""
+        merged = dict(nvext) if isinstance(nvext, dict) else {}
+        extra_fields = merged.get("extra_fields")
+        if isinstance(extra_fields, list):
+            requested = list(extra_fields)
+        else:
+            requested = []
+        for field in fields:
+            if field not in requested:
+                requested.append(field)
+        merged["extra_fields"] = requested
+        return merged
+
+    @staticmethod
     def _extract_completion_token_ids(
         choice: dict[str, Any],
         response: Optional[dict[str, Any]] = None,
@@ -1327,28 +1476,11 @@ class DynamoHttpServer:
         """Extract vLLM OpenAI extension token ids when available."""
         from verl.utils.tokenizer import normalize_token_ids
 
-        candidates = [
+        candidates: list[Any] = [
             choice.get("token_ids"),
             choice.get("output_token_ids"),
             choice.get("completion_token_ids"),
         ]
-        logprobs = choice.get("logprobs")
-        if isinstance(logprobs, dict):
-            candidates.extend(
-                [
-                    logprobs.get("token_ids"),
-                    logprobs.get("output_token_ids"),
-                    logprobs.get("completion_token_ids"),
-                ]
-            )
-            token_strings = logprobs.get("tokens")
-            token_ids_from_strings = DynamoHttpServer._parse_token_id_strings(token_strings)
-            if token_ids_from_strings is not None:
-                candidates.append(token_ids_from_strings)
-            elif tokenizer is not None:
-                token_ids_from_strings = DynamoHttpServer._encode_logprob_token_strings(token_strings, tokenizer)
-                if token_ids_from_strings is not None:
-                    candidates.append(token_ids_from_strings)
 
         nvext = (response or {}).get("nvext")
         if isinstance(nvext, dict):
@@ -1359,6 +1491,15 @@ class DynamoHttpServer:
                     nvext.get("generated_token_ids"),
                 ]
             )
+            engine_data = nvext.get("engine_data")
+            if isinstance(engine_data, dict):
+                candidates.extend(
+                    [
+                        engine_data.get("completion_token_ids"),
+                        engine_data.get("output_token_ids"),
+                        engine_data.get("generated_token_ids"),
+                    ]
+                )
         choice_nvext = choice.get("nvext")
         if isinstance(choice_nvext, dict):
             candidates.extend(
@@ -1369,6 +1510,25 @@ class DynamoHttpServer:
                     choice_nvext.get("token_ids"),
                 ]
             )
+            engine_data = choice_nvext.get("engine_data")
+            if isinstance(engine_data, dict):
+                candidates.extend(
+                    [
+                        engine_data.get("completion_token_ids"),
+                        engine_data.get("output_token_ids"),
+                        engine_data.get("generated_token_ids"),
+                    ]
+                )
+
+        logprobs = choice.get("logprobs")
+        if isinstance(logprobs, dict):
+            candidates.extend(
+                [
+                    logprobs.get("token_ids"),
+                    logprobs.get("output_token_ids"),
+                    logprobs.get("completion_token_ids"),
+                ]
+            )
 
         for candidate in candidates:
             if candidate is None:
@@ -1377,6 +1537,19 @@ class DynamoHttpServer:
                 return normalize_token_ids(candidate)
             except TypeError:
                 logger.warning("Ignoring non-token-id completion field: %r", candidate)
+
+        # Only inspect OpenAI logprob token strings after all authoritative
+        # numeric token-id fields are absent. Some frontends include decoded
+        # logprob tokens even when nvext already carries token ids; probing
+        # those strings eagerly emits noisy warnings for tokens such as "" that
+        # do not round-trip to exactly one tokenizer id.
+        if isinstance(logprobs, dict):
+            token_strings = logprobs.get("tokens")
+            token_ids_from_strings = DynamoHttpServer._parse_token_id_strings(token_strings)
+            if token_ids_from_strings is not None:
+                return token_ids_from_strings
+            if tokenizer is not None:
+                return DynamoHttpServer._encode_logprob_token_strings(token_strings, tokenizer)
         return None
 
     @staticmethod
@@ -1423,8 +1596,22 @@ class DynamoHttpServer:
         return token_ids
 
     @staticmethod
-    def _extract_completion_log_probs(choice: dict[str, Any], token_count: int) -> Optional[list[float]]:
+    def _extract_completion_log_probs(
+        choice: dict[str, Any],
+        token_count: int,
+        response: Optional[dict[str, Any]] = None,
+    ) -> Optional[list[float]]:
         """Extract selected-token logprobs from OpenAI completions response."""
+        for nvext in ((response or {}).get("nvext"), choice.get("nvext")):
+            if not isinstance(nvext, dict):
+                continue
+            engine_data = nvext.get("engine_data")
+            if not isinstance(engine_data, dict):
+                continue
+            values = engine_data.get("completion_logprobs")
+            if isinstance(values, list):
+                return DynamoHttpServer._normalize_log_probs(values, token_count)
+
         logprobs = choice.get("logprobs")
         if not isinstance(logprobs, dict):
             return None
@@ -1433,6 +1620,11 @@ class DynamoHttpServer:
             values = logprobs.get("logprobs")
         if values is None:
             return None
+        return DynamoHttpServer._normalize_log_probs(values, token_count)
+
+    @staticmethod
+    def _normalize_log_probs(values: list[Any], token_count: int) -> list[float]:
+        """Pad/truncate selected-token logprobs to match token ids."""
         result: list[float] = []
         for value in values[:token_count]:
             result.append(0.0 if value is None else float(value))
@@ -1526,6 +1718,9 @@ class DynamoHttpServer:
     async def wake_up(self, **kwargs):
         # NB: no node_rank guard — each per-node server wakes its OWN local
         # workers (self._control_endpoints are node-local), so all nodes must run.
+        if not self._free_engine_on_train():
+            logger.info("[DynamoHttpServer] wake_up: free_engine_on_train disabled, leaving Dynamo workers loaded")
+            return
         if not self._control_endpoints:
             logger.info("[DynamoHttpServer] wake_up: no control sidecar, skipping")
             return
@@ -1536,6 +1731,9 @@ class DynamoHttpServer:
     async def sleep(self, **kwargs):
         # NB: no node_rank guard — each per-node server sleeps its OWN local
         # workers (self._control_endpoints are node-local), so all nodes must run.
+        if not self._free_engine_on_train():
+            logger.info("[DynamoHttpServer] sleep: free_engine_on_train disabled, leaving Dynamo workers loaded")
+            return
         if not self._control_endpoints:
             logger.info("[DynamoHttpServer] sleep: no control sidecar, skipping")
             return

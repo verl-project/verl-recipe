@@ -14,37 +14,18 @@
 """Dynamo training entry point."""
 
 import hydra
-import ray
 
 from verl.experimental.reward_loop import migrate_legacy_reward_impl
-from verl.trainer.main_ppo import TaskRunner, run_ppo
+from verl.trainer.main_ppo import run_ppo
+from verl.trainer.main_ppo_v0 import TaskRunner
 from verl.utils.device import auto_set_device
-
-
-def _register_dynamo_rollout():
-    """Register recipe-side Dynamo rollout support in the current process."""
-    from verl.workers.rollout.replica import RolloutReplicaRegistry
-
-    def _load_dynamo():
-        from recipe.dynamo.dynamo_async_server import DynamoReplica
-
-        return DynamoReplica
-
-    RolloutReplicaRegistry.register("dynamo", _load_dynamo)
-
-
-class DynamoTaskRunner(TaskRunner):
-    def run(self, config):
-        _register_dynamo_rollout()
-        return super().run(config)
 
 
 @hydra.main(config_path="config", config_name="dynamo_trainer", version_base=None)
 def main(config):
-    _register_dynamo_rollout()
     auto_set_device(config)
     config = migrate_legacy_reward_impl(config)
-    run_ppo(config, task_runner_class=ray.remote(num_cpus=1)(DynamoTaskRunner))
+    run_ppo(config, task_runner_class=TaskRunner)
 
 
 if __name__ == "__main__":

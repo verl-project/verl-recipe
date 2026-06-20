@@ -30,7 +30,9 @@ from verl.experimental.agent_loop.agent_loop import AgentLoopManager, AgentLoopW
 from verl.experimental.teacher_loop import MultiTeacherModelManager
 from verl.single_controller.ray.base import RayResourcePool, RayWorkerGroup
 from verl.utils.ray_utils import auto_await
+from verl.workers.rollout.llm_server import LLMServerManager
 from verl.workers.rollout.replica import TokenOutput
+from verl.workers.rollout.utils import update_prometheus_config
 
 
 class DynamoServerManager:
@@ -66,6 +68,34 @@ class DynamoServerManager:
         )
 
 
+class DynamoLLMServerManager(LLMServerManager):
+    """LLM server manager that launches Dynamo through its shared worker pool."""
+
+    async def _initialize_llm_servers(self, start_rank: int = 0):
+        if self.worker_group is None:
+            raise ValueError("Dynamo rollout requires hybrid mode with an actor rollout worker group")
+
+        from recipe.dynamo.dynamo_async_server import DynamoReplica
+
+        replica = DynamoReplica(
+            replica_rank=start_rank,
+            config=self.rollout_config,
+            model_config=self.model_config,
+            gpus_per_node=self.rollout_config.n_gpus_per_node,
+        )
+        await replica.init_hybrid_worker_pool(self.worker_group)
+
+        self.rollout_replicas = [replica]
+        self.server_handles = [replica._server_handle]
+        self.server_addresses = [replica._server_address]
+        print(f"DynamoLLMServerManager: {self.server_addresses}")
+
+        if self.rollout_config.prometheus.enable:
+            if self.rollout_config.disable_log_stats:
+                raise ValueError("PROMETHEUS needs disable_log_stats==False, but it is currently True.")
+            update_prometheus_config(self.rollout_config.prometheus, self.server_addresses, self.rollout_config.name)
+
+
 class DynamoAgentLoopWorker(AgentLoopWorker):
     """Compatibility wrapper for Dynamo agent loop workers."""
 
@@ -88,4 +118,4 @@ class DynamoAgentLoopManager(AgentLoopManager):
         await super()._init_agent_loop_workers()
 
 
-__all__ = ["DynamoAgentLoopManager", "DynamoAgentLoopWorker", "DynamoServerManager"]
+__all__ = ["DynamoAgentLoopManager", "DynamoAgentLoopWorker", "DynamoLLMServerManager", "DynamoServerManager"]
