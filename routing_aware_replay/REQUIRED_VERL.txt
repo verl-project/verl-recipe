@@ -1,0 +1,11 @@
+# routing_aware_replay — rolling; exact commits refreshed from this workspace
+UPSTREAM=https://github.com/verl-project/verl.git
+MODE=rolling
+BRANCH=main
+VERL_COMMIT=8a694930275061f52ebd538c906ef8819af56dbd
+PIP_INSTALL=pip install verl@git+https://github.com/verl-project/verl.git@8a694930275061f52ebd538c906ef8819af56dbd
+RECIPE_SUBMODULE_COMMIT=bab0fa6ca865097f1ae3dc3a517672e788464a0a
+RECIPE_FOLDER_LAST_COMMIT=initial-public-contribution
+NOTES=This recipe is self-contained and CPU-testable; no verl core changes are required for the initial utilities.
+REFRESH=Recompute: git ls-remote https://github.com/verl-project/verl.git HEAD; git ls-remote https://github.com/verl-project/verl-recipe.git HEAD
+
