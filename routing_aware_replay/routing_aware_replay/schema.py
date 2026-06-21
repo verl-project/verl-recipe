@@ -34,6 +34,8 @@ class FisherMaskConfig:
             raise ValueError("target_budget must be non-negative or None")
         if self.theta_low > self.theta_high:
             raise ValueError("theta_low must be <= theta_high")
+        if not (self.theta_low <= self.tau <= self.theta_high):
+            raise ValueError("tau must be between theta_low and theta_high")
         for field_name in ("tau", "theta_high", "theta_low"):
             value = getattr(self, field_name)
             if value < 0.0 or value > 1.0:

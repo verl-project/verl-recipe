@@ -22,7 +22,7 @@ def _minmax_normalize(scores: tuple[float, ...]) -> tuple[float, ...]:
     max_score = max(scores)
     width = max_score - min_score
     if width == 0.0:
-        return tuple(0.0 for _ in scores)
+        return tuple(1.0 if max_score > 0.0 else 0.0 for _ in scores)
     return tuple((score - min_score) / width for score in scores)
 
 

@@ -51,6 +51,22 @@ class FisherMaskTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             compute_fisher_weighted_replay_mask([])
 
+    def test_identical_positive_scores_are_preserved(self) -> None:
+        result = compute_fisher_weighted_replay_mask([1.5, 1.5, 1.5])
+
+        self.assertEqual(result.mask, (1.0, 1.0, 1.0))
+        self.assertEqual(result.scores, (1.0, 1.0, 1.0))
+
+    def test_identical_zero_scores_are_released(self) -> None:
+        result = compute_fisher_weighted_replay_mask([0.0, 0.0, 0.0])
+
+        self.assertEqual(result.mask, (0.0, 0.0, 0.0))
+        self.assertEqual(result.scores, (0.0, 0.0, 0.0))
+
+    def test_tau_must_be_between_thresholds(self) -> None:
+        with self.assertRaises(ValueError):
+            FisherMaskConfig(theta_low=0.2, theta_high=0.7, tau=0.8)
+
 
 if __name__ == "__main__":
     unittest.main()
