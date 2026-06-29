@@ -82,6 +82,11 @@ _NATS_READY_TIMEOUT_S = 30.0
 _WATCHDOG_INTERVAL_S = 5.0
 _VLLM_TCPSTORE_PORT_BASE = int(os.getenv("VERL_DYNAMO_VLLM_PORT_BASE", "20000"))
 _KV_EVENT_PORT_BASE = int(os.getenv("VERL_DYNAMO_KV_EVENT_PORT_BASE", "42000"))
+# Opt-in per-worker system-status/metrics port base. Kept well below 32768 so
+# Dynamo's Rust runtime (which parses DYN_SYSTEM_PORT as i16) accepts it, and
+# below the 20000 vLLM-TCPStore window to avoid overlap. Only used when
+# rollout.engine_kwargs.dynamo.enable_worker_system_metrics=true.
+_SYSTEM_METRICS_PORT_BASE = int(os.getenv("VERL_DYNAMO_SYSTEM_METRICS_PORT_BASE", "11000"))
 
 
 @dataclass(frozen=True)
@@ -205,6 +210,10 @@ class DynamoHttpServer:
         # Per-subprocess control sidecar endpoints (filled in
         # _start_vllm_workers); used by collective_rpc bridge in v2.
         self._control_endpoints: list[str] = []
+        # Per-worker /metrics endpoints (host:port), populated only when
+        # enable_worker_system_metrics is on. These expose engine-level
+        # vllm:prefix_cache_* that the frontend endpoint does not.
+        self._worker_metrics_endpoints: list[str] = []
 
         # Filled in by _start_vllm_workers; consumed by generate() to build
         # the OpenAI completions payload.
@@ -577,6 +586,19 @@ class DynamoHttpServer:
             kv_event_port = self._allocate_kv_event_port(spec_idx)
             kv_events_config_json = self._build_kv_events_config_json(kv_event_port)
             vllm_port = self._allocate_vllm_tcpstore_port(spec_idx)
+            # Allocate a registered (<32768, i16-safe) system-status port so this
+            # dynamo.vllm worker exposes /metrics (incl. pass-through
+            # vllm:prefix_cache_hits_total/queries_total) and the /engine/* routes.
+            # Default ON, unconditionally sets DYN_SYSTEM_PORT=server_port (its fixed port avoids the i16 issue;
+            # we use a fixed low port via _allocate_stable_node_port for the same
+            # reason). Set enable_worker_system_metrics=false to restore the legacy
+            # no-DYN_SYSTEM_PORT behaviour.
+            enable_worker_metrics = self._dynamo_cfg_bool("enable_worker_system_metrics", True)
+            system_metrics_port = (
+                self._allocate_stable_node_port(_SYSTEM_METRICS_PORT_BASE, spec_idx, window=8)
+                if enable_worker_metrics
+                else None
+            )
 
             env = os.environ.copy()
             env.update(self._dynamo_env_vars())
@@ -615,10 +637,23 @@ class DynamoHttpServer:
             for k in list(env.keys()):
                 if k.startswith("DYN_SYSTEM_"):
                     del env[k]
+            # Opt-in worker metrics: set a low (i16-safe) DYN_SYSTEM_PORT AFTER the
+            # defensive unset above, so the worker exposes /metrics. Recorded for
+            # the monitoring sidecar / Prometheus to scrape engine-level KV hits.
+            if system_metrics_port is not None:
+                env[_DYN_SYSTEM_PORT_ENV] = str(system_metrics_port)
+                worker_metrics_endpoint = f"{self._server_address}:{system_metrics_port}"
+                self._worker_metrics_endpoints.append(worker_metrics_endpoint)
+                self._record_worker_metrics_endpoint(worker_metrics_endpoint)
             # Mirrors nemo_rl/dynamo_worker.py:308-310.
             env["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
             env["VLLM_SKIP_P2P_CHECK"] = "1"
             env["VLLM_NO_USAGE_STATS"] = "1"
+            # Deterministic block hashes across workers: without a fixed seed,
+            # Python's randomized hashing can leak into block-hash derivation so
+            # the same prefix hashes differently per worker → the router logs
+            # "block_hash mismatch" and prefix-cache hits collapse. 
+            env.setdefault("PYTHONHASHSEED", "0")
 
             cmd = self._build_vllm_cmd(
                 served_model_name,
@@ -655,6 +690,29 @@ class DynamoHttpServer:
                 stderr=subprocess.STDOUT,
             )
             self._vllm_processes.append(proc)
+
+    def _record_worker_metrics_endpoint(self, endpoint: str) -> None:
+        """Append a worker /metrics endpoint to a per-(replica,node) file so an
+        external monitoring sidecar can discover and scrape it. The engine-level
+        vllm:prefix_cache_* metrics live on the worker, not the frontend, so this
+        is how the Dynamo arm becomes comparable to the vLLM arm. No-op unless
+        VERL_DYNAMO_WORKER_METRICS_DIR is set."""
+        out_dir = os.environ.get("VERL_DYNAMO_WORKER_METRICS_DIR")
+        if not out_dir:
+            return
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+            path = os.path.join(out_dir, f"r{self.replica_rank}_n{self.node_rank}.endpoints")
+            with open(path, "a") as f:
+                f.write(endpoint + "\n")
+                f.flush()
+        except Exception as exc:  # best-effort; never block worker startup
+            logger.warning("[DynamoHttpServer] failed to record worker metrics endpoint %s: %s", endpoint, exc)
+
+    def get_worker_metrics_endpoints(self) -> list[str]:
+        """host:port of each vLLM worker's /metrics on this node (empty unless
+        enable_worker_system_metrics was on)."""
+        return list(self._worker_metrics_endpoints)
 
     def _allocate_tcp_port(self, bind_wildcard: bool = False) -> int:
         """Allocate a port for a subprocess and avoid duplicates in this actor.
@@ -853,48 +911,62 @@ class DynamoHttpServer:
             We default all three to disabled so the KV router routes purely by
             cache affinity instead of shedding load — the original intent behind
             the previous (now out-of-range) ``1000.0`` sentinels.
-          * ``--router-predict-on-route`` was removed in v1.2.0. We keep the
-            ``router_predict_on_route`` config knob for compatibility but warn
-            and drop it rather than passing an unknown flag that would crash the
-            frontend at startup.
+          * ``--router-predict-on-route`` (boolean) was removed in v1.2.0 and
+            replaced in v1.3.0 (the version installed here) by
+            ``--router-predicted-ttl-secs <ttl>``. We enable route-time
+            speculative insert BY DEFAULT — essential for RL, where n=16
+            same-burst siblings + per-step KV-cache clears otherwise cause
+            ParentBlockNotFound storms. Knobs: ``router_predict_on_route``
+            (bool, default true) and ``router_predicted_ttl_secs`` (default
+            120.0; set to None/0 to disable).
 
         Legacy configs in this repo documented the pre-v1.2.0 "disable" sentinels
         (e.g. ``active_decode_blocks_threshold: 1000.0``). Those are out of v1.2.0's
         valid range and would now make the frontend exit before healthcheck, so we
         normalize out-of-range / sentinel values back to ``"None"`` (disabled).
         """
-        if self._router_mode != "kv" or not self._dynamo_cfg_bool("enable_nemo_router_tuning", True):
+        if self._router_mode != "kv":
             return self._frontend_extra_args()
 
         cfg = self._dynamo_cfg()
-        # The installed dynamo.frontend parses these thresholds with type=float and
-        # rejects the literal string "None" (argparse: "invalid float value: 'None'").
-        # So OMIT a threshold flag entirely when it normalizes to disabled, rather
-        # than passing "None": an absent flag is the frontend's disabled default and
-        # matches the intent (route by cache affinity, no load shedding).
         args: list[str] = []
-        decode = self._normalize_decode_blocks_threshold(
-            cfg.get("active_decode_blocks_threshold", "None")
-        )
-        if decode != "None":
-            args += ["--active-decode-blocks-threshold", decode]
-        prefill = self._normalize_prefill_threshold(
-            "active_prefill_tokens_threshold", cfg.get("active_prefill_tokens_threshold", "None")
-        )
-        if prefill != "None":
-            args += ["--active-prefill-tokens-threshold", prefill]
-        prefill_frac = self._normalize_prefill_threshold(
-            "active_prefill_tokens_threshold_frac",
-            cfg.get("active_prefill_tokens_threshold_frac", "None"),
-        )
-        if prefill_frac != "None":
-            args += ["--active-prefill-tokens-threshold-frac", prefill_frac]
-        if self._dynamo_cfg_bool("router_predict_on_route", False):
-            logger.warning(
-                "rollout.engine_kwargs.dynamo.router_predict_on_route is set but "
-                "Dynamo v1.2.0 removed the --router-predict-on-route frontend flag; "
-                "ignoring it."
+
+        # Dynamo v1.3.0 exposes --router-predicted-ttl-secs <ttl>: speculatively insert the
+        # routed prefix (short TTL) so siblings / post-clear requests see it
+        # immediately; the real event later promotes it. Kept independent of enable_nemo_router_tuning so
+        # the fix applies even when threshold tuning is off. Disable via
+        # router_predict_on_route=false or router_predicted_ttl_secs=None/0.
+        if self._dynamo_cfg_bool("router_predict_on_route", True):
+            predicted_ttl = cfg.get("router_predicted_ttl_secs", 120.0)
+            if not self._is_disabled_threshold(predicted_ttl):
+                try:
+                    ttl_val = float(predicted_ttl)
+                except (TypeError, ValueError):
+                    ttl_val = 0.0
+                if ttl_val > 0:
+                    args += ["--router-predicted-ttl-secs", str(ttl_val)]
+
+        # Router load-shedding thresholds, only when nemo router tuning is on.
+        # The installed dynamo.frontend parses these with type=float and rejects
+        # the literal "None"; OMIT a flag when it normalizes to disabled (absent
+        # = frontend default = route by cache affinity, no load shedding).
+        if self._dynamo_cfg_bool("enable_nemo_router_tuning", True):
+            decode = self._normalize_decode_blocks_threshold(
+                cfg.get("active_decode_blocks_threshold", "None")
             )
+            if decode != "None":
+                args += ["--active-decode-blocks-threshold", decode]
+            prefill = self._normalize_prefill_threshold(
+                "active_prefill_tokens_threshold", cfg.get("active_prefill_tokens_threshold", "None")
+            )
+            if prefill != "None":
+                args += ["--active-prefill-tokens-threshold", prefill]
+            prefill_frac = self._normalize_prefill_threshold(
+                "active_prefill_tokens_threshold_frac",
+                cfg.get("active_prefill_tokens_threshold_frac", "None"),
+            )
+            if prefill_frac != "None":
+                args += ["--active-prefill-tokens-threshold-frac", prefill_frac]
         return args + self._frontend_extra_args()
 
     @staticmethod
@@ -2185,11 +2257,6 @@ class DynamoReplica(RolloutReplica):
             )
 
         await master.wait_frontend_ready.remote(expected_workers=expected_workers)
-        # v2: refit-path self-test, run here (not inside _launch_master) because
-        # the shared-pool path uses start_healthcheck=False above so the
-        # inline self-test is skipped. Must come AFTER wait_frontend_ready
-        # so all dynamo.vllm subprocesses have captured their AsyncLLM and
-        # control sidecars are serving requests.
         await master._self_test_refit_path.remote()
         self._server_handle = master
         self._server_address = (
