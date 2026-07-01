@@ -1,0 +1,67 @@
+# Note: this config is designed for quick CI funcitonal tests, for more serious training you
+# MOST LIKELY will need to increase the amount of GPU resources and configure this file
+# a bit more
+
+server:
+  host: ${oc.env:TINKER_SERVER_HOST,0.0.0.0}
+  port: ${oc.env:TINKER_SERVER_PORT,8000}
+  ray_address: ${oc.env:RAY_ADDRESS,local}
+  checkpoint_dir: ${oc.env:TINKER_CHECKPOINT_DIR,/tmp/tinker-checkpoints}
+  server_max_runtime: ${oc.env:TINKER_SERVER_MAX_RUNTIME,null} # an optional variable for the maximum uptime of the server, null means infinite
+  max_concurrent_samples: ${oc.env:TINKER_SERVER_MAX_CONCURRENT_SAMPLES,32}
+
+actor_rollout_ref: # this is the same as verl's config, this field is ALWAYS required.
+  # this is a bit more customized as it's a larger model
+  actor:
+    strategy: fsdp
+    use_kl_loss: false
+    optim:
+      lr_scheduler_type: constant
+      lr: 1.0e-06
+    fsdp_config:
+      param_offload: true
+      optimizer_offload: true
+      model_dtype: bfloat16
+    ppo_mini_batch_size: 16
+    ppo_micro_batch_size_per_gpu: 1
+
+  rollout:
+    name: vllm
+    tensor_model_parallel_size: 8
+    gpu_memory_utilization: 0.6
+    quantization: null
+    load_format: safetensors
+    mode: async
+    calculate_log_probs: true
+    log_prob_micro_batch_size_per_gpu: 1
+    enable_chunked_prefill: true
+    max_num_batched_tokens: 8192
+    free_cache_engine: true
+    enforce_eager: false
+
+  ref:
+    enable: false
+
+  model:
+    path: ${oc.env:TINKER_SERVER_MODEL,openai/gpt-oss-20b}
+
+reward:
+  reward_model:
+    enable: false
+
+algorithm:
+  adv_estimator: grpo
+  use_kl_in_reward: false
+
+data:
+  train_batch_size: 64
+  max_prompt_length: 4096
+  max_response_length: 10000
+
+trainer:
+  logger:
+  - console
+  project_name: verl_tinker_server
+  experiment_name: tinker_server_gpt_oss_20b_actor_rollout
+  nnodes: 1
+  n_gpus_per_node: 8

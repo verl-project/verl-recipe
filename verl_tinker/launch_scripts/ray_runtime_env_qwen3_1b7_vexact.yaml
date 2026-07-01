@@ -1,0 +1,72 @@
+# Recipe-local Ray runtime env for the verl-recipes Tinker server
+# WITH VEXACT ROLLOUT ENGINE.
+#
+# Mirrors ray_runtime_env_qwen3_1b7.yaml but:
+#  * swaps ``--extra vllm --extra disagg`` for ``--extra vexact`` —
+#    vllm and vexact pin incompatible torch / xformers versions and
+#    can't coexist in a single uv-resolved venv.
+#  * swaps ``--extra oss-models`` (transformers 4.57) for
+#    ``--extra oss-models-v5`` (transformers 5.9.0). The repo-pinned
+#    Open-VeOmni + open-vexact submodules were bumped to require
+#    transformers v5 (see open-vexact 1832a19 "bump to transformers
+#    v5 + VeOmni a4ed599"). With the 4.57 pin veomni's
+#    ``loader.py`` raises ``ModuleNotFoundError: No module named
+#    'transformers.initialization'`` which the try/except in
+#    ``verl/workers/engine/__init__.py`` swallows silently, leaving
+#    ``EngineRegistry._engines['language_model']`` without the
+#    ``veomni`` key and the actor init failing with
+#    ``AssertionError: Unknown backend: veomni`` (verified live on
+#    pods fadcfca7a392c2b6, c0c629dd5fde63f2).
+#  * sets ``VERL_USE_EXTERNAL_MODULES=vexact.integrations.verl.register``
+#    so verl's ``get_rollout_replica_class("vexact")`` resolves at import
+#    time (the registration call lives in
+#    submodules/open-vexact/vexact/integrations/verl/register.py).
+#
+# The vexact-batch-invariant FSDP kernel activation lives in the
+# `actor_rollout_ref.rollout.name: vexact` advanced config as
+# ``actor_rollout_ref.model.external_lib=vexact.integrations.verl.fsdp_enable_invariant``
+# (not an env var). That import is what registers the vexact-flavoured
+# ``veomni`` engine in ``EngineRegistry``; without it the actor init
+# raises ``AssertionError: Unknown backend: veomni`` (verified live on
+# pod fadcfca7a392c2b6).
+#
+# Tinker server uses colocated trainer+rollout only. vexact's
+# update_weights path uses ZMQ IPC into the in-pod VExactServer Ray
+# actor, which matches that topology.
+
+working_dir: "."
+excludes:
+  - "**/.git"
+  - "**/.git/**"
+  - "**.deb"
+  - "**.nsys-rep*"
+  - "**/tokenizer.json"
+  - "**/data/*.json*"
+  - "**/e2e_tests"
+  - "**/examples"
+  - "**/tests"
+  - "**/.venv"
+  - "**/.venv/**"
+  - "**/.agents_workspace"
+  - "**/.agents_workspace/**"
+  - "**/outputs"
+  - "**/outputs/**"
+  - "**/packages"
+  - "**/packages/**"
+  - "**/wandb"
+  - "**/wandb/**"
+  - "**/checkpoints"
+  - "**/checkpoints/**"
+  - "**/submodules/xLLM"
+  - "**/submodules/xLLM/**"
+  - "**/chefmodels/tests/**/*.pt"
+  - "**/chefmodels/tests/**/*.bin"
+  - "**/chefmodels/tests/**/*.safetensors"
+py_executable: "uv -v run --all-packages --frozen --extra gpu --extra fa2 --extra fa3 --extra fa4 --extra oss-models-v5 --extra vexact"
+env_vars:
+  RAY_RUNTIME_ENV_HOOK: "ray._private.runtime_env.uv_runtime_env_hook.hook"
+  TORCH_NCCL_AVOID_RECORD_STREAMS: "1"
+  VERL_LOGGING_LEVEL: "WARN"
+  # Triggers RolloutReplicaRegistry.register("vexact", _load_vexact_replica)
+  # at module-import time. See open-vexact register.py:26.
+  VERL_USE_EXTERNAL_MODULES: "vexact.integrations.verl.register"

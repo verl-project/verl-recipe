@@ -1,0 +1,48 @@
+# Recipe-local Ray runtime env for the verl-recipes Tinker server smoke run.
+# Mirrors verl-recipes/ray_runtime_env.yaml but adds `--extra vllm` so the
+# Arnold worker venv includes llguidance (eagerly imported by vLLM v1's
+# structured-output backend on `from vllm import LLM`).
+
+working_dir: "."
+# Ray uses 'git mode' (enable_git_clone=true on the Arnold pod), and packages
+# the cloned repo at /opt/tiger/ray/session_*/runtime_resources/working_dir_files/
+# git_data_modelchef_<sha>/ to upload as the runtime_env. The clone includes
+# .git/modules/submodules/<name>/objects/pack/*.pack for each submodule, which
+# alone is hundreds of MiB. Patterns are matched anywhere in the tree, so we
+# use **/ prefixes + trailing /** to recursively exclude directory contents.
+excludes:
+  # Git internals — top-level .git AND each submodule's .git/modules/* pack files.
+  - "**/.git"
+  - "**/.git/**"
+  # Build / scratch / artifact dirs that may exist on the cloned tree.
+  - "**.deb"
+  - "**.nsys-rep*"
+  - "**/tokenizer.json"
+  - "**/data/*.json*"
+  - "**/e2e_tests"
+  - "**/examples"
+  - "**/tests"
+  - "**/.venv"
+  - "**/.venv/**"
+  - "**/.agents_workspace"
+  - "**/.agents_workspace/**"
+  - "**/outputs"
+  - "**/outputs/**"
+  - "**/packages"
+  - "**/packages/**"
+  - "**/wandb"
+  - "**/wandb/**"
+  - "**/checkpoints"
+  - "**/checkpoints/**"
+  # Submodule we don't load in the --extra vllm path (340 MiB).
+  - "**/submodules/xLLM"
+  - "**/submodules/xLLM/**"
+  # chefmodels test fixtures: ~50 MiB of binary tensors (micro_batch_rank_*.pt).
+  - "**/chefmodels/tests/**/*.pt"
+  - "**/chefmodels/tests/**/*.bin"
+  - "**/chefmodels/tests/**/*.safetensors"
+py_executable: "uv -v run --all-packages --frozen --extra gpu --extra fa2 --extra fa3 --extra fa4 --extra vllm --extra oss-models-v5 --extra disagg"
+env_vars:
+  RAY_RUNTIME_ENV_HOOK: "ray._private.runtime_env.uv_runtime_env_hook.hook"
+  TORCH_NCCL_AVOID_RECORD_STREAMS: "1"
+  VERL_LOGGING_LEVEL: "WARN"

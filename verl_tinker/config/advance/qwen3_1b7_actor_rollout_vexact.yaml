@@ -1,0 +1,86 @@
+# WARNING: REQUIRE Hopper GPU
+
+server:
+  host: ${oc.env:TINKER_SERVER_HOST,0.0.0.0}
+  port: ${oc.env:TINKER_SERVER_PORT,8000}
+  ray_address: ${oc.env:RAY_ADDRESS,local}
+  checkpoint_dir: ${oc.env:TINKER_CHECKPOINT_DIR,/tmp/tinker-checkpoints}
+  server_max_runtime: ${oc.env:TINKER_SERVER_MAX_RUNTIME,null} # an optional variable for the maximum uptime of the server, null means infinite
+
+actor_rollout_ref: # this is the same as verl's config, this field is ALWAYS required.
+  actor:
+    strategy: veomni
+    use_kl_loss: false
+    ppo_mini_batch_size: 8
+    ppo_micro_batch_size_per_gpu: 1
+    use_torch_compile: false
+    veomni:
+      param_offload: true
+      optimizer_offload: true
+      fsdp_size: 8
+      ulysses_parallel_size: 1
+      expert_parallel_size: 1
+      attn_implementation: flash_attention_3
+      moe_implementation: fused_triton
+      cross_entropy_loss_implementation: eager
+    optim:
+      lr_scheduler_type: constant
+      lr: 1.0e-06
+  rollout:
+    name: vexact
+    mode: async
+    tensor_model_parallel_size: 1
+    pipeline_model_parallel_size: 1
+    log_prob_micro_batch_size_per_gpu: 1
+    free_cache_engine: true
+    enforce_eager: false
+    max_num_seqs: 512
+    max_num_batched_tokens: 4096
+    layered_summon: false
+    enable_chunked_prefill: true
+    calculate_log_probs: true
+    n: 4
+    engine_kwargs:
+      vexact:
+        max_cache_blocks: 1024
+        attn_impl: fa-invariant
+  ref:
+    enable: false
+  model:
+    path: ${oc.env:TINKER_SERVER_MODEL,Qwen/Qwen3-1.7B}
+    use_remove_padding: true
+    enable_gradient_checkpointing: true
+    external_lib:
+      - vexact.integrations.verl.fsdp_enable_invariant
+      - vexact.integrations.verl.register
+    use_fused_kernels: true
+    fused_kernel_options:
+      impl_backend: torch
+    use_liger: false
+    trust_remote_code: true
+    override_config:
+      attn_implementation: flash_attention_3
+
+external_libs:
+  - vexact.integrations.verl.register
+
+reward:
+  reward_model:
+    enable: false
+
+algorithm:
+  adv_estimator: grpo
+  use_kl_in_reward: false
+
+data:
+  train_batch_size: 64
+  max_prompt_length: 4096
+  max_response_length: 10000
+
+trainer:
+  logger:
+  - console
+  project_name: verl_tinker_server
+  experiment_name: tinker_server_qwen3_1b7_actor_rollout_vexact
+  nnodes: 1
+  n_gpus_per_node: 8
