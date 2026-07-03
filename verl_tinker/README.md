@@ -8,6 +8,10 @@ capacity.
 The server owns one global model, session, and sampler state. It is intended for
 one active training client at a time, not isolated multi-client sessions.
 
+## News
+
+- 2026-07-03: Released `verl-tinker` 🚀
+
 ## Install
 
 Run this command from the root of `verl-recipe` in a Python 3.12 environment.
