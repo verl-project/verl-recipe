@@ -217,7 +217,7 @@ QAT keeps weights in **BF16 during training** while injecting fake quantization 
 
 ## Experimental Results
 
-The existing W4A16 experiments below were conducted on B300. Hardware and run metadata for the W4A8 result will be recorded with its final plot.
+The existing W4A16 experiments below were conducted on B300. The W4A8 result focuses on numerical behavior and training stability rather than kernel performance.
 
 ### Experiment 1: Qwen3-8B-Base QAT Comparison
 
@@ -283,9 +283,29 @@ Config: vLLM rollout settings with `gpu_memory_utilization=0.90`, `max_num_batch
 
 ### Experiment 4: Qwen3-8B-Base W4A8 Numerical Simulation
 
-This experiment compares the dense FSDP W4A8 simulation with its BF16 and W4A16 baselines. The final plot and exact run metadata will be added before the draft PR is published.
+This experiment compares the dense FSDP W4A8 FFN-only simulation with its BF16 and W4A16 FFN-only baselines.
 
-<!-- TODO(w4a8-draft): add img/image6.png and the finalized run/metric summary supplied by the author. -->
+| Config | Color |
+|--------|-------|
+| BF16 | Brown |
+| W4A16 + QAT (FFN-only) | Red |
+| W4A8 + QAT simulation (FFN-only) | Yellow |
+
+**Configuration**:
+
+- Model: Qwen3-8B-Base.
+- Rollout: activations are fake-quantized to FP8 E4M3 with `1 x 128` per-block scaling, while the W4A16 Marlin kernel performs the GEMMs. W4A8 is therefore simulated rather than executed by a native kernel.
+- All other settings match the W4A4 comparison runs from the same study.
+
+**Observations**:
+
+- W4A8 FFN-only mismatch KL is slightly higher than BF16 or W4A16 FFN-only.
+- Despite the higher mismatch, the online AIME24 validation accuracy curve essentially overlaps with W4A16.
+- Entropy tracks W4A16 throughout training, with no sign of the collapse observed with W4A4.
+
+A separate exploratory Qwen3-30B-A3B prototype run showed similarly matched accuracy with slightly higher mismatch KL. Because that model is MoE, this result is not a claim of support from the current dense-only W4A8 path.
+
+<img src="./img/image6.png">
 
 ---
 
