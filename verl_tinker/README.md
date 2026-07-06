@@ -198,3 +198,12 @@ Most long-running operations return a `request_id`. Poll
   Tinker Cookbook compatibility, but the backend trains full model weights.
 - Multiple clients are not isolated: they share one model state, optimizer
   state, and sampler state.
+
+## Contribution
+
+Contributors: [Tianle Zhong](https://luosuu.github.io/)†,
+[Huaye Zeng](https://www.wyett-zeng.com/)†, Xibin Wu, Siping Tao, Peng Wu, Yifan Pi, and Xiao Yu.
+
+† Equal contribution.
+
+ByteDance AML/Seed

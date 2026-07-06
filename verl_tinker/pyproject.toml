@@ -15,16 +15,16 @@ dependencies = [
     "torch==2.11.0+cu130",
     "torchvision==0.26.0+cu130",
     "torchaudio==2.11.0+cu130",
-    "torchcodec==0.12.0",
+    "torchcodec>=0.12.0",
     "triton==3.6.0",
-    "cuda-python==13.0.3",
+    "cuda-python>=13.0.3",
     "torch-c-dlpack-ext",
     "apache-tvm-ffi==0.1.12",
-    "nvidia-nccl-cu13==2.28.9",
-    "nvidia-cudnn-cu13==9.19.0.56",
-    "nvidia-cutlass-dsl[cu13]==4.6.0.dev0; sys_platform == 'linux'",
-    "nvidia-cutlass-dsl-libs-base==4.6.0.dev0; sys_platform == 'linux'",
-    "nvidia-cutlass-dsl-libs-cu13==4.6.0.dev0; sys_platform == 'linux'",
+    "nvidia-nccl-cu13>=2.28.9",
+    "nvidia-cudnn-cu13>=9.19.0.56",
+    "nvidia-cutlass-dsl[cu13]>=4.6.0.dev0; sys_platform == 'linux'",
+    "nvidia-cutlass-dsl-libs-base>=4.6.0.dev0; sys_platform == 'linux'",
+    "nvidia-cutlass-dsl-libs-cu13>=4.6.0.dev0; sys_platform == 'linux'",
     "quack-kernels==0.5.1",
     "liger-kernel",
     "flash-linear-attention==0.4.2",
@@ -51,11 +51,9 @@ environments = [
     "python_version == '3.12' and sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
 override-dependencies = [
-    "accelerate>=1.13.0",
     "apache-tvm-ffi==0.1.12",
     "cuda-python==13.0.3",
     "datasets==2.21.0",
-    "diffusers==0.37.0",
     "fastapi>=0.125.0",
     "starlette>=1.0.1",
     "flash-linear-attention==0.4.2",
@@ -85,10 +83,6 @@ torchvision = { index = "pytorch" }
 torchaudio = { index = "pytorch" }
 torchcodec = { index = "pypi" }
 vllm = { index = "pypi" }
-
-[[tool.uv.index]]
-name = "bytedpypi"
-url = "https://bytedpypi.byted.org/simple/"
 
 [[tool.uv.index]]
 name = "pytorch"
