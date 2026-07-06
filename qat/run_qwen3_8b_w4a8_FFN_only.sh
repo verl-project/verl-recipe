@@ -166,5 +166,4 @@ RAY_ADDRESS="${RAY_ADDRESS}" ray job submit --runtime-env="${RUNTIME_ENV}" \
     trainer.total_epochs=1 \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=auto \
-    trainer.max_actor_ckpt_to_keep=3 \
-    trainer.use_legacy_worker_impl=disable
+    trainer.max_actor_ckpt_to_keep=3
