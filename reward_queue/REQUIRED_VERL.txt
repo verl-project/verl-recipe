@@ -1,0 +1,6 @@
+UPSTREAM=https://github.com/verl-project/verl.git
+MODE=pinned_tag
+TAG=v0.8.0
+COMMIT=bbca85c9b8131bacf6efcb4892af882e8ade4b5d
+PIP_INSTALL=pip install verl==0.8.0
+NOTES=reward_queue recipe is developed and tested against verl v0.8.0.
