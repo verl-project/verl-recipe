@@ -27,8 +27,6 @@ from uuid import uuid4
 import ray
 
 from verl.experimental.agent_loop.agent_loop import AgentLoopManager, AgentLoopWorker
-from verl.experimental.teacher_loop import MultiTeacherModelManager
-from verl.single_controller.ray.base import RayResourcePool, RayWorkerGroup
 from verl.utils.ray_utils import auto_await
 from verl.workers.rollout.llm_server import LLMServerManager
 from verl.workers.rollout.replica import TokenOutput

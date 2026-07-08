@@ -139,9 +139,7 @@ class DynamoHttpServer:
         os.environ[_REPLICA_RANK_ENV] = str(replica_rank)
 
         self.config: RolloutConfig = omega_conf_to_dataclass(config)
-        self.model_config: HFModelConfig = omega_conf_to_dataclass(
-            model_config, dataclass_type=HFModelConfig
-        )
+        self.model_config: HFModelConfig = omega_conf_to_dataclass(model_config, dataclass_type=HFModelConfig)
         self.rollout_mode = rollout_mode
         # workers handle is captured for parity with vLLMHttpServer; we don't
         # use it (no in-process engine, no collective_rpc destination here).
@@ -152,9 +150,7 @@ class DynamoHttpServer:
         self.nnodes = nnodes
         self._cuda_visible_devices = cuda_visible_devices
         self._worker_specs: Optional[list[_DynamoWorkerSpec]] = (
-            [_DynamoWorkerSpec(**spec) for spec in worker_specs]
-            if worker_specs is not None
-            else None
+            [_DynamoWorkerSpec(**spec) for spec in worker_specs] if worker_specs is not None else None
         )
         self._expected_workers = expected_workers
 
@@ -279,9 +275,7 @@ class DynamoHttpServer:
             host = self._master_address
             etcd_port = self._master_etcd_port
             nats_port = self._master_nats_port
-        assert host and etcd_port and nats_port, (
-            f"dynamo env vars missing host/ports: {host}/{etcd_port}/{nats_port}"
-        )
+        assert host and etcd_port and nats_port, f"dynamo env vars missing host/ports: {host}/{etcd_port}/{nats_port}"
         env = {
             "ETCD_ENDPOINTS": f"http://{host}:{etcd_port}",
             "NATS_SERVER": f"nats://{host}:{nats_port}",
@@ -415,9 +409,7 @@ class DynamoHttpServer:
         """Wait for the frontend to see all Dynamo workers for this replica."""
         if self.node_rank != 0:
             return
-        await self._healthcheck_frontend(
-            expected_workers=expected_workers or self._compute_expected_workers()
-        )
+        await self._healthcheck_frontend(expected_workers=expected_workers or self._compute_expected_workers())
 
     # ------------------------------------------------------------------ #
     # subprocess starters
@@ -432,14 +424,22 @@ class DynamoHttpServer:
         env["ALLOW_NONE_AUTHENTICATION"] = "yes"
         cmd = [
             "etcd",
-            "--listen-client-urls", f"http://0.0.0.0:{self._etcd_port}",
-            "--advertise-client-urls", f"http://{self._server_address}:{self._etcd_port}",
-            "--listen-peer-urls", f"http://0.0.0.0:{self._etcd_peer_port}",
-            "--initial-advertise-peer-urls", peer_url,
-            "--initial-cluster", f"default={peer_url}",
-            "--data-dir", self._etcd_data_dir,
-            "--heartbeat-interval", "500",
-            "--election-timeout", "5000",
+            "--listen-client-urls",
+            f"http://0.0.0.0:{self._etcd_port}",
+            "--advertise-client-urls",
+            f"http://{self._server_address}:{self._etcd_port}",
+            "--listen-peer-urls",
+            f"http://0.0.0.0:{self._etcd_peer_port}",
+            "--initial-advertise-peer-urls",
+            peer_url,
+            "--initial-cluster",
+            f"default={peer_url}",
+            "--data-dir",
+            self._etcd_data_dir,
+            "--heartbeat-interval",
+            "500",
+            "--election-timeout",
+            "5000",
         ]
         logger.info("[DynamoHttpServer] starting etcd: %s", " ".join(cmd))
         self._etcd_process = subprocess.Popen(cmd, env=env)
@@ -450,10 +450,7 @@ class DynamoHttpServer:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if self._etcd_process and self._etcd_process.poll() is not None:
-                raise RuntimeError(
-                    f"etcd exited with rc={self._etcd_process.returncode} "
-                    f"before becoming healthy"
-                )
+                raise RuntimeError(f"etcd exited with rc={self._etcd_process.returncode} before becoming healthy")
             try:
                 r = requests.get(url, timeout=2)
                 if r.status_code == 200:
@@ -499,9 +496,7 @@ class DynamoHttpServer:
                 if configured_port:
                     break
                 self._allocated_tcp_ports.discard(self._nats_port)
-                self._nats_port = self._configured_or_allocated_port(
-                    "nats_port", bind_wildcard=True
-                )
+                self._nats_port = self._configured_or_allocated_port("nats_port", bind_wildcard=True)
         raise RuntimeError(f"NATS failed to start after {max_attempts} attempts: {last_error}")
 
     @staticmethod
@@ -526,9 +521,7 @@ class DynamoHttpServer:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if process.poll() is not None:
-                raise RuntimeError(
-                    f"{label} exited with rc={process.returncode} before opening port {port}"
-                )
+                raise RuntimeError(f"{label} exited with rc={process.returncode} before opening port {port}")
             try:
                 with socket.create_connection(("localhost", port), timeout=1):
                     logger.info("[DynamoHttpServer] %s port :%s open", label, port)
@@ -548,8 +541,7 @@ class DynamoHttpServer:
         tp = self.config.tensor_model_parallel_size
         cvd_list = [s for s in self._cuda_visible_devices.split(",") if s]
         assert len(cvd_list) % tp == 0, (
-            f"GPUs ({len(cvd_list)}) on this node not divisible by TP ({tp}); "
-            f"cvd={self._cuda_visible_devices}"
+            f"GPUs ({len(cvd_list)}) on this node not divisible by TP ({tp}); cvd={self._cuda_visible_devices}"
         )
         n_local_shards = len(cvd_list) // tp
         # Persist subprocess logs under VERL_DYNAMO_LOG_DIR (e.g. a /workspace
@@ -621,14 +613,10 @@ class DynamoHttpServer:
             # even when ray runtime_env doesn't propagate the driver's PYTHONPATH.
             # Compute the verl root from the location of this module; works on
             # any node since /workspace is the shared mount.
-            recipe_root = os.path.abspath(
-                os.path.join(os.path.dirname(__file__), "..", "..")
-            )
+            recipe_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
             existing_pp = env.get("PYTHONPATH", "")
             if recipe_root not in existing_pp.split(":"):
-                env["PYTHONPATH"] = (
-                    f"{recipe_root}:{existing_pp}" if existing_pp else recipe_root
-                )
+                env["PYTHONPATH"] = f"{recipe_root}:{existing_pp}" if existing_pp else recipe_root
             # NB: don't set DYN_SYSTEM_PORT — dynamo's Rust runtime parses it
             # as i16 and rejects ephemeral ports >= 32768. We use our own
             # control sidecar (VERL_DYNAMO_CONTROL_ZMQ) instead.
@@ -652,7 +640,7 @@ class DynamoHttpServer:
             # Deterministic block hashes across workers: without a fixed seed,
             # Python's randomized hashing can leak into block-hash derivation so
             # the same prefix hashes differently per worker → the router logs
-            # "block_hash mismatch" and prefix-cache hits collapse. 
+            # "block_hash mismatch" and prefix-cache hits collapse.
             env.setdefault("PYTHONHASHSEED", "0")
 
             cmd = self._build_vllm_cmd(
@@ -722,7 +710,9 @@ class DynamoHttpServer:
         probed on 0.0.0.0. We also keep a local reservation set so a burst of
         shard launches does not accidentally reuse a just-released port.
         """
-        address = "0.0.0.0" if bind_wildcard and not is_valid_ipv6_address(self._server_address) else self._server_address
+        address = (
+            "0.0.0.0" if bind_wildcard and not is_valid_ipv6_address(self._server_address) else self._server_address
+        )
         for _ in range(128):
             family = socket.AF_INET6 if is_valid_ipv6_address(address) else socket.AF_INET
             with socket.socket(family=family, type=socket.SOCK_STREAM) as sock:
@@ -736,9 +726,7 @@ class DynamoHttpServer:
 
     def _can_bind_tcp_port(self, port: int, bind_wildcard: bool = False) -> bool:
         address = (
-            "0.0.0.0"
-            if bind_wildcard and not is_valid_ipv6_address(self._server_address)
-            else self._server_address
+            "0.0.0.0" if bind_wildcard and not is_valid_ipv6_address(self._server_address) else self._server_address
         )
         family = socket.AF_INET6 if is_valid_ipv6_address(address) else socket.AF_INET
         sock = socket.socket(family=family, type=socket.SOCK_STREAM)
@@ -824,10 +812,14 @@ class DynamoHttpServer:
             sys.executable,
             "-m",
             "recipe.dynamo._dynamo_vllm_with_control",
-            "--model", self.model_config.local_path,
-            "--served-model-name", served_model_name,
-            "--tensor-parallel-size", str(tp),
-            "--gpu-memory-utilization", str(self.config.gpu_memory_utilization),
+            "--model",
+            self.model_config.local_path,
+            "--served-model-name",
+            served_model_name,
+            "--tensor-parallel-size",
+            str(tp),
+            "--gpu-memory-utilization",
+            str(self.config.gpu_memory_utilization),
         ]
         if self.config.max_model_len:
             cmd += ["--max-model-len", str(self.config.max_model_len)]
@@ -877,28 +869,30 @@ class DynamoHttpServer:
             sys.executable,
             "-m",
             "dynamo.frontend",
-            "--http-port", str(self._frontend_port),
-            "--http-host", "0.0.0.0",
-            "--router-mode", self._router_mode,
-            "--discovery-backend", "etcd",
-            "--namespace-prefix", self._namespace,
+            "--http-port",
+            str(self._frontend_port),
+            "--http-host",
+            "0.0.0.0",
+            "--router-mode",
+            self._router_mode,
+            "--discovery-backend",
+            "etcd",
+            "--namespace-prefix",
+            self._namespace,
         ]
         cmd += self._frontend_router_args()
         log_root = os.environ.get("VERL_DYNAMO_LOG_DIR", "/tmp")
         log_path = os.path.join(log_root, f"verl_dynamo_replica{self.replica_rank}_frontend.log")
         self._frontend_log_fp = open(log_path, "w")
         logger.info(
-            "[DynamoHttpServer] starting dynamo.frontend on :%s "
-            "(DYN_ENABLE_RL=%s, request_engine_data=%s, log=%s): %s",
+            "[DynamoHttpServer] starting dynamo.frontend on :%s (DYN_ENABLE_RL=%s, request_engine_data=%s, log=%s): %s",
             self._frontend_port,
             env.get("DYN_ENABLE_RL"),
             self._request_engine_data(),
             log_path,
             " ".join(cmd),
         )
-        self._frontend_process = subprocess.Popen(
-            cmd, env=env, stdout=self._frontend_log_fp, stderr=subprocess.STDOUT
-        )
+        self._frontend_process = subprocess.Popen(cmd, env=env, stdout=self._frontend_log_fp, stderr=subprocess.STDOUT)
 
     def _frontend_router_args(self) -> list[str]:
         """Return Dynamo frontend router tuning args.
@@ -951,9 +945,7 @@ class DynamoHttpServer:
         # the literal "None"; OMIT a flag when it normalizes to disabled (absent
         # = frontend default = route by cache affinity, no load shedding).
         if self._dynamo_cfg_bool("enable_nemo_router_tuning", True):
-            decode = self._normalize_decode_blocks_threshold(
-                cfg.get("active_decode_blocks_threshold", "None")
-            )
+            decode = self._normalize_decode_blocks_threshold(cfg.get("active_decode_blocks_threshold", "None"))
             if decode != "None":
                 args += ["--active-decode-blocks-threshold", decode]
             prefill = self._normalize_prefill_threshold(
@@ -1027,8 +1019,7 @@ class DynamoHttpServer:
         if isinstance(extra, list):
             return [str(x) for x in extra]
         raise TypeError(
-            "rollout.engine_kwargs.dynamo.frontend_extra_args must be a list "
-            f"or string, got {type(extra).__name__}"
+            f"rollout.engine_kwargs.dynamo.frontend_extra_args must be a list or string, got {type(extra).__name__}"
         )
 
     async def _healthcheck_frontend(self, expected_workers: int):
@@ -1047,7 +1038,8 @@ class DynamoHttpServer:
                     if n_gen >= expected_workers:
                         logger.info(
                             "[DynamoHttpServer] frontend healthy: %s/%s workers registered",
-                            n_gen, expected_workers,
+                            n_gen,
+                            expected_workers,
                         )
                         return
                     last_err = f"only {n_gen}/{expected_workers} workers registered"
@@ -1076,9 +1068,7 @@ class DynamoHttpServer:
                         log_hint = ""
                         if name == "vllm_workers" and i < len(self._vllm_log_paths):
                             log_hint = f" (log={self._vllm_log_paths[i]})"
-                        raise RuntimeError(
-                            f"dynamo {name}[{i}] exited rc={p.returncode}{log_hint}"
-                        )
+                        raise RuntimeError(f"dynamo {name}[{i}] exited rc={p.returncode}{log_hint}")
             else:
                 if proc.poll() is not None:
                     raise RuntimeError(f"dynamo {name} exited rc={proc.returncode}")
@@ -1143,20 +1133,14 @@ class DynamoHttpServer:
                     f"status={status} body={body_text[:2000]!r} "
                     f"payload_summary={self._payload_debug_summary(payload)}"
                 )
-            return self._completion_response_to_token_output(
-                json.loads(body_text), include_log_probs=include_log_probs
-            )
+            return self._completion_response_to_token_output(json.loads(body_text), include_log_probs=include_log_probs)
         except Exception:
             logger.exception("[generate] frontend dispatch failed (request_id=%s)", request_id)
             raise
 
     def _frontend_completions_url(self) -> str:
         assert self._server_port is not None, "frontend server not ready"
-        host = (
-            f"[{self._server_address}]"
-            if is_valid_ipv6_address(self._server_address)
-            else self._server_address
-        )
+        host = f"[{self._server_address}]" if is_valid_ipv6_address(self._server_address) else self._server_address
         return f"http://{host}:{self._server_port}/v1/completions"
 
     async def _get_http_session(self):
@@ -1209,9 +1193,7 @@ class DynamoHttpServer:
                 f"rollout.engine_kwargs.dynamo.request_timeout_s must be a positive number, got {value!r}"
             ) from e
         if timeout <= 0:
-            raise ValueError(
-                f"rollout.engine_kwargs.dynamo.request_timeout_s must be positive, got {value!r}"
-            )
+            raise ValueError(f"rollout.engine_kwargs.dynamo.request_timeout_s must be positive, got {value!r}")
         return timeout
 
     @staticmethod
@@ -1305,6 +1287,7 @@ class DynamoHttpServer:
 
         import zmq
         import zmq.asyncio
+
         from verl.utils.tokenizer import normalize_token_ids
 
         tokenizer = getattr(self.model_config, "tokenizer", None)
@@ -1358,7 +1341,9 @@ class DynamoHttpServer:
         finally:
             sock.close()
 
-    def _build_direct_sampling_params(self, prompt_token_ids: list[int], sampling_params: dict[str, Any]) -> dict[str, Any]:
+    def _build_direct_sampling_params(
+        self, prompt_token_ids: list[int], sampling_params: dict[str, Any]
+    ) -> dict[str, Any]:
         sp = dict(sampling_params)
         max_tokens = sp.pop("max_tokens", None) or sp.pop("max_new_tokens", None)
         if max_tokens is None:
@@ -1385,9 +1370,7 @@ class DynamoHttpServer:
                 f"rollout.engine_kwargs.dynamo.direct_request_timeout_s must be a positive number, got {value!r}"
             ) from e
         if timeout <= 0:
-            raise ValueError(
-                f"rollout.engine_kwargs.dynamo.direct_request_timeout_s must be positive, got {value!r}"
-            )
+            raise ValueError(f"rollout.engine_kwargs.dynamo.direct_request_timeout_s must be positive, got {value!r}")
         return timeout
 
     @staticmethod
@@ -1413,14 +1396,11 @@ class DynamoHttpServer:
             "logprobs": payload.get("logprobs"),
             "return_tokens_as_token_ids": payload.get("return_tokens_as_token_ids"),
             "nvext_extra_fields": (
-                payload.get("nvext", {}).get("extra_fields")
-                if isinstance(payload.get("nvext"), dict)
-                else None
+                payload.get("nvext", {}).get("extra_fields") if isinstance(payload.get("nvext"), dict) else None
             ),
         }
 
     def _completion_response_to_token_output(self, data: dict[str, Any], include_log_probs: bool = False):
-        from verl.workers.rollout.replica import TokenOutput
         from verl.utils.tokenizer import normalize_token_ids
 
         choices = data.get("choices") or []
@@ -1444,11 +1424,7 @@ class DynamoHttpServer:
             token_ids = normalize_token_ids(tokenizer.encode(text, add_special_tokens=False))
         if not token_ids:
             raise RuntimeError(f"Dynamo frontend returned an empty completion: {data}")
-        log_probs = (
-            self._extract_completion_log_probs(choice, len(token_ids), data)
-            if include_log_probs
-            else None
-        )
+        log_probs = self._extract_completion_log_probs(choice, len(token_ids), data) if include_log_probs else None
         finish_reason = choice.get("finish_reason")
         if finish_reason == "stop" or finish_reason == "length":
             stop_reason = "completed"
@@ -1482,11 +1458,7 @@ class DynamoHttpServer:
             self._logged_engine_data_token_ids = True
             return
 
-        if (
-            self._request_engine_data()
-            and not has_engine_token_ids
-            and not self._logged_missing_engine_data
-        ):
+        if self._request_engine_data() and not has_engine_token_ids and not self._logged_missing_engine_data:
             logger.warning(
                 "Dynamo response did not include nvext.engine_data.completion_token_ids; "
                 "falling back to legacy token-id extraction"
@@ -1766,21 +1738,15 @@ class DynamoHttpServer:
             try:
                 sock.connect(ep)
                 await sock.send(pickle.dumps(req))
-                reply_bytes = await asyncio.wait_for(
-                    sock.recv(), timeout=recv_timeout
-                )
+                reply_bytes = await asyncio.wait_for(sock.recv(), timeout=recv_timeout)
                 reply = pickle.loads(reply_bytes)
                 if not reply.get("ok"):
-                    raise RuntimeError(
-                        f"control sidecar @ {ep} returned error: {reply.get('error')}"
-                    )
+                    raise RuntimeError(f"control sidecar @ {ep} returned error: {reply.get('error')}")
                 return reply.get("result")
             finally:
                 sock.close()
 
-        results = await asyncio.gather(
-            *[_call_one(i, ep) for i, ep in enumerate(self._control_endpoints)]
-        )
+        results = await asyncio.gather(*[_call_one(i, ep) for i, ep in enumerate(self._control_endpoints)])
         return results
 
     # ------------------------------------------------------------------ #
@@ -1857,7 +1823,6 @@ class DynamoHttpServer:
         import zmq
         import zmq.asyncio
 
-
         ctx = zmq.asyncio.Context.instance()
         req = {
             "kind": "engine_method",
@@ -1876,14 +1841,14 @@ class DynamoHttpServer:
                 if not reply.get("ok"):
                     logger.warning(
                         "[DynamoHttpServer] engine_method %s failed @ %s: %s",
-                        method, ep, reply.get("error"),
+                        method,
+                        ep,
+                        reply.get("error"),
                     )
             finally:
                 sock.close()
 
-        await asyncio.gather(
-            *[_call_one(i, ep) for i, ep in enumerate(self._control_endpoints)]
-        )
+        await asyncio.gather(*[_call_one(i, ep) for i, ep in enumerate(self._control_endpoints)])
         return None
 
     # ------------------------------------------------------------------ #
@@ -1967,8 +1932,7 @@ class DynamoHttpServer:
             reply_bytes = await asyncio.wait_for(sock.recv(), timeout=10)
             reply = pickle.loads(reply_bytes)
             logger.info(
-                "[DynamoHttpServer] refit self-test PASSED @ %s (sidecar "
-                "responded ok=%s)",
+                "[DynamoHttpServer] refit self-test PASSED @ %s (sidecar responded ok=%s)",
                 ep,
                 reply.get("ok"),
             )
@@ -2100,8 +2064,13 @@ class DynamoReplica(RolloutReplica):
         name_suffix: str = "",
     ):
         super().__init__(
-            replica_rank, config, model_config, gpus_per_node,
-            is_reward_model, is_teacher_model, name_suffix,
+            replica_rank,
+            config,
+            model_config,
+            gpus_per_node,
+            is_reward_model,
+            is_teacher_model,
+            name_suffix,
         )
         # TP must fit within one node — see design doc §11.1.
         assert self.config.tensor_model_parallel_size <= self.gpus_per_replica_node, (
@@ -2189,12 +2158,7 @@ class DynamoReplica(RolloutReplica):
 
         for node_rank, node_id in enumerate(node_order):
             worker_specs = node_to_specs[node_id]
-            node_cvd = ",".join(
-                gpu
-                for spec in worker_specs
-                for gpu in spec["cuda_visible_devices"].split(",")
-                if gpu
-            )
+            node_cvd = ",".join(gpu for spec in worker_specs for gpu in spec["cuda_visible_devices"].split(",") if gpu)
             if self.is_reward_model:
                 name = f"{prefix}server_reward_{self.replica_rank}_{node_rank}{suffix}"
             elif self.is_teacher_model:
@@ -2249,21 +2213,12 @@ class DynamoReplica(RolloutReplica):
         ]
         if slave_launches:
             await asyncio.gather(*slave_launches)
-            await asyncio.gather(
-                *[
-                    server.set_master_frontend.remote(fe_host, fe_port)
-                    for server in self.servers[1:]
-                ]
-            )
+            await asyncio.gather(*[server.set_master_frontend.remote(fe_host, fe_port) for server in self.servers[1:]])
 
         await master.wait_frontend_ready.remote(expected_workers=expected_workers)
         await master._self_test_refit_path.remote()
         self._server_handle = master
-        self._server_address = (
-            f"[{fe_host}]:{fe_port}"
-            if is_valid_ipv6_address(fe_host)
-            else f"{fe_host}:{fe_port}"
-        )
+        self._server_address = f"[{fe_host}]:{fe_port}" if is_valid_ipv6_address(fe_host) else f"{fe_host}:{fe_port}"
         logger.info(
             "[DynamoReplica pool] ready: server_address=%s logical_replicas=%s workers=%s nodes=%s",
             self._server_address,

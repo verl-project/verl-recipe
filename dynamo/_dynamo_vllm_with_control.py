@@ -51,9 +51,7 @@ logger = logging.getLogger("recipe.dynamo._wrapper")
 logger.setLevel(logging.INFO)
 if not logger.handlers:
     handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(logging.Formatter(
-        "%(asctime)s [dynamo-vllm-control] %(levelname)s: %(message)s"
-    ))
+    handler.setFormatter(logging.Formatter("%(asctime)s [dynamo-vllm-control] %(levelname)s: %(message)s"))
     logger.addHandler(handler)
 
 # Module-level holder so the patched setup_vllm_engine + control listener
@@ -103,8 +101,7 @@ async def _wait_for_engine(timeout: float = 1800.0) -> Any:
     while _engine_holder["engine"] is None:
         if asyncio.get_event_loop().time() > deadline:
             raise TimeoutError(
-                f"engine_client was not captured within {timeout}s; "
-                f"check that setup_vllm_engine was actually invoked"
+                f"engine_client was not captured within {timeout}s; check that setup_vllm_engine was actually invoked"
             )
         await asyncio.sleep(0.5)
     return _engine_holder["engine"]
@@ -124,9 +121,7 @@ async def _handle_request(req: dict) -> dict:
 
     try:
         if kind == "collective_rpc":
-            result = await engine.collective_rpc(
-                method=method, timeout=timeout, args=args, kwargs=kwargs
-            )
+            result = await engine.collective_rpc(method=method, timeout=timeout, args=args, kwargs=kwargs)
         elif kind == "engine_method":
             fn = getattr(engine, method)
             ret = fn(**kwargs)
@@ -155,13 +150,13 @@ async def _handle_request(req: dict) -> dict:
             # descriptor without __code__. inspect.signature works on most
             # versions; if even that fails, drop unknown keys progressively.
             import inspect
+
             try:
                 sp_accepts = set(inspect.signature(SamplingParams).parameters.keys())
             except (TypeError, ValueError):
                 sp_accepts = None
             if sp_accepts is not None:
-                sp_filtered = {k: v for k, v in sp_kwargs.items()
-                               if k in sp_accepts and v is not None}
+                sp_filtered = {k: v for k, v in sp_kwargs.items() if k in sp_accepts and v is not None}
             else:
                 sp_filtered = {k: v for k, v in sp_kwargs.items() if v is not None}
             try:
@@ -264,9 +259,7 @@ async def _control_listener(endpoint: str):
                 # If the reply itself isn't sendable, downgrade to a simple ok.
                 logger.exception("send failed; downgrading reply")
                 try:
-                    await sock.send(pickle.dumps(
-                        {"ok": reply.get("ok", False),
-                         "error": "reply was not picklable"}))
+                    await sock.send(pickle.dumps({"ok": reply.get("ok", False), "error": "reply was not picklable"}))
                 except Exception:
                     pass
     finally:
@@ -303,6 +296,7 @@ async def _amain():
 def main():
     try:
         import uvloop  # type: ignore
+
         uvloop.run(_amain())
     except ImportError:
         asyncio.run(_amain())

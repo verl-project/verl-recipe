@@ -20,9 +20,9 @@ so it lands on ``dynamo_server_*`` (created by DynamoReplica.launch_servers)
 rather than ``vllm_server_*``.
 """
 
+import os
 from typing import Any, Optional
 
-import os
 import ray
 import torch
 
@@ -147,8 +147,7 @@ class ServerAdapter(_VllmServerAdapter):
             )
             elapsed = _time.time() - t_enter
             print(
-                f"{tag} race done={len(done)} pending={len(pending)} "
-                f"+{elapsed:.2f}s",
+                f"{tag} race done={len(done)} pending={len(pending)} +{elapsed:.2f}s",
                 flush=True,
             )
             for t in done:
@@ -180,16 +179,13 @@ class ServerAdapter(_VllmServerAdapter):
                     )
                     for p in more_pending:
                         p.cancel()
-                    raise RuntimeError(
-                        f"v4a-4 hung: tasks still pending after 660s total"
-                    )
+                    raise RuntimeError("v4a-4 hung: tasks still pending after 660s total")
                 for t in more_done:
                     which = "future" if t is future_task else "sender"
                     if t.exception():
                         err = t.exception()
                         print(
-                            f"{tag} {which} ERROR (late): "
-                            f"{type(err).__name__}: {err}",
+                            f"{tag} {which} ERROR (late): {type(err).__name__}: {err}",
                             flush=True,
                         )
                         raise err
@@ -210,8 +206,7 @@ class ServerAdapter(_VllmServerAdapter):
                 print(f"{tag} kv cache cleared", flush=True)
             except asyncio.TimeoutError:
                 print(
-                    f"{tag} clear_kv_cache TIMEOUT 30s (continuing; "
-                    f"prefix cache may be stale)",
+                    f"{tag} clear_kv_cache TIMEOUT 30s (continuing; prefix cache may be stale)",
                     flush=True,
                 )
             if global_steps is not None:
