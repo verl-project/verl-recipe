@@ -3,7 +3,7 @@
 #
 # QAT Modes:
 #   - w4a16: Weight-only 4-bit quantization (NVFP4)
-#   - w4a8:  Weight 4-bit + activation FP8 numerical simulation (FSDP, dense or MoE)
+#   - w4a8:  Weight 4-bit + activation FP8 simulation (FSDP; dense and standard vLLM Marlin MoE)
 #   - w4a4:  Weight + Activation 4-bit quantization (NVFP4)
 #
 # Usage:
@@ -54,7 +54,7 @@ actor_rollout_ref:
       qat:
         # Enable QAT
         enable: true
-        # Quantization mode: "w4a16" (weight-only), "w4a8" (FSDP dense/MoE simulation), or "w4a4"
+        # Quantization mode: "w4a16" (weight-only), "w4a8" (FSDP dense/standard Marlin MoE), or "w4a4"
         mode: "w4a16"
         # Quantization group size (NVFP4 requires 16)
         group_size: 16

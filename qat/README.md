@@ -4,10 +4,7 @@
 
 See [`REQUIRED_VERL.txt`](REQUIRED_VERL.txt) for the upstream repository, install mode (rolling `main`, pinned release tag, or pinned git commit), and copy-pastable `pip` / `git` instructions where they exist.
 
-> [!NOTE]
-> The W4A8 scripts depend on the companion verl core draft. `REQUIRED_VERL.txt` will be refreshed to that published commit before this recipe draft is opened.
-
-This module provides **NVFP4 W4A16 Quantization-Aware Training (QAT)** and an experimental **W4A8 numerical simulation**, enabling integration between distributed training and the vLLM inference engine without causing KL divergence explosion.
+This module provides **NVFP4 W4A16 Quantization-Aware Training (QAT)** and an experimental **W4A8 numerical simulation** for low-precision vLLM rollout during training.
 
 W4A16 supports **FSDP** and **Megatron**. The W4A8 simulation is currently limited to **FSDP**, with dense models and the supported vLLM Marlin MoE path covered.
 
@@ -53,24 +50,6 @@ bash recipe/qat/run_qwen3_30b_w4a16.sh
 bash recipe/qat/run_qwen3_30b_w4a16_FFN_only.sh
 ```
 
-**Qwen3-8B-Base W4A8 Simulation (Full Quantization)**:
-
-```bash
-bash recipe/qat/run_qwen3_8b_w4a8.sh
-```
-
-**Qwen3-8B-Base W4A8 Simulation (FFN-only Quantization)**:
-
-```bash
-bash recipe/qat/run_qwen3_8b_w4a8_FFN_only.sh
-```
-
-**Qwen3-30B-A3B-Base W4A8 Simulation (Full Quantization)**:
-
-```bash
-bash recipe/qat/run_qwen3_30b_w4a8.sh
-```
-
 **Qwen3-30B-A3B-Base W4A8 Simulation (FFN-only Quantization)**:
 
 ```bash
@@ -84,7 +63,7 @@ Configured under `actor_rollout_ref.actor.fsdp_config.qat`:
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `fsdp_config.qat.enable` | Enable QAT | `False` |
-| `fsdp_config.qat.mode` | Quantization mode: `"w4a16"`, experimental `"w4a8"`, or `"w4a4"` | `"w4a16"` |
+| `fsdp_config.qat.mode` | Quantization mode; use experimental `"w4a8"` for W4A8 simulation | `"w4a16"` |
 | `fsdp_config.qat.group_size` | Quantization group size | `16` |
 | `fsdp_config.qat.ignore_patterns` | Layers to skip. Supports `re:` prefix for regex, otherwise substring match | `["lm_head", "embed_tokens", "re:.*mlp.gate$"]` |
 | `fsdp_config.qat.quantization_config_path` | vLLM quantization config JSON path | `recipe/qat/config/nvfp4_w4a16.json` |
@@ -142,7 +121,7 @@ actor_rollout_ref:
         quantization_config_path: "recipe/qat/config/nvfp4_w4a16.json"
 ```
 
-W4A8 activations use dynamic per-token FP8 E4M3 blocks of shape `1 x 128`. No activation scale is persisted or sent during weight synchronization. Setting `mode: "w4a8"` automatically enables the matching activation simulation and selects the W4A16 Marlin rollout backend in the vLLM subprocesses. For fused MoE, this covers both the first expert projection input and the down-projection input after the activation function.
+W4A8 activations use dynamic per-token FP8 E4M3 blocks of shape `1 x 128`. No activation scale is persisted or sent during weight synchronization. With the W4A16 `compressed-tensors` configuration above, setting `mode: "w4a8"` enables the matching activation simulation in vLLM subprocesses. For fused MoE, this covers both the first expert projection input and the down-projection input after the activation function.
 
 ---
 
@@ -316,7 +295,7 @@ This experiment compares the FSDP W4A8 FFN-only simulation with its BF16 and W4A
 - Despite the higher mismatch, the online AIME24 validation accuracy curve essentially overlaps with W4A16.
 - Entropy tracks W4A16 throughout training, with no sign of the collapse observed with W4A4.
 
-Historical exploratory Qwen3-30B-A3B runs (`gb200_30B_w4a8_full_sim_0522`, `gb200_30B_w4a8_full_sim_0406`, and `gb200_30B_w4a8_FFN_sim_0406`) also showed closely matched accuracy with slightly higher mismatch KL. However, that legacy rollout prototype quantized only the fused-MoE input before the first expert GEMM; it did not quantize the down-projection input before the second expert GEMM. These runs are therefore directional evidence only, not validation of the complete two-input MoE simulation in this draft.
+Exploratory Qwen3-30B-A3B runs with an earlier partial MoE rollout prototype also showed closely matched accuracy with slightly higher mismatch KL; because that prototype quantized only the first expert-GEMM input, complete two-input MoE accuracy remains to be validated.
 
 <img src="./img/image6.png">
 
@@ -326,6 +305,4 @@ Historical exploratory Qwen3-30B-A3B runs (`gb200_30B_w4a8_full_sim_0522`, `gb20
 
 - **FSDP Scalability**: FSDP backend has scalability limitations for very large models (e.g., Qwen-235B). For large-scale training, use the **Megatron backend** instead.
 - **W4A4 Mode**: W4A4 logic is included in the code (FSDP only), but currently has KL divergence issues and is not usable.
-- **W4A8 Simulation**: W4A8 is experimental and FSDP-only. Dense models and the supported MoE path apply FP8 quantize-dequantize at their GEMM inputs while retaining W4A16 Marlin GEMMs.
-- **MoE Rollout Scope**: The current W4A8 MoE path targets Qwen3-30B-A3B with vLLM 0.15's standard NVFP4 MarlinExperts path. Other vLLM NVFP4 backends and batched expert classes are rejected. Independent TensorRT-LLM and SGLang rollouts are outside scope and unvalidated.
-- **No Performance Claims**: W4A8 simulation adds explicit FP8 quantize-dequantize work around W4A16 kernels and is not a performance implementation.
+- **W4A8 Simulation**: W4A8 is experimental and FSDP-only. Dense models and the standard NVFP4 MarlinExperts path apply FP8 quantize-dequantize at GEMM inputs while retaining W4A16 Marlin GEMMs. Other MoE backends are not supported; other rollout engines have not been validated.

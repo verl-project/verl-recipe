@@ -16,7 +16,6 @@ rollout_is=token               # token-level importance sampling
 rollout_is_threshold=2.0
 rollout_rs=null                # response-level sampling (null = disabled)
 rollout_rs_threshold=null
-# rollout_rs_threshold_lower and rollout_token_veto_threshold removed in new verl version
 
 clip_ratio_low=0.2
 clip_ratio_high=0.28
