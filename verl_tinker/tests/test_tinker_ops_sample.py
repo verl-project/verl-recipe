@@ -16,7 +16,6 @@ from types import SimpleNamespace
 
 import pytest
 from tinker import AdamParams, SampleResponse
-
 from verl_tinker.tinker_ops import (
     load_state,
     optim_step,

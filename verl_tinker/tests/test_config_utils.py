@@ -3,13 +3,11 @@ from unittest.mock import patch
 
 import pytest
 from omegaconf import OmegaConf
-
 from verl_tinker.config_utils import (
     _validate_config,
     is_no_rollout_deployment,
     process_actor_rollout_ref_config,
 )
-
 
 _TINKER_CONFIG_DIR = Path(__file__).resolve().parents[1] / "configs"
 

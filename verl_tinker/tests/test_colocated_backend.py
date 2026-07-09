@@ -27,15 +27,14 @@ import pytest
 import torch
 from omegaconf import OmegaConf
 from tensordict import TensorDict
-
-from verl.protocol import DataProtoFuture
-from verl.utils import tensordict_utils as tu
-from verl.workers.engine_workers_tinker import TinkerActorRolloutRefWorker
 from verl_tinker.backends.colocated import (
     ColocatedBackend,
     NoRolloutWorker,
 )
 
+from verl.protocol import DataProtoFuture
+from verl.utils import tensordict_utils as tu
+from verl.workers.engine_workers_tinker import TinkerActorRolloutRefWorker
 
 _BACKEND_MODULE = "verl_tinker.backends.colocated"
 
