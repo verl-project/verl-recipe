@@ -39,6 +39,12 @@ dependencies = [
     "vexact @ git+https://github.com/verl-project/vexact.git@2da1ea2181b5fe09597077c9dc86539ec047e610",
 ]
 
+[dependency-groups]
+test = [
+    "pytest",
+    "pytest-asyncio",
+]
+
 [tool.setuptools.package-dir]
 "" = "src"
 

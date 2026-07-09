@@ -22,7 +22,8 @@ import pytest
 from fastapi import HTTPException
 from omegaconf import OmegaConf
 
-from verl_recipes.verl_tinker_server.tinker_router import (
+from verl_tinker.config_utils import _validate_config
+from verl_tinker.tinker_router import (
     TINKER_COOKBOOK_COMPAT_LORA_RANK,
     FifoReadWriteGate,
     RequestStatus,
@@ -35,7 +36,7 @@ from verl_recipes.verl_tinker_server.tinker_router import (
 
 def _router_class():
     for cls in TinkerServer.func_or_class.__mro__:
-        if cls.__module__ == "verl_recipes.verl_tinker_server.tinker_router" and cls.__name__ == "TinkerServer":
+        if cls.__module__ == "verl_tinker.tinker_router" and cls.__name__ == "TinkerServer":
             return cls
     raise AssertionError("Original TinkerServer class not found under Ray Serve wrapper")
 
@@ -57,15 +58,14 @@ def test_critic_routes_are_not_registered():
 
 
 def test_no_rollout_config_requires_backend_runtime_sections():
-    server = object.__new__(_router_class())
     config = OmegaConf.create(
         {
             "actor_rollout_ref": {"model": {"path": "/models/qwen"}},
         }
     )
 
-    with patch("verl_recipes.verl_tinker_server.tinker_router.validate_config") as mock_validate:
-        errors = server._validate_config(config)
+    with patch("verl_tinker.config_utils.validate_config") as mock_validate:
+        errors = _validate_config(config)
 
     assert "algorithm config is required" in errors
     assert "trainer.nnodes is required" in errors

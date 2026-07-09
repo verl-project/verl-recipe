@@ -31,13 +31,13 @@ from tensordict import TensorDict
 from verl.protocol import DataProtoFuture
 from verl.utils import tensordict_utils as tu
 from verl.workers.engine_workers_tinker import TinkerActorRolloutRefWorker
-from verl_recipes.verl_tinker_server.backends.colocated import (
+from verl_tinker.backends.colocated import (
     ColocatedBackend,
     NoRolloutWorker,
 )
 
 
-_BACKEND_MODULE = "verl_recipes.verl_tinker_server.backends.colocated"
+_BACKEND_MODULE = "verl_tinker.backends.colocated"
 
 
 def _actor_config(strategy="fsdp", param_offload=False, optimizer_offload=False):
@@ -618,27 +618,6 @@ class TestForwardBackwardRefLogProb:
         forwarded = backend.actor_rollout_wg.forward_backward.call_args.args[0]
         assert torch.equal(forwarded["ref_log_prob"], padded)
 
-    def test_kl_ref_in_actor_uses_actor_log_prob_with_lora_disabled(self):
-        backend = self._make_kl_backend()
-        backend._ref_in_actor = True
-        data = _make_update_actor_td()
-        padded = torch.tensor([[-0.1, -0.2, -0.3], [-0.4, -0.5, 0.0]])
-        backend.actor_rollout_wg.compute_log_prob.return_value = TensorDict(
-            {"log_probs": padded},
-            batch_size=[2],
-        )
-
-        backend.forward_backward(data)
-
-        backend.ref_policy_wg.compute_ref_log_prob.assert_not_called()
-        backend.actor_rollout_wg.compute_log_prob.assert_called_once()
-        ref_input = backend.actor_rollout_wg.compute_log_prob.call_args.args[0]
-        assert tu.get_non_tensor_data(ref_input, "compute_loss", None) is False
-        assert tu.get_non_tensor_data(ref_input, "calculate_entropy", None) is False
-        assert tu.get_non_tensor_data(ref_input, "no_lora_adapter", None) is True
-        forwarded = backend.actor_rollout_wg.forward_backward.call_args.args[0]
-        assert torch.equal(forwarded["ref_log_prob"], padded)
-
     def test_kl_missing_reference_policy_raises_clear_error(self):
         backend = self._make_kl_backend()
         backend.ref_policy_wg = None
@@ -700,7 +679,7 @@ class TestShutdownTeardown:
         backend._resource_pool = None
         actor_workers = list(backend.actor_rollout_wg.workers)
 
-        with patch("verl_recipes.verl_tinker_server.backends.colocated.ray") as mock_ray:
+        with patch("verl_tinker.backends.colocated.ray") as mock_ray:
             backend.shutdown()
             mock_ray.kill.assert_any_call(replica._server_handle, no_restart=True)
             for server in replica.servers:

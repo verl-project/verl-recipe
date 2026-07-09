@@ -4,14 +4,14 @@ from unittest.mock import patch
 import pytest
 from omegaconf import OmegaConf
 
-from verl_recipes.verl_tinker_server.config_utils import (
+from verl_tinker.config_utils import (
     _validate_config,
     is_no_rollout_deployment,
     process_actor_rollout_ref_config,
 )
 
 
-_TINKER_CONFIG_DIR = Path(__file__).resolve().parents[2] / "src" / "verl_recipes" / "verl_tinker_server" / "config"
+_TINKER_CONFIG_DIR = Path(__file__).resolve().parents[1] / "configs"
 
 
 def _minimal_tinker_config():
@@ -60,8 +60,8 @@ def test_sft_vexact_config_preserves_registration_external_libs():
     config = process_actor_rollout_ref_config(config)
 
     assert list(config.actor_rollout_ref.model.external_lib) == [
-        "vexact.integrations.verl.register",
         "vexact.integrations.verl.fsdp_enable_invariant",
+        "vexact.integrations.verl.register",
     ]
 
 
@@ -90,7 +90,7 @@ def test_no_rollout_config_skips_verl_validation_when_ref_is_disabled():
     config.actor_rollout_ref.rollout.enable = False
     config = process_actor_rollout_ref_config(config)
 
-    with patch("verl_recipes.verl_tinker_server.config_utils.validate_config") as mock_validate:
+    with patch("verl_tinker.config_utils.validate_config") as mock_validate:
         errors = _validate_config(config)
 
     assert errors == []

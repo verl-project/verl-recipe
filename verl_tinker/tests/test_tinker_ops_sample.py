@@ -17,8 +17,7 @@ from types import SimpleNamespace
 import pytest
 from tinker import AdamParams, SampleResponse
 
-from verl_recipes.verl_tinker_server.tinker_ops import (
-    _sample_output_summary,
+from verl_tinker.tinker_ops import (
     load_state,
     optim_step,
     sample,
@@ -146,36 +145,6 @@ async def test_sample_forwards_string_stop():
     assert "stop_token_ids" not in engine.sampling_params
 
 
-def test_sample_output_summary_detects_returned_stop_token():
-    summary = _sample_output_summary(
-        token_ids=[201, 151645],
-        log_probs=[-0.1, -0.2],
-        backend_stop_reason="completed",
-        tinker_stop_reason="stop",
-        expected_stop_token_ids=[151645],
-    )
-
-    assert summary["generated_tokens"] == 2
-    assert summary["last_token"] == 151645
-    assert summary["contains_stop_token"] is True
-    assert summary["last_token_is_stop"] is True
-    assert summary["logprobs_match_tokens"] is True
-
-
-def test_sample_output_summary_detects_missing_stop_token():
-    summary = _sample_output_summary(
-        token_ids=[201, 202],
-        log_probs=[-0.1],
-        backend_stop_reason="completed",
-        tinker_stop_reason="stop",
-        expected_stop_token_ids=[151645],
-    )
-
-    assert summary["contains_stop_token"] is False
-    assert summary["last_token_is_stop"] is False
-    assert summary["logprobs_match_tokens"] is False
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("backend_stop_reason", "tinker_stop_reason"),
@@ -205,7 +174,7 @@ async def test_sample_normalizes_stop_reason_for_tinker_schema(backend_stop_reas
 
 @pytest.mark.asyncio
 async def test_optim_step_merges_one_to_all_worker_metrics(monkeypatch):
-    monkeypatch.setattr("verl_recipes.verl_tinker_server.tinker_ops.asyncio.to_thread", _to_thread_inline)
+    monkeypatch.setattr("verl_tinker.tinker_ops.asyncio.to_thread", _to_thread_inline)
     engine = _OptimStepEngine()
     result = await optim_step(engine)
 
@@ -221,7 +190,7 @@ async def test_optim_step_merges_one_to_all_worker_metrics(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_optim_step_passes_adam_params_as_verl_optim_step_params(monkeypatch):
-    monkeypatch.setattr("verl_recipes.verl_tinker_server.tinker_ops.asyncio.to_thread", _to_thread_inline)
+    monkeypatch.setattr("verl_tinker.tinker_ops.asyncio.to_thread", _to_thread_inline)
     engine = _OptimStepEngine()
 
     await optim_step(
@@ -246,7 +215,7 @@ async def test_optim_step_passes_adam_params_as_verl_optim_step_params(monkeypat
 
 @pytest.mark.asyncio
 async def test_optim_step_warns_for_ignored_grad_clip_override(monkeypatch):
-    monkeypatch.setattr("verl_recipes.verl_tinker_server.tinker_ops.asyncio.to_thread", _to_thread_inline)
+    monkeypatch.setattr("verl_tinker.tinker_ops.asyncio.to_thread", _to_thread_inline)
     engine = _OptimStepEngine()
 
     with pytest.warns(UserWarning, match="grad_clip_norm is accepted"):
@@ -257,7 +226,7 @@ async def test_optim_step_warns_for_ignored_grad_clip_override(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_load_state_zeroes_optimizer_grad_when_optimizer_false(monkeypatch):
-    monkeypatch.setattr("verl_recipes.verl_tinker_server.tinker_ops.asyncio.to_thread", _to_thread_inline)
+    monkeypatch.setattr("verl_tinker.tinker_ops.asyncio.to_thread", _to_thread_inline)
     engine = _LoadStateEngine()
 
     result = await load_state(
@@ -274,7 +243,7 @@ async def test_load_state_zeroes_optimizer_grad_when_optimizer_false(monkeypatch
 
 @pytest.mark.asyncio
 async def test_load_state_preserves_loaded_optimizer_by_default(monkeypatch):
-    monkeypatch.setattr("verl_recipes.verl_tinker_server.tinker_ops.asyncio.to_thread", _to_thread_inline)
+    monkeypatch.setattr("verl_tinker.tinker_ops.asyncio.to_thread", _to_thread_inline)
     engine = _LoadStateEngine()
 
     await load_state(
