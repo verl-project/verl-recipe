@@ -35,7 +35,7 @@ from .tinker_router import ServerStatus, TinkerServer
 logger = logging.getLogger(__name__)
 
 USAGE = "Usage: python -m verl_tinker.start --config path_to_yaml"
-SUPERVISOR_POLL_INTERVAL_S = 5.0
+SUPERVISOR_POLL_INTERVAL_S = 60.0
 HEALTHZ_UNAVAILABLE_TIMEOUT_S = 30 * 60
 HEALTHZ_REQUEST_TIMEOUT_S = 5.0
 

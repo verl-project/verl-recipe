@@ -47,17 +47,31 @@ def process_actor_rollout_ref_config(config: DictConfig) -> DictConfig:
 
     resolved_strategy = _resolve_actor_strategy(config)
     strategy_is_missing = _is_missing(OmegaConf.select(config, "actor_rollout_ref.actor.strategy"))
+    user_set_actor_profiler_enable = has_path(config, "actor_rollout_ref.actor.profiler.enable")
+    user_set_actor_profiler_tool = has_path(config, "actor_rollout_ref.actor.profiler.tool")
+    user_set_actor_profiler_save_path = has_path(config, "actor_rollout_ref.actor.profiler.save_path")
     default_config = _load_verl_default_config(config)
     config = OmegaConf.merge(default_config, config)
     OmegaConf.set_struct(config, False)
 
     if strategy_is_missing:
         OmegaConf.update(config, "actor_rollout_ref.actor.strategy", resolved_strategy, merge=True)
-    apply_tinker_server_overrides(config)
+    apply_tinker_server_overrides(
+        config,
+        user_set_actor_profiler_enable=user_set_actor_profiler_enable,
+        user_set_actor_profiler_tool=user_set_actor_profiler_tool,
+        user_set_actor_profiler_save_path=user_set_actor_profiler_save_path,
+    )
     return config
 
 
-def apply_tinker_server_overrides(config: DictConfig) -> None:
+def apply_tinker_server_overrides(
+    config: DictConfig,
+    *,
+    user_set_actor_profiler_enable: bool = False,
+    user_set_actor_profiler_tool: bool = False,
+    user_set_actor_profiler_save_path: bool = False,
+) -> None:
     """Apply only Tinker-server-specific config adjustments."""
 
     _apply_micro_batch_default(
@@ -82,6 +96,12 @@ def apply_tinker_server_overrides(config: DictConfig) -> None:
         micro_batch_per_gpu_key="log_prob_micro_batch_size_per_gpu",
     )
     _ensure_actor_checkpoint_contains_hf_model(config)
+    _configure_actor_profiler_from_global_config(
+        config,
+        user_set_actor_profiler_enable=user_set_actor_profiler_enable,
+        user_set_actor_profiler_tool=user_set_actor_profiler_tool,
+        user_set_actor_profiler_save_path=user_set_actor_profiler_save_path,
+    )
 
 
 def _resolve_actor_strategy(config: DictConfig) -> str:
@@ -152,6 +172,27 @@ def _ensure_actor_checkpoint_contains_hf_model(config: DictConfig) -> None:
         if "hf_model" not in contents:
             contents.append("hf_model")
             OmegaConf.update(config, path, contents, merge=True)
+
+
+def _configure_actor_profiler_from_global_config(
+    config: DictConfig,
+    *,
+    user_set_actor_profiler_enable: bool,
+    user_set_actor_profiler_tool: bool,
+    user_set_actor_profiler_save_path: bool,
+) -> None:
+    tool = _select(config, "global_profiler.tool")
+    if _is_missing(tool):
+        return
+
+    if not user_set_actor_profiler_enable:
+        OmegaConf.update(config, "actor_rollout_ref.actor.profiler.enable", True, merge=True)
+    if not user_set_actor_profiler_tool:
+        OmegaConf.update(config, "actor_rollout_ref.actor.profiler.tool", tool, merge=True)
+
+    save_path = _select(config, "global_profiler.save_path")
+    if not user_set_actor_profiler_save_path and not _is_missing(save_path):
+        OmegaConf.update(config, "actor_rollout_ref.actor.profiler.save_path", save_path, merge=True)
 
 
 def _select(config: DictConfig, path: str, default: Any = None) -> Any:

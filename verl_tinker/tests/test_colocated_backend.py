@@ -20,6 +20,7 @@ operations.
 """
 
 import asyncio
+import logging
 import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -30,6 +31,7 @@ from tensordict import TensorDict
 from verl_tinker.backends.colocated import (
     ColocatedBackend,
     NoRolloutWorker,
+    TinkerProfilingActorRolloutRefWorker,
 )
 
 from verl.protocol import DataProtoFuture
@@ -151,6 +153,7 @@ def _make_backend(config):
     backend._resource_pool = None
     backend._replicas_awake = False
     backend._replica_wake_lock = asyncio.Lock()
+    backend._profile_step = 0
     return backend
 
 
@@ -343,6 +346,78 @@ class TestAsyncGenerate:
         assert mock_manager.generate.await_count == 3
 
 
+class TestWorkerSpawn:
+    def test_spawn_worker_groups_passes_profile_steps_for_torch(self):
+        config = _make_config()
+        config.global_profiler = {"tool": "torch", "steps": [1, 3]}
+        backend = object.__new__(ColocatedBackend)
+        backend.config = config
+
+        wg = MagicMock()
+        wg.spawn.return_value = {"actor": "wg"}
+
+        with (
+            patch(f"{_BACKEND_MODULE}.RayResourcePool") as mock_pool,
+            patch(f"{_BACKEND_MODULE}.create_colocated_worker_cls", return_value="worker_dict_cls"),
+            patch(f"{_BACKEND_MODULE}.RayWorkerGroup", return_value=wg) as mock_wg_cls,
+        ):
+            result = backend._spawn_worker_groups({"actor": object()})
+
+        assert result == {"actor": "wg"}
+        mock_pool.assert_called_once()
+        mock_wg_cls.assert_called_once_with(
+            resource_pool=mock_pool.return_value,
+            ray_cls_with_init="worker_dict_cls",
+            profile_steps=[1, 3],
+        )
+        wg.spawn.assert_called_once_with(prefix_set=dict.fromkeys(["actor"]).keys())
+
+    def test_spawn_worker_groups_requires_nsys_worker_options(self):
+        config = _make_config()
+        config.global_profiler = {"tool": "nsys", "steps": [1], "global_tool_config": {"nsys": {}}}
+        backend = object.__new__(ColocatedBackend)
+        backend.config = config
+
+        with (
+            patch(f"{_BACKEND_MODULE}.RayResourcePool"),
+            patch(f"{_BACKEND_MODULE}.create_colocated_worker_cls", return_value="worker_dict_cls"),
+        ):
+            with pytest.raises(ValueError, match="worker_nsight_options"):
+                backend._spawn_worker_groups({"actor": object()})
+
+
+class TestWorkerProfiling:
+    def test_profile_lifecycle_forwards_to_inner_actor_worker(self):
+        worker = object.__new__(TinkerProfilingActorRolloutRefWorker)
+        worker.actor = MagicMock(name="inner_actor")
+
+        with (
+            patch.object(TinkerActorRolloutRefWorker, "start_profile") as mock_outer_start,
+            patch.object(TinkerActorRolloutRefWorker, "stop_profile") as mock_outer_stop,
+        ):
+            worker.start_profile(role="actor")
+            worker.stop_profile()
+
+        mock_outer_start.assert_called_once_with(role="actor")
+        worker.actor.start_profile.assert_called_once_with(role="actor")
+        worker.actor.stop_profile.assert_called_once_with()
+        mock_outer_stop.assert_called_once_with()
+
+    def test_profile_lifecycle_handles_uninitialized_actor(self):
+        worker = object.__new__(TinkerProfilingActorRolloutRefWorker)
+        worker.actor = None
+
+        with (
+            patch.object(TinkerActorRolloutRefWorker, "start_profile") as mock_outer_start,
+            patch.object(TinkerActorRolloutRefWorker, "stop_profile") as mock_outer_stop,
+        ):
+            worker.start_profile(role="actor")
+            worker.stop_profile()
+
+        mock_outer_start.assert_called_once_with(role="actor")
+        mock_outer_stop.assert_called_once_with()
+
+
 class TestReplicaLifecycle:
     """Test the server-side sleep/wake lifecycle management."""
 
@@ -441,6 +516,58 @@ class TestReplicaLifecycle:
 
         assert result == "result_td"
         future.get.assert_called_once_with()
+
+    def test_forward_backward_profiles_configured_steps(self):
+        """forward_backward() starts/stops verl profiling on configured Tinker training steps."""
+        backend = self._make_lifecycle_backend()
+        backend.config.global_profiler = {"steps": [1], "tool": "torch"}
+        backend.actor_rollout_wg.forward_backward.return_value = "result_td"
+
+        result = backend.forward_backward("data")
+
+        assert result == "result_td"
+        backend.actor_rollout_wg.start_profile.assert_called_once_with(role="actor")
+        backend.actor_rollout_wg.stop_profile.assert_called_once_with()
+
+    def test_forward_backward_logs_profiler_decision(self, caplog):
+        """Profiler decision logs expose the active global profiler settings."""
+        backend = self._make_lifecycle_backend()
+        backend.config.global_profiler = {"steps": [1], "tool": "torch", "save_path": "outputs/profile"}
+        backend.actor_rollout_wg.forward_backward.return_value = "result_td"
+
+        with caplog.at_level(logging.INFO, logger="ray"):
+            result = backend.forward_backward("data")
+
+        assert result == "result_td"
+        assert "[profiler] forward_backward step=1 should_profile=True" in caplog.text
+        assert "'tool': 'torch'" in caplog.text
+        assert "'save_path': 'outputs/profile'" in caplog.text
+        assert "[profiler] starting actor profiler step=1" in caplog.text
+        assert "[profiler] stopped actor profiler step=1" in caplog.text
+
+    def test_forward_backward_skips_unconfigured_profile_steps(self):
+        """Only steps listed in global_profiler.steps are profiled."""
+        backend = self._make_lifecycle_backend()
+        backend.config.global_profiler = {"steps": [2], "tool": "torch"}
+        backend.actor_rollout_wg.forward_backward.return_value = "result_td"
+
+        result = backend.forward_backward("data")
+
+        assert result == "result_td"
+        backend.actor_rollout_wg.start_profile.assert_not_called()
+        backend.actor_rollout_wg.stop_profile.assert_not_called()
+
+    def test_forward_backward_stops_profile_after_worker_error(self):
+        """A failed worker call must not leave torch profiler running."""
+        backend = self._make_lifecycle_backend()
+        backend.config.global_profiler = {"steps": [1], "tool": "torch"}
+        backend.actor_rollout_wg.forward_backward.side_effect = RuntimeError("boom")
+
+        with pytest.raises(RuntimeError, match="boom"):
+            backend.forward_backward("data")
+
+        backend.actor_rollout_wg.start_profile.assert_called_once_with(role="actor")
+        backend.actor_rollout_wg.stop_profile.assert_called_once_with()
 
     def test_optim_step_sleeps_first(self):
         """optim_step() sleeps replicas before stepping the optimizer."""
@@ -770,7 +897,7 @@ class TestNoRolloutDeployment:
         ):
             mock_ray.remote = MagicMock(side_effect=lambda cls: cls)
             role_cls, _ = backend._build_role_cls()
-        assert list(role_cls.values())[0].cls is TinkerActorRolloutRefWorker
+        assert list(role_cls.values())[0].cls is TinkerProfilingActorRolloutRefWorker
 
     def test_tinker_worker_exposes_optimizer_zero_grad(self):
         """optimizer=false load_weights depends on this registered worker method."""

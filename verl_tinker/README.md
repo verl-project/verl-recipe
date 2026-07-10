@@ -111,6 +111,30 @@ Stop the server:
 curl -X POST http://127.0.0.1:8000/api/v1/shutdown
 ```
 
+## Torch Profiler
+
+`verl_tinker` reuses verl's worker profiler. To capture a Chrome trace for
+actor `forward_backward`, set `global_profiler.tool=torch`, choose the Tinker
+training request numbers to profile, and configure the actor profiler contents:
+
+```yaml
+global_profiler:
+  tool: torch
+  steps: [1]
+  save_path: outputs/profile
+
+actor_rollout_ref:
+  actor:
+    profiler:
+      tool_config:
+        torch:
+          contents: [cuda, cpu]
+```
+
+If `global_profiler.tool` is set and `actor_rollout_ref.actor.profiler.enable`
+is not explicitly configured, the server enables actor profiling during config
+processing. Trace files are written under `global_profiler.save_path`.
+
 ## Use A Tinker Client
 
 Point the client process at the server:
@@ -205,4 +229,3 @@ Developed by the ByteDance AML/Seed Team.
 
 Contributors: [Tianle Zhong](https://luosuu.github.io/)\*,
 [Huaye Zeng](https://www.wyett-zeng.com/)\*, [Xibin Wu](https://github.com/wuxibin89/), Siping Tao, [Peng Wu](https://www.linkedin.com/in/pengwu22/), [Yifan Pi](https://www.linkedin.com/in/yifan-pi-519971187/), and [Xiao Yu](https://www.linkedin.com/in/fishx/).
-

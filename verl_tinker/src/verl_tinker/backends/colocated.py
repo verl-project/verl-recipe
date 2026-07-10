@@ -30,9 +30,10 @@ import threading
 from typing import Any, Optional
 
 import ray
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from verl.checkpoint_engine.base import CheckpointEngineManager
+from verl.single_controller.base.decorator import Dispatch, register
 from verl.protocol import DataProtoFuture
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
 from verl.single_controller.ray.base import create_colocated_worker_cls
@@ -53,7 +54,72 @@ from .backend_utils import kill_ray_actors_and_wait, remove_placement_groups_and
 logger = logging.getLogger("ray")
 
 
-class NoRolloutWorker(TinkerActorRolloutRefWorker):
+def _profiler_state(profiler) -> dict[str, Any]:
+    config = getattr(profiler, "config", None)
+    state = {
+        "exists": profiler is not None,
+        "enabled": getattr(config, "enable", None),
+        "tool": getattr(config, "tool", None),
+        "save_path": getattr(config, "save_path", None),
+        "rank_allowed": None,
+    }
+    check_this_rank = getattr(profiler, "check_this_rank", None)
+    if check_this_rank is not None:
+        try:
+            state["rank_allowed"] = check_this_rank()
+        except Exception as exc:
+            state["rank_allowed"] = f"error: {exc}"
+    return state
+
+
+class TinkerProfilingActorRolloutRefWorker(TinkerActorRolloutRefWorker):
+    """Tinker worker that starts profiling on the inner actor worker too."""
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def start_profile(self, **kwargs) -> None:
+        actor = getattr(self, "actor", None)
+        logger.info(
+            "[profiler] worker start_profile rank=%s kwargs=%s outer=%s has_actor=%s inner=%s",
+            getattr(self, "rank", None),
+            kwargs,
+            _profiler_state(getattr(self, "profiler", None)),
+            actor is not None,
+            _profiler_state(getattr(actor, "profiler", None)) if actor is not None else None,
+        )
+        super().start_profile(**kwargs)
+        actor = getattr(self, "actor", None)
+        if actor is not None:
+            actor.start_profile(**kwargs)
+        logger.info(
+            "[profiler] worker start_profile done rank=%s outer=%s inner=%s",
+            getattr(self, "rank", None),
+            _profiler_state(getattr(self, "profiler", None)),
+            _profiler_state(getattr(actor, "profiler", None)) if actor is not None else None,
+        )
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def stop_profile(self) -> None:
+        actor = getattr(self, "actor", None)
+        logger.info(
+            "[profiler] worker stop_profile rank=%s outer=%s has_actor=%s inner=%s",
+            getattr(self, "rank", None),
+            _profiler_state(getattr(self, "profiler", None)),
+            actor is not None,
+            _profiler_state(getattr(actor, "profiler", None)) if actor is not None else None,
+        )
+        if actor is not None:
+            actor.stop_profile()
+        super().stop_profile()
+        actor = getattr(self, "actor", None)
+        logger.info(
+            "[profiler] worker stop_profile done rank=%s outer=%s inner=%s",
+            getattr(self, "rank", None),
+            _profiler_state(getattr(self, "profiler", None)),
+            _profiler_state(getattr(actor, "profiler", None)) if actor is not None else None,
+        )
+
+
+class NoRolloutWorker(TinkerProfilingActorRolloutRefWorker):
     """TinkerActorRolloutRefWorker that skips rollout (vLLM) initialization."""
 
     def _build_rollout(self, **kwargs):
@@ -100,6 +166,7 @@ class ColocatedBackend:
         self._resource_pool = None
         self._replicas_awake = True
         self._replica_wake_lock = asyncio.Lock()
+        self._profile_step = 0
 
         # Ray workers import model.external_lib through HFModelConfig, but rollout
         # registries are process-local, so the backend must import them before
@@ -160,7 +227,7 @@ class ColocatedBackend:
                 Role.ActorRollout if ref_in_actor or not need_reference_policy(config) else Role.ActorRolloutRef
             )
 
-        worker_cls = NoRolloutWorker if self._no_rollout_deployment else TinkerActorRolloutRefWorker
+        worker_cls = NoRolloutWorker if self._no_rollout_deployment else TinkerProfilingActorRolloutRefWorker
         role_cls = {
             str(actor_role): RayClassWithInitArgs(
                 cls=ray.remote(worker_cls),
@@ -185,7 +252,18 @@ class ColocatedBackend:
             name_prefix="gpu_serve",
         )
         worker_dict_cls = create_colocated_worker_cls(class_dict=role_cls)
-        wg = RayWorkerGroup(resource_pool=self._resource_pool, ray_cls_with_init=worker_dict_cls)
+        wg_kwargs = {}
+        if OmegaConf.select(config, "global_profiler.steps") is not None:
+            wg_kwargs["profile_steps"] = OmegaConf.select(config, "global_profiler.steps")
+            if OmegaConf.select(config, "global_profiler.tool") == "nsys":
+                worker_nsight_options = OmegaConf.select(
+                    config,
+                    "global_profiler.global_tool_config.nsys.worker_nsight_options",
+                )
+                if worker_nsight_options is None:
+                    raise ValueError("worker_nsight_options must be set when using nsys with profile_steps")
+                wg_kwargs["worker_nsight_options"] = OmegaConf.to_container(worker_nsight_options)
+        wg = RayWorkerGroup(resource_pool=self._resource_pool, ray_cls_with_init=worker_dict_cls, **wg_kwargs)
         return wg.spawn(prefix_set=role_cls.keys())
 
     def _init_worker_groups(self, all_wg: dict, actor_role: Role):
@@ -369,6 +447,44 @@ class ColocatedBackend:
             return ray.get(result)
         return result
 
+    # ==================== Profiling ====================
+
+    def _next_profile_step(self) -> int:
+        self._profile_step += 1
+        return self._profile_step
+
+    def _should_profile_step(self, step: int) -> bool:
+        steps = OmegaConf.select(self.config, "global_profiler.steps")
+        if steps is None:
+            return False
+        return step in set(list(steps))
+
+    def _global_profiler_settings(self) -> dict[str, Any]:
+        steps = OmegaConf.select(self.config, "global_profiler.steps")
+        if steps is not None:
+            steps = list(steps)
+        return {
+            "tool": OmegaConf.select(self.config, "global_profiler.tool"),
+            "steps": steps,
+            "save_path": OmegaConf.select(self.config, "global_profiler.save_path"),
+        }
+
+    def _start_profile(self, step: int) -> None:
+        if self.actor_rollout_wg is None:
+            logger.info("[profiler] skip start step=%s reason=no actor_rollout_wg", step)
+            return
+        logger.info("[profiler] starting actor profiler step=%s settings=%s", step, self._global_profiler_settings())
+        self.actor_rollout_wg.start_profile(role="actor")
+        logger.info("[profiler] start dispatched step=%s", step)
+
+    def _stop_profile(self, step: int) -> None:
+        if self.actor_rollout_wg is None:
+            logger.info("[profiler] skip stop step=%s reason=no actor_rollout_wg", step)
+            return
+        logger.info("[profiler] stopping actor profiler step=%s", step)
+        self.actor_rollout_wg.stop_profile()
+        logger.info("[profiler] stopped actor profiler step=%s", step)
+
     # ==================== Replica lifecycle ====================
 
     def _ensure_replicas_slept(self):
@@ -530,10 +646,24 @@ class ColocatedBackend:
 
     def forward_backward(self, data):
         with self._engine_lock:
+            profile_step = self._next_profile_step()
+            should_profile = self._should_profile_step(profile_step)
+            logger.info(
+                "[profiler] forward_backward step=%s should_profile=%s settings=%s",
+                profile_step,
+                should_profile,
+                self._global_profiler_settings(),
+            )
             self._ensure_replicas_slept()
             self._ensure_ref_log_prob_for_kl_loss(data)
-            result = self.actor_rollout_wg.forward_backward(data)
-            return self._wait_for_nonblocking_result(result)
+            if should_profile:
+                self._start_profile(profile_step)
+            try:
+                result = self.actor_rollout_wg.forward_backward(data)
+                return self._wait_for_nonblocking_result(result)
+            finally:
+                if should_profile:
+                    self._stop_profile(profile_step)
 
     def optim_step(self, optim_step_params: dict[str, Any] | None = None):
         with self._engine_lock:

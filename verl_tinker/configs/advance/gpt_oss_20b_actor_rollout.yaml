@@ -1,6 +1,13 @@
-# Note: this config is designed for quick CI funcitonal tests, for more serious training you
-# MOST LIKELY will need to increase the amount of GPU resources and configure this file
-# a bit more
+# WARNING: This actor-rollout config does not work out of the box with the
+# default openai/gpt-oss-20b MXFP4 checkpoint. vLLM can load that checkpoint for
+# inference, but verl's actor-to-rollout weight sync currently sends BF16/full
+# actor weights and vLLM's GPT-OSS MXFP4 post-load path expects packed MXFP4
+# tensors. Use a local BF16/non-MXFP4 converted GPT-OSS model and set:
+#   TINKER_SERVER_MODEL=/path/to/local/bf16/gpt-oss-20b
+#
+# Note: this config is designed for quick CI functional tests. For more serious
+# training, you MOST LIKELY will need to increase the amount of GPU resources and
+# configure this file a bit more.
 
 server:
   host: ${oc.env:TINKER_SERVER_HOST,0.0.0.0}
@@ -24,6 +31,11 @@ actor_rollout_ref: # this is the same as verl's config, this field is ALWAYS req
       model_dtype: bfloat16
     ppo_mini_batch_size: 16
     ppo_micro_batch_size_per_gpu: 1
+    profiler:
+      enable: true
+      tool_config:
+        torch:
+          contents: [cuda, cpu]
 
   rollout:
     name: vllm
@@ -43,7 +55,7 @@ actor_rollout_ref: # this is the same as verl's config, this field is ALWAYS req
     enable: false
 
   model:
-    path: ${oc.env:TINKER_SERVER_MODEL,openai/gpt-oss-20b}
+    path: ${oc.env:TINKER_SERVER_MODEL,hdfs://harunava/home/byte_arnold_va_ssd/mlsys/models/gpt-oss-20b-BF16}
 
 reward:
   reward_model:
@@ -65,3 +77,9 @@ trainer:
   experiment_name: tinker_server_gpt_oss_20b_actor_rollout
   nnodes: 1
   n_gpus_per_node: 8
+
+global_profiler:
+  tool: torch
+  steps: [1, 2, 3]
+  profile_continuous_steps: false
+  save_path: outputs/profile

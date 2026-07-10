@@ -52,6 +52,49 @@ def test_tinker_config_preserves_user_values_over_verl_defaults():
     assert config.actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu == 4
 
 
+def test_tinker_config_enables_actor_profiler_when_global_profiler_tool_is_set():
+    config = _minimal_tinker_config()
+    OmegaConf.update(config, "global_profiler.tool", "torch", merge=True)
+    OmegaConf.update(config, "global_profiler.steps", [1], merge=True)
+    OmegaConf.update(config, "global_profiler.save_path", "outputs/profile", merge=True)
+    OmegaConf.update(config, "actor_rollout_ref.actor.profiler.tool_config.torch.contents", ["cuda", "cpu"], merge=True)
+
+    config = process_actor_rollout_ref_config(config)
+
+    assert config.global_profiler.tool == "torch"
+    assert list(config.global_profiler.steps) == [1]
+    assert config.actor_rollout_ref.actor.profiler.enable is True
+    assert config.actor_rollout_ref.actor.profiler.tool == "torch"
+    assert config.actor_rollout_ref.actor.profiler.save_path == "outputs/profile"
+    assert list(config.actor_rollout_ref.actor.profiler.tool_config.torch.contents) == ["cuda", "cpu"]
+
+
+def test_tinker_config_preserves_explicit_actor_profiler_tool_and_save_path():
+    config = _minimal_tinker_config()
+    OmegaConf.update(config, "global_profiler.tool", "torch", merge=True)
+    OmegaConf.update(config, "global_profiler.steps", [1], merge=True)
+    OmegaConf.update(config, "global_profiler.save_path", "outputs/profile", merge=True)
+    OmegaConf.update(config, "actor_rollout_ref.actor.profiler.tool", "torch_memory", merge=True)
+    OmegaConf.update(config, "actor_rollout_ref.actor.profiler.save_path", "/tmp/custom-profile", merge=True)
+
+    config = process_actor_rollout_ref_config(config)
+
+    assert config.actor_rollout_ref.actor.profiler.enable is True
+    assert config.actor_rollout_ref.actor.profiler.tool == "torch_memory"
+    assert config.actor_rollout_ref.actor.profiler.save_path == "/tmp/custom-profile"
+
+
+def test_tinker_config_preserves_explicit_actor_profiler_enable_false():
+    config = _minimal_tinker_config()
+    OmegaConf.update(config, "global_profiler.tool", "torch", merge=True)
+    OmegaConf.update(config, "global_profiler.steps", [1], merge=True)
+    OmegaConf.update(config, "actor_rollout_ref.actor.profiler.enable", False, merge=True)
+
+    config = process_actor_rollout_ref_config(config)
+
+    assert config.actor_rollout_ref.actor.profiler.enable is False
+
+
 def test_sft_vexact_config_preserves_registration_external_libs():
     config = OmegaConf.load(_TINKER_CONFIG_DIR / "advance" / "qwen3_1b7_actor_rollout_vexact.yaml")
 
