@@ -386,38 +386,6 @@ class TestWorkerSpawn:
                 backend._spawn_worker_groups({"actor": object()})
 
 
-class TestWorkerProfiling:
-    def test_profile_lifecycle_forwards_to_inner_actor_worker(self):
-        worker = object.__new__(TinkerProfilingActorRolloutRefWorker)
-        worker.actor = MagicMock(name="inner_actor")
-
-        with (
-            patch.object(TinkerActorRolloutRefWorker, "start_profile") as mock_outer_start,
-            patch.object(TinkerActorRolloutRefWorker, "stop_profile") as mock_outer_stop,
-        ):
-            worker.start_profile(role="actor")
-            worker.stop_profile()
-
-        mock_outer_start.assert_called_once_with(role="actor")
-        worker.actor.start_profile.assert_called_once_with(role="actor")
-        worker.actor.stop_profile.assert_called_once_with()
-        mock_outer_stop.assert_called_once_with()
-
-    def test_profile_lifecycle_handles_uninitialized_actor(self):
-        worker = object.__new__(TinkerProfilingActorRolloutRefWorker)
-        worker.actor = None
-
-        with (
-            patch.object(TinkerActorRolloutRefWorker, "start_profile") as mock_outer_start,
-            patch.object(TinkerActorRolloutRefWorker, "stop_profile") as mock_outer_stop,
-        ):
-            worker.start_profile(role="actor")
-            worker.stop_profile()
-
-        mock_outer_start.assert_called_once_with(role="actor")
-        mock_outer_stop.assert_called_once_with()
-
-
 class TestReplicaLifecycle:
     """Test the server-side sleep/wake lifecycle management."""
 

@@ -33,7 +33,6 @@ import ray
 from omegaconf import DictConfig, OmegaConf
 
 from verl.checkpoint_engine.base import CheckpointEngineManager
-from verl.single_controller.base.decorator import Dispatch, register
 from verl.protocol import DataProtoFuture
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
 from verl.single_controller.ray.base import create_colocated_worker_cls
@@ -41,7 +40,6 @@ from verl.trainer.ppo.utils import Role, need_reference_policy
 from verl.utils import tensordict_utils as tu
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.import_utils import import_external_libs
-from verl.workers.engine_workers_tinker import TinkerActorRolloutRefWorker
 from verl.workers.rollout.llm_server import LLMServerClient
 from verl.workers.rollout.replica import TokenOutput, get_rollout_replica_class
 from verl.workers.utils.padding import no_padding_2_padding
@@ -50,73 +48,9 @@ from ..config_utils import is_no_rollout_deployment
 from ..schemas import ServerCapabilities
 from ._loss import is_ref_in_actor, make_branching_loss
 from .backend_utils import kill_ray_actors_and_wait, remove_placement_groups_and_wait
+from .profiler_util import TinkerProfilingActorRolloutRefWorker
 
 logger = logging.getLogger("ray")
-
-
-def _profiler_state(profiler) -> dict[str, Any]:
-    config = getattr(profiler, "config", None)
-    state = {
-        "exists": profiler is not None,
-        "enabled": getattr(config, "enable", None),
-        "tool": getattr(config, "tool", None),
-        "save_path": getattr(config, "save_path", None),
-        "rank_allowed": None,
-    }
-    check_this_rank = getattr(profiler, "check_this_rank", None)
-    if check_this_rank is not None:
-        try:
-            state["rank_allowed"] = check_this_rank()
-        except Exception as exc:
-            state["rank_allowed"] = f"error: {exc}"
-    return state
-
-
-class TinkerProfilingActorRolloutRefWorker(TinkerActorRolloutRefWorker):
-    """Tinker worker that starts profiling on the inner actor worker too."""
-
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def start_profile(self, **kwargs) -> None:
-        actor = getattr(self, "actor", None)
-        logger.info(
-            "[profiler] worker start_profile rank=%s kwargs=%s outer=%s has_actor=%s inner=%s",
-            getattr(self, "rank", None),
-            kwargs,
-            _profiler_state(getattr(self, "profiler", None)),
-            actor is not None,
-            _profiler_state(getattr(actor, "profiler", None)) if actor is not None else None,
-        )
-        super().start_profile(**kwargs)
-        actor = getattr(self, "actor", None)
-        if actor is not None:
-            actor.start_profile(**kwargs)
-        logger.info(
-            "[profiler] worker start_profile done rank=%s outer=%s inner=%s",
-            getattr(self, "rank", None),
-            _profiler_state(getattr(self, "profiler", None)),
-            _profiler_state(getattr(actor, "profiler", None)) if actor is not None else None,
-        )
-
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def stop_profile(self) -> None:
-        actor = getattr(self, "actor", None)
-        logger.info(
-            "[profiler] worker stop_profile rank=%s outer=%s has_actor=%s inner=%s",
-            getattr(self, "rank", None),
-            _profiler_state(getattr(self, "profiler", None)),
-            actor is not None,
-            _profiler_state(getattr(actor, "profiler", None)) if actor is not None else None,
-        )
-        if actor is not None:
-            actor.stop_profile()
-        super().stop_profile()
-        actor = getattr(self, "actor", None)
-        logger.info(
-            "[profiler] worker stop_profile done rank=%s outer=%s inner=%s",
-            getattr(self, "rank", None),
-            _profiler_state(getattr(self, "profiler", None)),
-            _profiler_state(getattr(actor, "profiler", None)) if actor is not None else None,
-        )
 
 
 class NoRolloutWorker(TinkerProfilingActorRolloutRefWorker):
