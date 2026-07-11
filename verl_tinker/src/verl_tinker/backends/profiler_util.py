@@ -16,8 +16,6 @@ import logging
 from typing import Any
 
 from verl.single_controller.base.decorator import Dispatch, register
-from verl.utils.config import omega_conf_to_dataclass
-from verl.utils.profiler import DistProfiler, ProfilerConfig
 from verl.workers.engine_workers_tinker import TinkerActorRolloutRefWorker
 
 logger = logging.getLogger("ray")
@@ -44,43 +42,6 @@ def profiler_state(profiler) -> dict[str, Any]:
 class TinkerProfilingActorRolloutRefWorker(TinkerActorRolloutRefWorker):
     """Tinker worker that starts profiling on the inner actor worker too."""
 
-    def _install_inner_actor_profiler(self) -> None:
-        actor = getattr(self, "actor", None)
-        if actor is None:
-            return
-
-        omega_profiler_config = self.config.actor.get("profiler", {})
-        profiler_config = omega_conf_to_dataclass(omega_profiler_config, dataclass_type=ProfilerConfig)
-        if omega_profiler_config.get("tool", None) in ["npu", "nsys", "torch", "torch_memory", "precision_debugger"]:
-            tool_config = omega_conf_to_dataclass(
-                omega_profiler_config.get("tool_config", {}).get(omega_profiler_config.get("tool"))
-            )
-        else:
-            tool_config = None
-
-        actor.profiler_config = profiler_config
-        actor.profiler_tool_config = tool_config
-        profiler_rank = getattr(actor, "rank", None)
-        if profiler_rank is None:
-            profiler_rank = getattr(self, "rank", 0)
-        actor.profiler = DistProfiler(
-            rank=profiler_rank,
-            config=profiler_config,
-            tool_config=tool_config,
-        )
-        logger.info(
-            "[profiler] installed inner actor profiler rank=%s state=%s",
-            getattr(actor, "rank", None),
-            profiler_state(actor.profiler),
-        )
-
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def init_model(self):
-        result = super().init_model()
-        self._install_inner_actor_profiler()
-        self._active_profile_target = None
-        return result
-
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def start_profile(self, **kwargs) -> None:
         actor = getattr(self, "actor", None)
@@ -92,12 +53,10 @@ class TinkerProfilingActorRolloutRefWorker(TinkerActorRolloutRefWorker):
             actor is not None,
             profiler_state(getattr(actor, "profiler", None)) if actor is not None else None,
         )
+        super().start_profile(**kwargs)
+        actor = getattr(self, "actor", None)
         if actor is not None:
             actor.start_profile(**kwargs)
-            self._active_profile_target = actor
-        else:
-            super().start_profile(**kwargs)
-            self._active_profile_target = self
         logger.info(
             "[profiler] worker start_profile done rank=%s outer=%s inner=%s",
             getattr(self, "rank", None),
@@ -115,16 +74,9 @@ class TinkerProfilingActorRolloutRefWorker(TinkerActorRolloutRefWorker):
             actor is not None,
             profiler_state(getattr(actor, "profiler", None)) if actor is not None else None,
         )
-        target = getattr(self, "_active_profile_target", None)
-        if target is actor and actor is not None:
+        if actor is not None:
             actor.stop_profile()
-        elif target is self:
-            super().stop_profile()
-        elif actor is not None:
-            actor.stop_profile()
-        else:
-            super().stop_profile()
-        self._active_profile_target = None
+        super().stop_profile()
         actor = getattr(self, "actor", None)
         logger.info(
             "[profiler] worker stop_profile done rank=%s outer=%s inner=%s",

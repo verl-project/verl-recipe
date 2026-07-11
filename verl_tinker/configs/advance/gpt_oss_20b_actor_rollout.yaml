@@ -80,6 +80,6 @@ trainer:
 
 global_profiler:
   tool: torch
-  steps: [1, 2, 3]
+  steps: [3]
   profile_continuous_steps: false
   save_path: outputs/profile
