@@ -5,7 +5,6 @@ server:
   checkpoint_dir: ${oc.env:TINKER_CHECKPOINT_DIR,/tmp/tinker-checkpoints}
   server_max_runtime: ${oc.env:TINKER_SERVER_MAX_RUNTIME,null} # an optional variable for the maximum uptime of the server, null means infinite
   max_concurrent_samples: ${oc.env:TINKER_SERVER_MAX_CONCURRENT_SAMPLES,32}
-  enable_offload: true | false
 
 actor_rollout_ref: # this is the same as verl's config, this field is ALWAYS required.
   actor:
@@ -14,13 +13,14 @@ actor_rollout_ref: # this is the same as verl's config, this field is ALWAYS req
     ppo_mini_batch_size: 16
     veomni:
       cross_entropy_loss_implementation: chunk_loss
-      param_offload: true
-      optimizer_offload: true
+      param_offload: false
+      optimizer_offload: false
     optim:
       lr_scheduler_type: constant
       lr: 1.0e-06
     profiler:
       enable: true
+      all_ranks: true
       tool_config:
         torch:
           contents: [cuda, cpu]
@@ -58,3 +58,4 @@ global_profiler:
   steps: [3]
   profile_continuous_steps: false
   save_path: outputs/profile
+  all_ranks: true

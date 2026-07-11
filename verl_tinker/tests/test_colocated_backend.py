@@ -31,7 +31,6 @@ from tensordict import TensorDict
 from verl_tinker.backends.colocated import (
     ColocatedBackend,
     NoRolloutWorker,
-    TinkerProfilingActorRolloutRefWorker,
 )
 
 from verl.protocol import DataProtoFuture
@@ -865,7 +864,7 @@ class TestNoRolloutDeployment:
         ):
             mock_ray.remote = MagicMock(side_effect=lambda cls: cls)
             role_cls, _ = backend._build_role_cls()
-        assert list(role_cls.values())[0].cls is TinkerProfilingActorRolloutRefWorker
+        assert list(role_cls.values())[0].cls is TinkerActorRolloutRefWorker
 
     def test_tinker_worker_exposes_optimizer_zero_grad(self):
         """optimizer=false load_weights depends on this registered worker method."""

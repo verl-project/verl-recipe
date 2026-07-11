@@ -40,6 +40,7 @@ from verl.trainer.ppo.utils import Role, need_reference_policy
 from verl.utils import tensordict_utils as tu
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.import_utils import import_external_libs
+from verl.workers.engine_workers_tinker import TinkerActorRolloutRefWorker
 from verl.workers.rollout.llm_server import LLMServerClient
 from verl.workers.rollout.replica import TokenOutput, get_rollout_replica_class
 from verl.workers.utils.padding import no_padding_2_padding
@@ -48,12 +49,11 @@ from ..config_utils import is_no_rollout_deployment
 from ..schemas import ServerCapabilities
 from ._loss import is_ref_in_actor, make_branching_loss
 from .backend_utils import kill_ray_actors_and_wait, remove_placement_groups_and_wait
-from .profiler_util import TinkerProfilingActorRolloutRefWorker
 
 logger = logging.getLogger("ray")
 
 
-class NoRolloutWorker(TinkerProfilingActorRolloutRefWorker):
+class NoRolloutWorker(TinkerActorRolloutRefWorker):
     """TinkerActorRolloutRefWorker that skips rollout (vLLM) initialization."""
 
     def _build_rollout(self, **kwargs):
@@ -161,7 +161,7 @@ class ColocatedBackend:
                 Role.ActorRollout if ref_in_actor or not need_reference_policy(config) else Role.ActorRolloutRef
             )
 
-        worker_cls = NoRolloutWorker if self._no_rollout_deployment else TinkerProfilingActorRolloutRefWorker
+        worker_cls = NoRolloutWorker if self._no_rollout_deployment else TinkerActorRolloutRefWorker
         role_cls = {
             str(actor_role): RayClassWithInitArgs(
                 cls=ray.remote(worker_cls),

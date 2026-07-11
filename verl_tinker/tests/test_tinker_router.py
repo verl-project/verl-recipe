@@ -63,7 +63,7 @@ def test_no_rollout_config_requires_backend_runtime_sections():
         }
     )
 
-    with patch("verl_tinker.config_utils.validate_config") as mock_validate:
+    with patch("verl_tinker.config_utils._validate_supported_verl_config") as mock_validate:
         errors = _validate_config(config)
 
     assert "algorithm config is required" in errors

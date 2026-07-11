@@ -33,6 +33,7 @@ actor_rollout_ref: # this is the same as verl's config, this field is ALWAYS req
     ppo_micro_batch_size_per_gpu: 1
     profiler:
       enable: true
+      all_ranks: true
       tool_config:
         torch:
           contents: [cuda, cpu]
@@ -83,3 +84,4 @@ global_profiler:
   steps: [3]
   profile_continuous_steps: false
   save_path: outputs/profile
+  all_ranks: true
