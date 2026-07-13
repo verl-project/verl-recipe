@@ -31,12 +31,12 @@ actor_rollout_ref: # this is the same as verl's config, this field is ALWAYS req
       model_dtype: bfloat16
     ppo_mini_batch_size: 16
     ppo_micro_batch_size_per_gpu: 1
-    profiler:
-      enable: true
-      all_ranks: true
-      tool_config:
-        torch:
-          contents: [cuda, cpu]
+    # profiler:
+    #   enable: true
+    #   all_ranks: true
+    #   tool_config:
+    #     torch:
+    #       contents: [cuda, cpu]
 
   rollout:
     name: vllm
@@ -56,7 +56,7 @@ actor_rollout_ref: # this is the same as verl's config, this field is ALWAYS req
     enable: false
 
   model:
-    path: ${oc.env:TINKER_SERVER_MODEL,hdfs://harunava/home/byte_arnold_va_ssd/mlsys/models/gpt-oss-20b-BF16}
+    path: ${oc.env:TINKER_SERVER_MODEL,openai/gpt-oss-20b}
 
 algorithm:
   adv_estimator: grpo
@@ -75,9 +75,9 @@ trainer:
   nnodes: 1
   n_gpus_per_node: 8
 
-global_profiler:
-  tool: torch
-  steps: [3]
-  profile_continuous_steps: false
-  save_path: outputs/profile
-  all_ranks: true
+# global_profiler:
+#   tool: torch
+#   steps: [3]
+#   profile_continuous_steps: false
+#   save_path: outputs/profile
+#   all_ranks: true
