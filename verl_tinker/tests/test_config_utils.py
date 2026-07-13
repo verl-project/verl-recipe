@@ -33,6 +33,13 @@ def test_tinker_config_merges_verl_defaults_and_keeps_only_tinker_overrides():
     config = process_actor_rollout_ref_config(_minimal_tinker_config())
 
     assert set(config.keys()) == {"server", "actor_rollout_ref", "algorithm", "data", "trainer"}
+    assert config.server.host == "0.0.0.0"
+    assert config.server.port == 8000
+    assert config.server.ray_address == "local"
+    assert config.server.checkpoint_dir == "/tmp/tinker-checkpoints"
+    assert config.server.max_concurrent_samples == 32
+    assert config.server.enable_offload is True
+    assert config.server.disable_config_fix is False
     assert config.actor_rollout_ref.actor._target_ == "verl.workers.config.VeOmniActorConfig"
     assert config.actor_rollout_ref.model._target_ == "verl.workers.config.HFModelConfig"
     assert config.actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu == 1
@@ -40,6 +47,37 @@ def test_tinker_config_merges_verl_defaults_and_keeps_only_tinker_overrides():
     assert config.actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu == 1
     assert "hf_model" in config.actor_rollout_ref.actor.checkpoint.save_contents
     assert "hf_model" in config.actor_rollout_ref.actor.checkpoint.load_contents
+
+
+def test_tinker_config_preserves_explicit_server_values_over_defaults():
+    config = _minimal_tinker_config()
+    config.server = {
+        "host": "127.0.0.1",
+        "port": 9000,
+        "checkpoint_dir": "/tmp/custom-checkpoints",
+        "enable_offload": False,
+    }
+
+    config = process_actor_rollout_ref_config(config)
+
+    assert config.server.host == "127.0.0.1"
+    assert config.server.port == 9000
+    assert config.server.checkpoint_dir == "/tmp/custom-checkpoints"
+    assert config.server.enable_offload is False
+    assert config.server.disable_config_fix is False
+
+
+def test_tinker_config_disables_verl_model_offload_flags():
+    config = _minimal_tinker_config()
+    config.actor_rollout_ref.actor.veomni = {"param_offload": True, "optimizer_offload": True}
+    config.actor_rollout_ref.ref.veomni = {"param_offload": True, "optimizer_offload": True}
+
+    config = process_actor_rollout_ref_config(config)
+
+    assert config.actor_rollout_ref.actor.veomni.param_offload is False
+    assert config.actor_rollout_ref.actor.veomni.optimizer_offload is False
+    assert config.actor_rollout_ref.ref.veomni.param_offload is False
+    assert config.actor_rollout_ref.ref.veomni.optimizer_offload is False
 
 
 def test_tinker_config_does_not_keep_unsupported_ppo_sections():

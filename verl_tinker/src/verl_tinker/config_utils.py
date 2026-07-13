@@ -34,6 +34,46 @@ _SUPPORTED_TOP_LEVEL_SECTIONS = (
     "global_profiler",
     "external_libs",
 )
+DEFAULT_SERVER_CONFIG = {
+    "host": "0.0.0.0",
+    "port": 8000,
+    "ray_address": "local",
+    "checkpoint_dir": "/tmp/tinker-checkpoints",
+    "server_max_runtime": None,
+    "max_concurrent_samples": 32,
+    "enable_offload": True,
+    "disable_config_fix": False,
+}
+_VERL_OFFLOAD_FALSE_PATHS = (
+    "actor_rollout_ref.actor.fsdp_config.param_offload",
+    "actor_rollout_ref.actor.fsdp_config.optimizer_offload",
+    "actor_rollout_ref.actor.fsdp_config.grad_offload",
+    "actor_rollout_ref.actor.fsdp_config.offload_policy",
+    "actor_rollout_ref.actor.veomni.param_offload",
+    "actor_rollout_ref.actor.veomni.optimizer_offload",
+    "actor_rollout_ref.actor.veomni.grad_offload",
+    "actor_rollout_ref.actor.veomni.enable_fsdp_offload",
+    "actor_rollout_ref.actor.megatron.param_offload",
+    "actor_rollout_ref.actor.megatron.optimizer_offload",
+    "actor_rollout_ref.actor.megatron.grad_offload",
+    "actor_rollout_ref.actor.torchtitan.param_offload",
+    "actor_rollout_ref.actor.torchtitan.optimizer_offload",
+    "actor_rollout_ref.actor.torchtitan.grad_offload",
+    "actor_rollout_ref.ref.fsdp_config.param_offload",
+    "actor_rollout_ref.ref.fsdp_config.optimizer_offload",
+    "actor_rollout_ref.ref.fsdp_config.grad_offload",
+    "actor_rollout_ref.ref.fsdp_config.offload_policy",
+    "actor_rollout_ref.ref.veomni.param_offload",
+    "actor_rollout_ref.ref.veomni.optimizer_offload",
+    "actor_rollout_ref.ref.veomni.grad_offload",
+    "actor_rollout_ref.ref.veomni.enable_fsdp_offload",
+    "actor_rollout_ref.ref.megatron.param_offload",
+    "actor_rollout_ref.ref.megatron.optimizer_offload",
+    "actor_rollout_ref.ref.megatron.grad_offload",
+    "actor_rollout_ref.ref.torchtitan.param_offload",
+    "actor_rollout_ref.ref.torchtitan.optimizer_offload",
+    "actor_rollout_ref.ref.torchtitan.grad_offload",
+)
 
 
 REQUIRED_PATHS = [
@@ -99,6 +139,8 @@ def apply_tinker_server_overrides(
 ) -> None:
     """Apply only Tinker-server-specific config adjustments."""
 
+    _apply_server_defaults(config)
+    _disable_verl_model_offload(config)
     _apply_micro_batch_default(
         config,
         section="actor_rollout_ref.actor",
@@ -129,6 +171,23 @@ def apply_tinker_server_overrides(
         user_set_actor_profiler_all_ranks=user_set_actor_profiler_all_ranks,
         user_set_actor_profiler_ranks=user_set_actor_profiler_ranks,
     )
+
+
+def _apply_server_defaults(config: DictConfig) -> None:
+    if "server" not in config:
+        config.server = {}
+
+    default_server = OmegaConf.create(DEFAULT_SERVER_CONFIG)
+    config.server = OmegaConf.merge(default_server, config.server)
+    for key, value in DEFAULT_SERVER_CONFIG.items():
+        if _is_missing(config.server.get(key)):
+            OmegaConf.update(config, f"server.{key}", value, merge=True)
+
+
+def _disable_verl_model_offload(config: DictConfig) -> None:
+    for path in _VERL_OFFLOAD_FALSE_PATHS:
+        if has_path(config, path):
+            OmegaConf.update(config, path, False, merge=True)
 
 
 def _resolve_actor_strategy(config: DictConfig) -> str:
@@ -403,7 +462,8 @@ def process_config(config: DictConfig) -> DictConfig:
             + "\nPlease consult the quick_start configs for an example."
         )
 
-    config = process_actor_rollout_ref_config(config)
+    if not bool(_select(config, "server.disable_config_fix", False)):
+        config = process_actor_rollout_ref_config(config)
     errors = _validate_config(config)
     if errors:
         raise ValueError(f"Config validation failed: {errors}")
