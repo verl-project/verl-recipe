@@ -6,7 +6,9 @@ from omegaconf import OmegaConf
 from verl_tinker.config_utils import (
     _validate_config,
     is_no_rollout_deployment,
+    main,
     process_actor_rollout_ref_config,
+    process_config,
 )
 
 _TINKER_CONFIG_DIR = Path(__file__).resolve().parents[1] / "configs"
@@ -39,7 +41,7 @@ def test_tinker_config_merges_verl_defaults_and_keeps_only_tinker_overrides():
     assert config.server.checkpoint_dir == "/tmp/tinker-checkpoints"
     assert config.server.max_concurrent_samples == 32
     assert config.server.enable_offload is True
-    assert config.server.disable_config_fix is False
+    assert config.server.auto_merge_verl_default_config is True
     assert config.actor_rollout_ref.actor._target_ == "verl.workers.config.VeOmniActorConfig"
     assert config.actor_rollout_ref.model._target_ == "verl.workers.config.HFModelConfig"
     assert config.actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu == 1
@@ -47,6 +49,15 @@ def test_tinker_config_merges_verl_defaults_and_keeps_only_tinker_overrides():
     assert config.actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu == 1
     assert "hf_model" in config.actor_rollout_ref.actor.checkpoint.save_contents
     assert "hf_model" in config.actor_rollout_ref.actor.checkpoint.load_contents
+
+
+def test_config_utils_cli_validates_and_prints_processed_config(capsys):
+    main(["--config", str(_TINKER_CONFIG_DIR / "quick_start" / "actor.yaml")])
+
+    output = capsys.readouterr().out
+    assert "Config validation succeeded. Final processed config:" in output
+    assert "auto_merge_verl_default_config: true" in output
+    assert "param_offload: false" in output
 
 
 def test_tinker_config_preserves_explicit_server_values_over_defaults():
@@ -64,7 +75,42 @@ def test_tinker_config_preserves_explicit_server_values_over_defaults():
     assert config.server.port == 9000
     assert config.server.checkpoint_dir == "/tmp/custom-checkpoints"
     assert config.server.enable_offload is False
-    assert config.server.disable_config_fix is False
+    assert config.server.auto_merge_verl_default_config is True
+
+
+def test_disabling_verl_default_merge_still_applies_tinker_server_overrides():
+    config = _minimal_tinker_config()
+    config.server.auto_merge_verl_default_config = False
+    config.actor_rollout_ref.actor.veomni = {"param_offload": True}
+    config.actor_rollout_ref.actor.checkpoint = {
+        "save_contents": ["model"],
+        "load_contents": ["model"],
+    }
+    config.imported_verl_section = {"sentinel": True}
+
+    with (
+        patch("verl_tinker.config_utils._load_verl_section_defaults") as mock_load_defaults,
+        patch("verl_tinker.config_utils._validate_config", return_value=[]),
+    ):
+        config = process_config(config)
+
+    mock_load_defaults.assert_not_called()
+    assert config.server.auto_merge_verl_default_config is False
+    assert config.imported_verl_section.sentinel is True
+    assert "_target_" not in config.actor_rollout_ref.actor
+    assert config.actor_rollout_ref.actor.veomni.param_offload is False
+    assert list(config.actor_rollout_ref.actor.checkpoint.save_contents) == [
+        "model",
+        "optimizer",
+        "extra",
+        "hf_model",
+    ]
+    assert list(config.actor_rollout_ref.actor.checkpoint.load_contents) == [
+        "model",
+        "optimizer",
+        "extra",
+        "hf_model",
+    ]
 
 
 def test_tinker_config_disables_verl_model_offload_flags():

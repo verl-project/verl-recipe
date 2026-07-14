@@ -66,6 +66,19 @@ export TINKER_CHECKPOINT_DIR=/tmp/tinker-checkpoints
 For an existing Ray cluster, set `RAY_ADDRESS`; otherwise the server starts a
 local Ray runtime.
 
+## Validate a Config
+
+Validate a config and print the final processed YAML without starting Ray or
+requesting GPU resources:
+
+```bash
+cd verl_tinker
+python -m verl_tinker.config_utils --config configs/quick_start/actor.yaml
+```
+
+The command exits successfully after printing the config, or raises an error
+when loading, interpolation, processing, or validation fails.
+
 ## Start The Server
 
 Start the server from inside the `verl_tinker` recipe directory. The config

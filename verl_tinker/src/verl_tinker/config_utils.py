@@ -1,4 +1,6 @@
+import argparse
 from importlib.resources import files
+from pathlib import Path
 from typing import Any
 
 from omegaconf import DictConfig, ListConfig, OmegaConf
@@ -42,7 +44,7 @@ DEFAULT_SERVER_CONFIG = {
     "server_max_runtime": None,
     "max_concurrent_samples": 32,
     "enable_offload": True,
-    "disable_config_fix": False,
+    "auto_merge_verl_default_config": True,
 }
 _VERL_OFFLOAD_FALSE_PATHS = (
     "actor_rollout_ref.actor.fsdp_config.param_offload",
@@ -101,8 +103,9 @@ def is_no_rollout_deployment(config: DictConfig) -> bool:
 
 
 def process_actor_rollout_ref_config(config: DictConfig) -> DictConfig:
-    """Merge a lightweight Tinker server config on top of the supported Verl sections."""
+    """Prepare the supported Verl sections and apply Tinker server overrides."""
 
+    auto_merge_verl_defaults = bool(_select(config, "server.auto_merge_verl_default_config", True))
     resolved_strategy = _resolve_actor_strategy(config)
     strategy_is_missing = _is_missing(OmegaConf.select(config, "actor_rollout_ref.actor.strategy"))
     user_set_actor_profiler_enable = has_path(config, "actor_rollout_ref.actor.profiler.enable")
@@ -110,9 +113,10 @@ def process_actor_rollout_ref_config(config: DictConfig) -> DictConfig:
     user_set_actor_profiler_save_path = has_path(config, "actor_rollout_ref.actor.profiler.save_path")
     user_set_actor_profiler_all_ranks = has_path(config, "actor_rollout_ref.actor.profiler.all_ranks")
     user_set_actor_profiler_ranks = has_path(config, "actor_rollout_ref.actor.profiler.ranks")
-    default_config = _load_verl_section_defaults(resolved_strategy)
-    user_config = _extract_supported_config_sections(config)
-    config = OmegaConf.merge(default_config, user_config)
+    if auto_merge_verl_defaults:
+        default_config = _load_verl_section_defaults(resolved_strategy)
+        user_config = _extract_supported_config_sections(config)
+        config = OmegaConf.merge(default_config, user_config)
     OmegaConf.set_struct(config, False)
 
     if strategy_is_missing:
@@ -162,7 +166,7 @@ def apply_tinker_server_overrides(
         micro_batch_key="log_prob_micro_batch_size",
         micro_batch_per_gpu_key="log_prob_micro_batch_size_per_gpu",
     )
-    _ensure_actor_checkpoint_contains_hf_model(config)
+    _set_actor_checkpoint_contents(config)
     _configure_actor_profiler_from_global_config(
         config,
         user_set_actor_profiler_enable=user_set_actor_profiler_enable,
@@ -185,6 +189,9 @@ def _apply_server_defaults(config: DictConfig) -> None:
 
 
 def _disable_verl_model_offload(config: DictConfig) -> None:
+    # The Tinker server owns the model offload/onload lifecycle. Disable Verl's
+    # per-worker offload settings so ``server.enable_offload`` is the single knob
+    # controlling this behavior and the two mechanisms cannot fight each other.
     for path in _VERL_OFFLOAD_FALSE_PATHS:
         if has_path(config, path):
             OmegaConf.update(config, path, False, merge=True)
@@ -262,18 +269,13 @@ def _apply_micro_batch_default(
         )
 
 
-def _ensure_actor_checkpoint_contains_hf_model(config: DictConfig) -> None:
+def _set_actor_checkpoint_contents(config: DictConfig) -> None:
+    # The Tinker server owns checkpoint recovery and must save everything needed
+    # to recreate the complete actor after a load_state. Override both lists instead
+    # of honoring a partial Verl checkpoint configuration that cannot be resumed.
     for key in ("save_contents", "load_contents"):
         path = f"actor_rollout_ref.actor.checkpoint.{key}"
-        contents = _select(config, path)
-        if _is_missing(contents):
-            OmegaConf.update(config, path, list(_ACTOR_CHECKPOINT_CONTENTS), merge=True)
-            continue
-
-        contents = list(contents)
-        if "hf_model" not in contents:
-            contents.append("hf_model")
-            OmegaConf.update(config, path, contents, merge=True)
+        OmegaConf.update(config, path, list(_ACTOR_CHECKPOINT_CONTENTS), merge=True)
 
 
 def _configure_actor_profiler_from_global_config(
@@ -462,10 +464,43 @@ def process_config(config: DictConfig) -> DictConfig:
             + "\nPlease consult the quick_start configs for an example."
         )
 
-    if not bool(_select(config, "server.disable_config_fix", False)):
-        config = process_actor_rollout_ref_config(config)
+    config = process_actor_rollout_ref_config(config)
     errors = _validate_config(config)
     if errors:
         raise ValueError(f"Config validation failed: {errors}")
 
     return config
+
+
+def load_config(config_path: str | Path) -> DictConfig:
+    """Load and resolve a Tinker YAML config using the server startup rules."""
+
+    config_path = Path(config_path).expanduser()
+    if config_path.suffix.lower() not in {".yaml", ".yml"}:
+        raise ValueError(f"--config must point to a YAML file, got: {config_path}")
+    if not config_path.is_file():
+        raise FileNotFoundError(f"Config file does not exist: {config_path}")
+
+    config = OmegaConf.load(config_path)
+    if not isinstance(config, DictConfig):
+        raise TypeError(f"Expected top-level YAML mapping in {config_path}")
+
+    OmegaConf.set_struct(config, False)
+    OmegaConf.resolve(config)
+    return config
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description="Validate and render a processed verl_tinker config.")
+    parser.add_argument("--config", required=True, help="Path to a YAML verl_tinker config.")
+    args = parser.parse_args(argv)
+
+    config = process_config(load_config(args.config))
+    print("Config validation succeeded. Final processed config:\n")
+    print(OmegaConf.to_yaml(config, resolve=True), end="")
+
+
+if __name__ == "__main__":
+    # utility entrypoint for people to validate their config and see how it will
+    # be transformed
+    main()

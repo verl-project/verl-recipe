@@ -20,7 +20,6 @@ import logging
 import signal
 import sys
 import time
-from pathlib import Path
 
 import ray
 from omegaconf import DictConfig, OmegaConf
@@ -29,7 +28,7 @@ from ray.serve.handle import DeploymentHandle
 
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 
-from .config_utils import process_config
+from .config_utils import load_config, process_config
 from .tinker_router import ServerStatus, TinkerServer
 
 logger = logging.getLogger(__name__)
@@ -150,24 +149,7 @@ def main() -> None:
     if sys.argv[1] != "--config":
         raise SystemExit(USAGE)
 
-    config_path = Path(sys.argv[2]).expanduser()
-
-    if config_path.suffix.lower() not in {".yaml", ".yml"}:
-        raise ValueError(f"--config must point to a YAML file, got: {config_path}")
-
-    if not config_path.is_file():
-        raise FileNotFoundError(f"Config file does not exist: {config_path}")
-
-    config = OmegaConf.load(config_path)
-
-    if not isinstance(config, DictConfig):
-        raise TypeError(f"Expected top-level YAML mapping in {config_path}")
-
-    # Allow downstream code to add/modify fields.
-    OmegaConf.set_struct(config, False)
-
-    # Resolve ${oc.env:VAR,default} eagerly so config/env issues fail before server startup.
-    OmegaConf.resolve(config)
+    config = load_config(sys.argv[2])
 
     log_config("Received config from user", config)
 

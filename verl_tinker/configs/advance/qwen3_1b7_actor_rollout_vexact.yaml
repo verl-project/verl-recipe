@@ -7,7 +7,7 @@ server:
   checkpoint_dir: ${oc.env:TINKER_CHECKPOINT_DIR,/tmp/tinker-checkpoints}
   server_max_runtime: ${oc.env:TINKER_SERVER_MAX_RUNTIME,null} # an optional variable for the maximum uptime of the server, null means infinite
   enable_offload: true
-  disable_config_fix: false
+  auto_merge_verl_default_config: true
 
 actor_rollout_ref: # this is the same as verl's config, this field is ALWAYS required.
   actor:

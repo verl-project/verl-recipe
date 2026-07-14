@@ -6,7 +6,7 @@ server:
   server_max_runtime: ${oc.env:TINKER_SERVER_MAX_RUNTIME,null} # an optional variable for the maximum uptime of the server, null means infinite
   max_concurrent_samples: ${oc.env:TINKER_SERVER_MAX_CONCURRENT_SAMPLES,32}
   enable_offload: true
-  disable_config_fix: false
+  auto_merge_verl_default_config: true
 
 actor_rollout_ref: # this is the same as verl's config, this field is ALWAYS required.
   actor:
