@@ -11,8 +11,8 @@ async def run_tulu3_test(base_url, model_name, tokenizer_name_or_path=None):
     common = ChatDatasetBuilderCommonConfig(
         model_name_for_tokenizer=tokenizer_name_or_path,
         renderer_name=renderer_name,
-        max_length=2048,
-        batch_size=8,
+        max_length=4096,
+        batch_size=32,
         train_on_what=TrainOnWhat.LAST_ASSISTANT_MESSAGE,
     )
     config = train.Config(
@@ -20,7 +20,7 @@ async def run_tulu3_test(base_url, model_name, tokenizer_name_or_path=None):
         model_name=model_name,
         renderer_name=renderer_name,
         dataset_builder=chat_datasets.Tulu3Builder(common_config=common),
-        learning_rate=2e-4,
+        learning_rate=3e-5,
         num_epochs=1,
         max_steps=10,
         eval_every=0,
