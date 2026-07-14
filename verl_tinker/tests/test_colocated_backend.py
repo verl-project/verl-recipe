@@ -796,7 +796,7 @@ class TestBackendOffloadConfig:
             patch.object(ColocatedBackend, "_build_role_cls", return_value=({}, "actor")),
             patch.object(ColocatedBackend, "_spawn_worker_groups", return_value={}),
             patch.object(ColocatedBackend, "_init_worker_groups"),
-        patch.object(ColocatedBackend, "_prepare_model_roles"),
+            patch.object(ColocatedBackend, "_prepare_model_roles"),
             patch.object(ColocatedBackend, "_init_rollout_replicas"),
             patch(f"{_BACKEND_MODULE}.need_reference_policy", return_value=False),
             patch(f"{_BACKEND_MODULE}.is_ref_in_actor", return_value=False),

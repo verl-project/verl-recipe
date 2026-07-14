@@ -27,7 +27,7 @@ class ModelLifecycle:
         has_rollout: bool,
         has_ref: bool,
         actor_awake: bool = True,
-    ) -> "ModelLifecycle":
+    ) -> ModelLifecycle:
         available_roles = {ModelRole.ACTOR}
         if has_rollout:
             available_roles.add(ModelRole.ROLLOUT)

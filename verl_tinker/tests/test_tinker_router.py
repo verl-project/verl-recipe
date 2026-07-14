@@ -94,9 +94,7 @@ def test_create_model_metadata_is_full_model_training_even_with_lora_request():
         ({}, "/models/original-model"),
     ],
 )
-async def test_get_info_always_uses_configured_model_for_model_and_tokenizer(
-    server_config, expected_model_name
-):
+async def test_get_info_always_uses_configured_model_for_model_and_tokenizer(server_config, expected_model_name):
     server = object.__new__(_router_class())
     server._engine = SimpleNamespace(
         config=OmegaConf.create(
