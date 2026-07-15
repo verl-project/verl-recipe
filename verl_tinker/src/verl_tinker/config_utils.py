@@ -306,7 +306,8 @@ def _configure_actor_profiler_from_global_config(
 
     ranks = _select(config, "global_profiler.ranks")
     if not user_set_actor_profiler_ranks and not _is_missing(ranks):
-        OmegaConf.update(config, "actor_rollout_ref.actor.profiler.ranks", list(ranks), merge=True)
+        ranks_list = list(ranks) if isinstance(ranks, (list, ListConfig)) else [ranks]
+        OmegaConf.update(config, "actor_rollout_ref.actor.profiler.ranks", ranks_list, merge=True)
 
 
 def _select(config: DictConfig, path: str, default: Any = None) -> Any:
