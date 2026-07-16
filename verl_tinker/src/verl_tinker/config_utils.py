@@ -376,7 +376,8 @@ def _validate_supported_verl_config(config: DictConfig, use_reference_policy: bo
         else:
             minimal_bsz = n_gpus
 
-        real_train_batch_size = config.data.train_batch_size * config.actor_rollout_ref.rollout.n
+        rollout_n = OmegaConf.select(config, "actor_rollout_ref.rollout.n", default=1) or 1
+        real_train_batch_size = config.data.train_batch_size * rollout_n
         assert real_train_batch_size % minimal_bsz == 0, (
             f"real_train_batch_size ({real_train_batch_size}) must be divisible by minimal possible batch size "
             f"({minimal_bsz})"
