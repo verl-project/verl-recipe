@@ -205,7 +205,9 @@ class ColocatedBackend:
         worker_dict_cls = create_colocated_worker_cls(class_dict=role_cls)
         wg_kwargs = {}
         if OmegaConf.select(config, "global_profiler.steps") is not None:
-            wg_kwargs["profile_steps"] = OmegaConf.select(config, "global_profiler.steps")
+            wg_kwargs["profile_steps"] = OmegaConf.to_container(
+                OmegaConf.select(config, "global_profiler.steps"), resolve=True
+            )
             if OmegaConf.select(config, "global_profiler.tool") == "nsys":
                 worker_nsight_options = OmegaConf.select(
                     config,

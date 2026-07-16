@@ -410,12 +410,12 @@ def _validate_supported_verl_config(config: DictConfig, use_reference_policy: bo
             + " which will schedule the memory themselves."
         )
 
-    if config.actor_rollout_ref.rollout.val_kwargs.do_sample:
+    if OmegaConf.select(config, "actor_rollout_ref.rollout.val_kwargs.do_sample", default=False):
         assert config.actor_rollout_ref.rollout.temperature > 0, (
             "validation gen temperature should be greater than 0 when enabling do_sample"
         )
 
-    lora_config = config.actor_rollout_ref.model.get("lora", {})
+    lora_config = config.actor_rollout_ref.model.get("lora") or {}
     lora_rank = lora_config.get("rank", 0)
     if lora_rank <= 0:
         lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
