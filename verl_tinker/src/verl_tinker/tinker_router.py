@@ -47,7 +47,6 @@ from .tinker_ops import (
     GLOBAL_MODEL_ID,
     GLOBAL_SAMPLING_SESSION_ID,
     GLOBAL_SESSION_ID,
-    get_base_model_name,
     get_configured_model_name,
     get_supported_models,
     load_state,
@@ -442,7 +441,10 @@ class TinkerServer:
 
     @app.post("/api/v1/get_info")
     async def get_info(self, req: GetInfoRequest):
-        model_name = get_base_model_name(self._get_engine(), self._model_to_base_model)
+        # Always describe the model/tokenizer that this server actually loaded.
+        # A client-provided base_model from create_model is request metadata and
+        # must not override the configured model identity returned by get_info.
+        model_name = get_configured_model_name(self._get_engine())
         return {
             "type": "get_info",
             "model_data": {"arch": None, "model_name": model_name, "tokenizer_id": model_name},

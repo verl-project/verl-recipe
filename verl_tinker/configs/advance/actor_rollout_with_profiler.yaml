@@ -15,13 +15,21 @@ actor_rollout_ref: # this is the same as verl's config, this field is ALWAYS req
     ppo_mini_batch_size: 16
     veomni:
       cross_entropy_loss_implementation: chunk_loss
+      param_offload: false
+      optimizer_offload: false
     optim:
       lr_scheduler_type: constant
       lr: 1.0e-06
+    profiler:
+      enable: true
+      all_ranks: true
+      tool_config:
+        torch:
+          contents: [cuda, cpu]
   rollout:
     name: vllm
-    tensor_model_parallel_size: 2
-    gpu_memory_utilization: 0.6
+    tensor_model_parallel_size: 4
+    gpu_memory_utilization: 0.4
   ref:
     enable: false
   model:
@@ -42,3 +50,10 @@ trainer:
   experiment_name: tinker_server_actor_rollout
   nnodes: 1
   n_gpus_per_node: ${oc.env:TINKER_SERVER_N_GPUS_PER_NODE,8}
+
+global_profiler:
+  tool: torch
+  steps: [3]
+  profile_continuous_steps: false
+  save_path: outputs/profile
+  all_ranks: true

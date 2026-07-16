@@ -63,7 +63,7 @@ def test_no_rollout_config_requires_backend_runtime_sections():
         }
     )
 
-    with patch("verl_tinker.config_utils.validate_config") as mock_validate:
+    with patch("verl_tinker.config_utils._validate_supported_verl_config") as mock_validate:
         errors = _validate_config(config)
 
     assert "algorithm config is required" in errors
@@ -84,6 +84,35 @@ def test_create_model_metadata_is_full_model_training_even_with_lora_request():
         "is_lora": False,
         "lora_rank": None,
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("server_config", "expected_model_name"),
+    [
+        ({"model_name": "configured-model"}, "configured-model"),
+        ({}, "/models/original-model"),
+    ],
+)
+async def test_get_info_always_uses_configured_model_for_model_and_tokenizer(server_config, expected_model_name):
+    server = object.__new__(_router_class())
+    server._engine = SimpleNamespace(
+        config=OmegaConf.create(
+            {
+                "server": server_config,
+                "actor_rollout_ref": {"model": {"path": "/models/original-model"}},
+            }
+        )
+    )
+    server._status = ServerStatus.INITIALIZED
+    server._shutdown_started = False
+    server._model_to_base_model = {"verl-remote-actor-model": "client-requested-model"}
+
+    response = await server.get_info(SimpleNamespace())
+
+    assert response["model_data"]["model_name"] == expected_model_name
+    assert response["model_data"]["tokenizer_id"] == expected_model_name
+    assert response["model_name"] == expected_model_name
 
 
 def test_weights_info_metadata_uses_cookbook_lora_compat_shape():

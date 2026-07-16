@@ -35,7 +35,7 @@ def wait_for_healthz_ready(url: str, max_wait_time: int = 7200):
             print(f"healthz ct={ct}: invalid JSON: {e}")
 
         ct += 1
-        time.sleep(10)
+        time.sleep(30)
 
 
 def shutdown_server(url: str):

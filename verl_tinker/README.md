@@ -66,6 +66,19 @@ export TINKER_CHECKPOINT_DIR=/tmp/tinker-checkpoints
 For an existing Ray cluster, set `RAY_ADDRESS`; otherwise the server starts a
 local Ray runtime.
 
+## Validate a Config
+
+Validate a config and print the final processed YAML without starting Ray or
+requesting GPU resources:
+
+```bash
+cd verl_tinker
+python -m verl_tinker.config_utils --config configs/quick_start/actor.yaml
+```
+
+The command exits successfully after printing the config, or raises an error
+when loading, interpolation, processing, or validation fails.
+
 ## Start The Server
 
 Start the server from inside the `verl_tinker` recipe directory. The config
@@ -110,6 +123,30 @@ Stop the server:
 ```bash
 curl -X POST http://127.0.0.1:8000/api/v1/shutdown
 ```
+
+## Torch Profiler
+
+`verl_tinker` reuses verl's worker profiler. To capture a Chrome trace for
+actor `forward_backward`, set `global_profiler.tool=torch`, choose the Tinker
+training request numbers to profile, and configure the actor profiler contents:
+
+```yaml
+global_profiler:
+  tool: torch
+  steps: [1]
+  save_path: outputs/profile
+
+actor_rollout_ref:
+  actor:
+    profiler:
+      tool_config:
+        torch:
+          contents: [cuda, cpu]
+```
+
+If `global_profiler.tool` is set and `actor_rollout_ref.actor.profiler.enable`
+is not explicitly configured, the server enables actor profiling during config
+processing. Trace files are written under `global_profiler.save_path`.
 
 ## Use A Tinker Client
 
@@ -205,4 +242,3 @@ Developed by the ByteDance AML/Seed Team.
 
 Contributors: [Tianle Zhong](https://luosuu.github.io/)\*,
 [Huaye Zeng](https://www.wyett-zeng.com/)\*, [Xibin Wu](https://github.com/wuxibin89/), Siping Tao, [Peng Wu](https://www.linkedin.com/in/pengwu22/), [Yifan Pi](https://www.linkedin.com/in/yifan-pi-519971187/), and [Xiao Yu](https://www.linkedin.com/in/fishx/).
-

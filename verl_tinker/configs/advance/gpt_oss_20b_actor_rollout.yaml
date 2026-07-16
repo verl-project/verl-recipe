@@ -1,6 +1,7 @@
-# Note: this config is designed for quick CI funcitonal tests, for more serious training you
-# MOST LIKELY will need to increase the amount of GPU resources and configure this file
-# a bit more
+
+# Note: this config is designed for quick CI functional tests. For more serious
+# training, you MOST LIKELY will need to increase the amount of GPU resources and
+# configure this file a bit more.
 
 server:
   host: ${oc.env:TINKER_SERVER_HOST,0.0.0.0}
@@ -9,6 +10,8 @@ server:
   checkpoint_dir: ${oc.env:TINKER_CHECKPOINT_DIR,/tmp/tinker-checkpoints}
   server_max_runtime: ${oc.env:TINKER_SERVER_MAX_RUNTIME,null} # an optional variable for the maximum uptime of the server, null means infinite
   max_concurrent_samples: ${oc.env:TINKER_SERVER_MAX_CONCURRENT_SAMPLES,32}
+  enable_offload: true
+  auto_merge_verl_default_config: true
 
 actor_rollout_ref: # this is the same as verl's config, this field is ALWAYS required.
   # this is a bit more customized as it's a larger model
@@ -19,11 +22,15 @@ actor_rollout_ref: # this is the same as verl's config, this field is ALWAYS req
       lr_scheduler_type: constant
       lr: 1.0e-06
     fsdp_config:
-      param_offload: true
-      optimizer_offload: true
       model_dtype: bfloat16
     ppo_mini_batch_size: 16
     ppo_micro_batch_size_per_gpu: 1
+    # profiler:
+    #   enable: true
+    #   all_ranks: true
+    #   tool_config:
+    #     torch:
+    #       contents: [cuda, cpu]
 
   rollout:
     name: vllm
@@ -43,11 +50,7 @@ actor_rollout_ref: # this is the same as verl's config, this field is ALWAYS req
     enable: false
 
   model:
-    path: ${oc.env:TINKER_SERVER_MODEL,openai/gpt-oss-20b}
-
-reward:
-  reward_model:
-    enable: false
+    path: ${oc.env:TINKER_SERVER_MODEL,unsloth/gpt-oss-20b-BF16}    
 
 algorithm:
   adv_estimator: grpo
@@ -65,3 +68,10 @@ trainer:
   experiment_name: tinker_server_gpt_oss_20b_actor_rollout
   nnodes: 1
   n_gpus_per_node: 8
+
+# global_profiler:
+#   tool: torch
+#   steps: [3]
+#   profile_continuous_steps: false
+#   save_path: outputs/profile
+#   all_ranks: true

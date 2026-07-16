@@ -6,6 +6,8 @@ server:
   ray_address: ${oc.env:RAY_ADDRESS,local}
   checkpoint_dir: ${oc.env:TINKER_CHECKPOINT_DIR,/tmp/tinker-checkpoints}
   server_max_runtime: ${oc.env:TINKER_SERVER_MAX_RUNTIME,null} # an optional variable for the maximum uptime of the server, null means infinite
+  enable_offload: true
+  auto_merge_verl_default_config: true
 
 actor_rollout_ref: # this is the same as verl's config, this field is ALWAYS required.
   actor:
@@ -15,8 +17,6 @@ actor_rollout_ref: # this is the same as verl's config, this field is ALWAYS req
     ppo_micro_batch_size_per_gpu: 1
     use_torch_compile: false
     veomni:
-      param_offload: true
-      optimizer_offload: true
       fsdp_size: 8
       ulysses_parallel_size: 1
       expert_parallel_size: 1
@@ -63,10 +63,6 @@ actor_rollout_ref: # this is the same as verl's config, this field is ALWAYS req
 
 external_libs:
   - vexact.integrations.verl.register
-
-reward:
-  reward_model:
-    enable: false
 
 algorithm:
   adv_estimator: grpo

@@ -35,8 +35,9 @@ dependencies = [
     "transformers==5.9.0",
     "veomni @ git+https://github.com/ByteDance-Seed/VeOmni.git@ff89f19056599b868b6dbfeb224c90c39eb1b4de",
     "verl @ git+https://github.com/verl-project/verl.git@1ff76cc625e9820d2434dad1b6d9b8e5dd26a359",
-    "vllm>=0.24.0,<0.25",
+    "vllm>=0.22.0,<0.23",
     "vexact @ git+https://github.com/verl-project/vexact.git@2da1ea2181b5fe09597077c9dc86539ec047e610",
+    "kernels==0.14.1",
 ]
 
 [dependency-groups]

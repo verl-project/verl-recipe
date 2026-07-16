@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import os
+import traceback
 
 from tasks.math_rl.gsm8k import run_math_rl_gsm8k_test
 from tasks.math_sft_rl.gsm8k import run_math_sft_rl_gsm8k_test
@@ -53,6 +54,7 @@ async def main(
     except Exception as e:
         success = False
         print(f"test failed: {test_name}: {e}")
+        traceback.print_exc()
     finally:
         shutdown_server(base_url)
 

@@ -20,6 +20,7 @@ operations.
 """
 
 import asyncio
+import logging
 import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -30,7 +31,9 @@ from tensordict import TensorDict
 from verl_tinker.backends.colocated import (
     ColocatedBackend,
     NoRolloutWorker,
+    TinkerServerActorRolloutRefWorker,
 )
+from verl_tinker.backends.model_lifecycle import ModelLifecycle, ModelRole
 
 from verl.protocol import DataProtoFuture
 from verl.utils import tensordict_utils as tu
@@ -113,7 +116,7 @@ def test_init_imports_model_external_libs_before_workers_and_rollout():
         patch.object(ColocatedBackend, "_spawn_worker_groups", side_effect=lambda _: call_order.append("spawn") or {}),
         patch.object(ColocatedBackend, "_init_worker_groups", side_effect=lambda *_: call_order.append("init_workers")),
         patch.object(
-            ColocatedBackend, "_offload_actor_if_enabled", side_effect=lambda *_: call_order.append("offload")
+            ColocatedBackend, "_prepare_model_roles", side_effect=lambda *_args, **_kwargs: call_order.append("offload")
         ),
         patch.object(ColocatedBackend, "_init_rollout_replicas", side_effect=lambda: call_order.append("init_rollout")),
         patch(f"{_BACKEND_MODULE}.need_reference_policy", return_value=False),
@@ -136,11 +139,12 @@ def _make_backend(config):
     backend.use_kl_in_reward = config.get("algorithm", {}).get("use_kl_in_reward", False)
     backend.use_reference_policy = False
     backend._ref_in_actor = False
-    backend._actor_param_offload = bool(
-        config.actor_rollout_ref.actor.get("fsdp_config", {}).get("param_offload", False)
-    )
-    backend._actor_optimizer_offload = bool(
-        config.actor_rollout_ref.actor.get("fsdp_config", {}).get("optimizer_offload", False)
+    backend._enable_offload = bool(config.get("server", {}).get("enable_offload", True))
+    backend._lifecycle = ModelLifecycle.create(
+        enable_offload=backend._enable_offload,
+        has_rollout=not backend._no_rollout_deployment,
+        has_ref=False,
+        actor_awake=True,
     )
     backend.actor_rollout_wg = MagicMock(name="actor_rollout_wg")
     backend.actor_rollout_wg.world_size = 8
@@ -149,8 +153,8 @@ def _make_backend(config):
     backend.rollout_replicas = []
     backend._server_manager = None
     backend._resource_pool = None
-    backend._replicas_awake = False
     backend._replica_wake_lock = asyncio.Lock()
+    backend._profile_step = 0
     return backend
 
 
@@ -212,7 +216,7 @@ class TestAsyncGenerate:
     async def test_generate_delegates_to_server_manager(self):
         """generate() delegates to LLMServerClient.generate()."""
         backend = _make_backend(_make_config())
-        backend._replicas_awake = True
+        backend._lifecycle.mark_awake(ModelRole.ROLLOUT)
 
         mock_manager = MagicMock()
         mock_manager.generate = AsyncMock(return_value="result_0")
@@ -247,7 +251,7 @@ class TestAsyncGenerate:
         cfg = _make_config()
         cfg.actor_rollout_ref.rollout.name = "vexact"
         backend = _make_backend(cfg)
-        backend._replicas_awake = True
+        backend._lifecycle.mark_awake(ModelRole.ROLLOUT)
         mock_manager = MagicMock()
         mock_manager.generate = AsyncMock(return_value="tok")
         backend._server_manager = mock_manager
@@ -274,7 +278,7 @@ class TestAsyncGenerate:
     async def test_generate_keeps_max_tokens_for_vllm(self):
         """vllm honours the user's ``max_tokens`` — must NOT be stripped."""
         backend = _make_backend(_make_config())  # name="vllm" by default
-        backend._replicas_awake = True
+        backend._lifecycle.mark_awake(ModelRole.ROLLOUT)
         mock_manager = MagicMock()
         mock_manager.generate = AsyncMock(return_value="tok")
         backend._server_manager = mock_manager
@@ -291,9 +295,8 @@ class TestAsyncGenerate:
     async def test_generate_wakes_slept_replicas_before_sampling(self):
         """A direct /asample after training must not dispatch into slept vLLM."""
         backend = _make_backend(_make_config(param_offload=True))
-        backend._replicas_awake = False
         call_order = []
-        backend.actor_rollout_wg.to.side_effect = lambda **_: call_order.append("offload")
+        backend.actor_rollout_wg.to_actor.side_effect = lambda **_: call_order.append("offload")
         backend.checkpoint_manager.wake_up_replicas = AsyncMock()
         backend.checkpoint_manager.wake_up_replicas.side_effect = lambda: call_order.append("wake")
         mock_manager = MagicMock()
@@ -303,14 +306,14 @@ class TestAsyncGenerate:
         result = await backend.generate("rid", [1], {"temperature": 0.5})
 
         assert result == "tok"
-        backend.actor_rollout_wg.to.assert_called_once_with(
+        backend.actor_rollout_wg.to_actor.assert_called_once_with(
             device="cpu",
             model=True,
-            optimizer=False,
+            optimizer=True,
             grad=True,
         )
         backend.checkpoint_manager.wake_up_replicas.assert_awaited_once()
-        assert backend._replicas_awake is True
+        assert backend._lifecycle.awake_roles == {ModelRole.ROLLOUT}
         mock_manager.generate.assert_awaited_once()
         assert call_order == ["offload", "wake", "generate"]
 
@@ -318,7 +321,6 @@ class TestAsyncGenerate:
     async def test_concurrent_generate_calls_share_one_wake_transition(self):
         """Concurrent samples serialize only the slept -> awake transition."""
         backend = _make_backend(_make_config())
-        backend._replicas_awake = False
         wake_started = asyncio.Event()
         release_wake = asyncio.Event()
 
@@ -343,51 +345,90 @@ class TestAsyncGenerate:
         assert mock_manager.generate.await_count == 3
 
 
+class TestWorkerSpawn:
+    def test_spawn_worker_groups_passes_profile_steps_for_torch(self):
+        config = _make_config()
+        config.global_profiler = {"tool": "torch", "steps": [1, 3]}
+        backend = object.__new__(ColocatedBackend)
+        backend.config = config
+
+        wg = MagicMock()
+        wg.spawn.return_value = {"actor": "wg"}
+
+        with (
+            patch(f"{_BACKEND_MODULE}.RayResourcePool") as mock_pool,
+            patch(f"{_BACKEND_MODULE}.create_colocated_worker_cls", return_value="worker_dict_cls"),
+            patch(f"{_BACKEND_MODULE}.RayWorkerGroup", return_value=wg) as mock_wg_cls,
+        ):
+            result = backend._spawn_worker_groups({"actor": object()})
+
+        assert result == {"actor": "wg"}
+        mock_pool.assert_called_once()
+        mock_wg_cls.assert_called_once_with(
+            resource_pool=mock_pool.return_value,
+            ray_cls_with_init="worker_dict_cls",
+            profile_steps=[1, 3],
+        )
+        wg.spawn.assert_called_once_with(prefix_set=dict.fromkeys(["actor"]).keys())
+
+    def test_spawn_worker_groups_requires_nsys_worker_options(self):
+        config = _make_config()
+        config.global_profiler = {"tool": "nsys", "steps": [1], "global_tool_config": {"nsys": {}}}
+        backend = object.__new__(ColocatedBackend)
+        backend.config = config
+
+        with (
+            patch(f"{_BACKEND_MODULE}.RayResourcePool"),
+            patch(f"{_BACKEND_MODULE}.create_colocated_worker_cls", return_value="worker_dict_cls"),
+        ):
+            with pytest.raises(ValueError, match="worker_nsight_options"):
+                backend._spawn_worker_groups({"actor": object()})
+
+
 class TestReplicaLifecycle:
     """Test the server-side sleep/wake lifecycle management."""
 
     def _make_lifecycle_backend(self):
         backend = _make_backend(_make_config())
         backend.checkpoint_manager = MagicMock()
-        backend._replicas_awake = True
+        backend._lifecycle.mark_awake(ModelRole.ROLLOUT)
         backend.ref_policy_wg = backend.actor_rollout_wg
         return backend
 
-    def test_offload_actor_if_enabled_is_noop_without_param_offload(self):
+    def test_lifecycle_noops_when_server_offload_disabled(self):
         backend = self._make_lifecycle_backend()
-        backend._actor_param_offload = False
+        backend._enable_offload = False
+        backend._lifecycle.enable_offload = False
 
-        backend._offload_actor_if_enabled("test")
+        backend._prepare_model_roles({ModelRole.ROLLOUT}, reason="test")
 
-        backend.actor_rollout_wg.to.assert_not_called()
+        backend.actor_rollout_wg.to_actor.assert_not_called()
+        backend.checkpoint_manager.sleep_replicas.assert_not_called()
+        backend.checkpoint_manager.wake_up_replicas.assert_not_called()
 
-    def test_offload_actor_if_enabled_moves_actor_state_when_param_offload_enabled(self):
+    def test_lifecycle_moves_actor_to_cpu_when_rollout_is_required(self):
         backend = self._make_lifecycle_backend()
-        backend._actor_param_offload = True
-        backend._actor_optimizer_offload = True
 
-        backend._offload_actor_if_enabled("test")
+        backend._prepare_model_roles({ModelRole.ROLLOUT}, reason="test")
 
-        backend.actor_rollout_wg.to.assert_called_once_with(
+        backend.actor_rollout_wg.to_actor.assert_called_once_with(
             device="cpu",
             model=True,
             optimizer=True,
             grad=True,
         )
+        assert backend._lifecycle.awake_roles == {ModelRole.ROLLOUT}
 
-    def test_offload_actor_if_enabled_forwards_optimizer_flag(self):
+    def test_lifecycle_wakes_actor_after_rollout(self):
         backend = self._make_lifecycle_backend()
-        backend._actor_param_offload = True
-        backend._actor_optimizer_offload = False
+        backend._prepare_model_roles({ModelRole.ROLLOUT}, reason="rollout")
 
-        backend._offload_actor_if_enabled("test")
+        backend._prepare_model_roles({ModelRole.ACTOR}, reason="actor")
 
-        backend.actor_rollout_wg.to.assert_called_once_with(
-            device="cpu",
-            model=True,
-            optimizer=False,
-            grad=True,
-        )
+        backend.checkpoint_manager.sleep_replicas.assert_called_once()
+        backend.actor_rollout_wg.to_actor.assert_any_call(device="cpu", model=True, optimizer=True, grad=True)
+        backend.actor_rollout_wg.to_actor.assert_any_call(device="device", model=True, optimizer=True, grad=True)
+        assert backend._lifecycle.awake_roles == {ModelRole.ACTOR}
 
     def test_update_weights_sleeps_then_updates_then_marks_awake(self):
         """update_weights() does: sleep → update → mark awake."""
@@ -400,18 +441,18 @@ class TestReplicaLifecycle:
         backend.update_weights()
 
         assert call_order == ["sleep", "update"]
-        assert backend._replicas_awake is True
+        assert backend._lifecycle.awake_roles == {ModelRole.ROLLOUT}
 
     def test_compute_log_prob_sleeps_first(self):
         """compute_log_prob() sleeps replicas before running FSDP forward."""
         backend = self._make_lifecycle_backend()
-        assert backend._replicas_awake is True
+        assert ModelRole.ROLLOUT in backend._lifecycle.awake_roles
 
         backend.compute_log_prob("data")
 
         backend.checkpoint_manager.sleep_replicas.assert_called_once()
         backend.actor_rollout_wg.compute_log_prob.assert_called_once_with("data")
-        assert backend._replicas_awake is False
+        assert backend._lifecycle.awake_roles == {ModelRole.ACTOR}
 
     def test_compute_ref_log_prob_sleeps_first(self):
         """compute_ref_log_prob() sleeps replicas before running FSDP forward."""
@@ -441,6 +482,58 @@ class TestReplicaLifecycle:
 
         assert result == "result_td"
         future.get.assert_called_once_with()
+
+    def test_forward_backward_profiles_configured_steps(self):
+        """forward_backward() starts/stops verl profiling on configured Tinker training steps."""
+        backend = self._make_lifecycle_backend()
+        backend.config.global_profiler = {"steps": [1], "tool": "torch"}
+        backend.actor_rollout_wg.forward_backward.return_value = "result_td"
+
+        result = backend.forward_backward("data")
+
+        assert result == "result_td"
+        backend.actor_rollout_wg.start_profile.assert_called_once_with(role="actor")
+        backend.actor_rollout_wg.stop_profile.assert_called_once_with()
+
+    def test_forward_backward_logs_profiler_decision(self, caplog):
+        """Profiler decision logs expose the active global profiler settings."""
+        backend = self._make_lifecycle_backend()
+        backend.config.global_profiler = {"steps": [1], "tool": "torch", "save_path": "outputs/profile"}
+        backend.actor_rollout_wg.forward_backward.return_value = "result_td"
+
+        with caplog.at_level(logging.INFO, logger="ray"):
+            result = backend.forward_backward("data")
+
+        assert result == "result_td"
+        assert "[profiler] forward_backward step=1 should_profile=True" in caplog.text
+        assert "'tool': 'torch'" in caplog.text
+        assert "'save_path': 'outputs/profile'" in caplog.text
+        assert "[profiler] starting actor profiler step=1" in caplog.text
+        assert "[profiler] stopped actor profiler step=1" in caplog.text
+
+    def test_forward_backward_skips_unconfigured_profile_steps(self):
+        """Only steps listed in global_profiler.steps are profiled."""
+        backend = self._make_lifecycle_backend()
+        backend.config.global_profiler = {"steps": [2], "tool": "torch"}
+        backend.actor_rollout_wg.forward_backward.return_value = "result_td"
+
+        result = backend.forward_backward("data")
+
+        assert result == "result_td"
+        backend.actor_rollout_wg.start_profile.assert_not_called()
+        backend.actor_rollout_wg.stop_profile.assert_not_called()
+
+    def test_forward_backward_stops_profile_after_worker_error(self):
+        """A failed worker call must not leave torch profiler running."""
+        backend = self._make_lifecycle_backend()
+        backend.config.global_profiler = {"steps": [1], "tool": "torch"}
+        backend.actor_rollout_wg.forward_backward.side_effect = RuntimeError("boom")
+
+        with pytest.raises(RuntimeError, match="boom"):
+            backend.forward_backward("data")
+
+        backend.actor_rollout_wg.start_profile.assert_called_once_with(role="actor")
+        backend.actor_rollout_wg.stop_profile.assert_called_once_with()
 
     def test_optim_step_sleeps_first(self):
         """optim_step() sleeps replicas before stepping the optimizer."""
@@ -514,7 +607,7 @@ class TestReplicaLifecycle:
         backend.update_weights()
 
         assert call_order == ["sleep", "log_prob", "forward_backward", "optim_step", "update_weights"]
-        assert backend._replicas_awake is True
+        assert backend._lifecycle.awake_roles == {ModelRole.ROLLOUT}
 
         # Next training step: replicas are awake again, first op triggers sleep
         backend.compute_log_prob("d3")
@@ -688,30 +781,30 @@ class TestShutdownTeardown:
                 mock_ray.kill.assert_any_call(worker, no_restart=True)
 
 
-class TestBackendActorOffloadConfig:
-    """Tests for backend-owned actor offload config resolution."""
+class TestBackendOffloadConfig:
+    """Tests for backend-owned model lifecycle config resolution."""
 
-    @pytest.mark.parametrize("actor_strategy", ["fsdp", "veomni"])
-    def test_init_resolves_actor_offload_from_strategy_dataclass(self, actor_strategy):
+    @pytest.mark.parametrize("enable_offload", [True, False])
+    def test_init_uses_server_enable_offload(self, enable_offload):
         config = _make_config(
-            actor_strategy=actor_strategy,
             param_offload=True,
             optimizer_offload=False,
         )
+        config.server.enable_offload = enable_offload
 
         with (
             patch.object(ColocatedBackend, "_build_role_cls", return_value=({}, "actor")),
             patch.object(ColocatedBackend, "_spawn_worker_groups", return_value={}),
             patch.object(ColocatedBackend, "_init_worker_groups"),
-            patch.object(ColocatedBackend, "_offload_actor_if_enabled"),
+            patch.object(ColocatedBackend, "_prepare_model_roles"),
             patch.object(ColocatedBackend, "_init_rollout_replicas"),
             patch(f"{_BACKEND_MODULE}.need_reference_policy", return_value=False),
             patch(f"{_BACKEND_MODULE}.is_ref_in_actor", return_value=False),
         ):
             backend = ColocatedBackend(config)
 
-        assert backend._actor_param_offload is True
-        assert backend._actor_optimizer_offload is False
+        assert backend._enable_offload is enable_offload
+        assert backend._lifecycle.enable_offload is enable_offload
 
 
 class TestNoRolloutDeployment:
@@ -770,8 +863,19 @@ class TestNoRolloutDeployment:
         ):
             mock_ray.remote = MagicMock(side_effect=lambda cls: cls)
             role_cls, _ = backend._build_role_cls()
-        assert list(role_cls.values())[0].cls is TinkerActorRolloutRefWorker
+        assert list(role_cls.values())[0].cls is TinkerServerActorRolloutRefWorker
 
     def test_tinker_worker_exposes_optimizer_zero_grad(self):
         """optimizer=false load_weights depends on this registered worker method."""
         assert hasattr(TinkerActorRolloutRefWorker, "optimizer_zero_grad")
+
+    def test_tinker_worker_forwards_logical_device_to_actor_and_ref(self):
+        worker = object.__new__(TinkerServerActorRolloutRefWorker)
+        worker.actor = MagicMock()
+        worker.ref = MagicMock()
+
+        worker.to_actor("device", model=True, optimizer=True, grad=True)
+        worker.to_ref("device", model=True, optimizer=False, grad=False)
+
+        worker.actor.to.assert_called_once_with(device="device", model=True, optimizer=True, grad=True)
+        worker.ref.to.assert_called_once_with(device="device", model=True, optimizer=False, grad=False)

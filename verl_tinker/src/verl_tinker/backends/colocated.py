@@ -30,10 +30,11 @@ import threading
 from typing import Any, Optional
 
 import ray
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from verl.checkpoint_engine.base import CheckpointEngineManager
 from verl.protocol import DataProtoFuture
+from verl.single_controller.base.decorator import Dispatch, register
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
 from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.ppo.utils import Role, need_reference_policy
@@ -49,11 +50,24 @@ from ..config_utils import is_no_rollout_deployment
 from ..schemas import ServerCapabilities
 from ._loss import is_ref_in_actor, make_branching_loss
 from .backend_utils import kill_ray_actors_and_wait, remove_placement_groups_and_wait
+from .model_lifecycle import ModelLifecycle, ModelRole
 
 logger = logging.getLogger("ray")
 
 
-class NoRolloutWorker(TinkerActorRolloutRefWorker):
+class TinkerServerActorRolloutRefWorker(TinkerActorRolloutRefWorker):
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def to_actor(self, device, model=True, optimizer=True, grad=True):
+        self.actor.to(device=device, model=model, optimizer=optimizer, grad=grad)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def to_ref(self, device, model=True, optimizer=False, grad=False):
+        if self.ref is None:
+            return
+        self.ref.to(device=device, model=model, optimizer=optimizer, grad=grad)
+
+
+class NoRolloutWorker(TinkerServerActorRolloutRefWorker):
     """TinkerActorRolloutRefWorker that skips rollout (vLLM) initialization."""
 
     def _build_rollout(self, **kwargs):
@@ -87,10 +101,7 @@ class ColocatedBackend:
         self.use_kl_in_reward: bool = config.algorithm.get("use_kl_in_reward", False)
         self.use_reference_policy: bool = need_reference_policy(config)
         self._ref_in_actor: bool = is_ref_in_actor(config)
-        actor_config = omega_conf_to_dataclass(config.actor_rollout_ref.actor)
-        engine_config = actor_config.engine
-        self._actor_param_offload = bool(engine_config.param_offload)
-        self._actor_optimizer_offload = bool(engine_config.optimizer_offload)
+        self._enable_offload = bool(config.get("server", {}).get("enable_offload", True))
 
         self.actor_rollout_wg: Optional[RayWorkerGroup] = None
         self.ref_policy_wg: Optional[RayWorkerGroup] = None
@@ -98,8 +109,9 @@ class ColocatedBackend:
         self.rollout_replicas = []
         self._server_manager = None
         self._resource_pool = None
-        self._replicas_awake = True
+        self._lifecycle: ModelLifecycle | None = None
         self._replica_wake_lock = asyncio.Lock()
+        self._profile_step = 0
 
         # Ray workers import model.external_lib through HFModelConfig, but rollout
         # registries are process-local, so the backend must import them before
@@ -111,8 +123,14 @@ class ColocatedBackend:
         role_cls, actor_role = self._build_role_cls()
         all_wg = self._spawn_worker_groups(role_cls)
         self._init_worker_groups(all_wg, actor_role)
+        self._lifecycle = ModelLifecycle.create(
+            enable_offload=self._enable_offload,
+            has_rollout=not self._no_rollout_deployment,
+            has_ref=bool(self.ref_policy_wg is not None and not self._ref_in_actor),
+            actor_awake=True,
+        )
         if not self._no_rollout_deployment:
-            self._offload_actor_if_enabled("before rollout init")
+            self._prepare_model_roles(set(), reason="before rollout init")
             self._init_rollout_replicas()
         else:
             logger.info("No-rollout deployment: skipping rollout replica initialization")
@@ -160,7 +178,7 @@ class ColocatedBackend:
                 Role.ActorRollout if ref_in_actor or not need_reference_policy(config) else Role.ActorRolloutRef
             )
 
-        worker_cls = NoRolloutWorker if self._no_rollout_deployment else TinkerActorRolloutRefWorker
+        worker_cls = NoRolloutWorker if self._no_rollout_deployment else TinkerServerActorRolloutRefWorker
         role_cls = {
             str(actor_role): RayClassWithInitArgs(
                 cls=ray.remote(worker_cls),
@@ -185,7 +203,20 @@ class ColocatedBackend:
             name_prefix="gpu_serve",
         )
         worker_dict_cls = create_colocated_worker_cls(class_dict=role_cls)
-        wg = RayWorkerGroup(resource_pool=self._resource_pool, ray_cls_with_init=worker_dict_cls)
+        wg_kwargs = {}
+        if OmegaConf.select(config, "global_profiler.steps") is not None:
+            wg_kwargs["profile_steps"] = OmegaConf.to_container(
+                OmegaConf.select(config, "global_profiler.steps"), resolve=True
+            )
+            if OmegaConf.select(config, "global_profiler.tool") == "nsys":
+                worker_nsight_options = OmegaConf.select(
+                    config,
+                    "global_profiler.global_tool_config.nsys.worker_nsight_options",
+                )
+                if worker_nsight_options is None:
+                    raise ValueError("worker_nsight_options must be set when using nsys with profile_steps")
+                wg_kwargs["worker_nsight_options"] = OmegaConf.to_container(worker_nsight_options)
+        wg = RayWorkerGroup(resource_pool=self._resource_pool, ray_cls_with_init=worker_dict_cls, **wg_kwargs)
         return wg.spawn(prefix_set=role_cls.keys())
 
     def _init_worker_groups(self, all_wg: dict, actor_role: Role):
@@ -213,17 +244,72 @@ class ColocatedBackend:
         if need_reference_policy(config):
             self.ref_policy_wg = self.actor_rollout_wg
 
-    def _offload_actor_if_enabled(self, reason: str):
-        """Offload actor state when the resolved actor engine config enables it."""
-        if self.actor_rollout_wg is None or not self._actor_param_offload:
+    def _prepare_model_roles(self, required_roles: set[ModelRole], *, reason: str):
+        if self._lifecycle is None:
             return
-        logger.info("[engine] offloading actor %s", reason)
-        self.actor_rollout_wg.to(
-            device="cpu",
-            model=True,
-            optimizer=self._actor_optimizer_offload,
-            grad=True,
+
+        logger.info("[engine] lifecycle prepare roles=%s reason=%s", sorted(r.value for r in required_roles), reason)
+        self._lifecycle.prepare(
+            required_roles,
+            sleep_role=lambda role: self._sleep_model_role(role, reason=reason),
+            wake_role=lambda role: self._wake_model_role(role, reason=reason),
         )
+
+    async def _prepare_model_roles_async(self, required_roles: set[ModelRole], *, reason: str):
+        if self._lifecycle is None or not self._lifecycle.enable_offload:
+            return
+
+        required = required_roles & self._lifecycle.available_roles
+        logger.info("[engine] lifecycle prepare roles=%s reason=%s", sorted(r.value for r in required), reason)
+
+        for role in list(self._lifecycle.awake_roles - required):
+            self._sleep_model_role(role, reason=reason)
+            self._lifecycle.mark_asleep(role)
+
+        for role in required - self._lifecycle.awake_roles:
+            await self._wake_model_role_async(role, reason=reason)
+            self._lifecycle.mark_awake(role)
+
+    def _sleep_model_role(self, role: ModelRole, *, reason: str):
+        if role == ModelRole.ACTOR:
+            self._move_actor("cpu", reason=f"sleep actor {reason}")
+        elif role == ModelRole.REF:
+            self._move_ref("cpu", reason=f"sleep ref {reason}")
+        elif role == ModelRole.ROLLOUT and self.checkpoint_manager is not None:
+            logger.info("[engine] sleeping rollout %s", reason)
+            self.checkpoint_manager.sleep_replicas()
+
+    def _wake_model_role(self, role: ModelRole, *, reason: str):
+        if role == ModelRole.ACTOR:
+            self._move_actor("device", reason=f"wake actor {reason}")
+        elif role == ModelRole.REF:
+            self._move_ref("device", reason=f"wake ref {reason}")
+        elif role == ModelRole.ROLLOUT and self.checkpoint_manager is not None:
+            logger.info("[engine] waking rollout %s", reason)
+            result = self.checkpoint_manager.wake_up_replicas()
+            if asyncio.iscoroutine(result):
+                self._run_all([result])
+
+    async def _wake_model_role_async(self, role: ModelRole, *, reason: str):
+        if role == ModelRole.ROLLOUT and self.checkpoint_manager is not None:
+            logger.info("[engine] waking rollout %s", reason)
+            result = self.checkpoint_manager.wake_up_replicas()
+            if asyncio.iscoroutine(result):
+                await result
+            return
+        self._wake_model_role(role, reason=reason)
+
+    def _move_actor(self, device: str, *, reason: str):
+        if self.actor_rollout_wg is None:
+            return
+        logger.info("[engine] moving actor to %s: %s", device, reason)
+        self.actor_rollout_wg.to_actor(device=device, model=True, optimizer=True, grad=True)
+
+    def _move_ref(self, device: str, *, reason: str):
+        if self.ref_policy_wg is None or self._ref_in_actor:
+            return
+        logger.info("[engine] moving ref to %s: %s", device, reason)
+        self.ref_policy_wg.to_ref(device=device, model=True, optimizer=False, grad=False)
 
     def _init_rollout_replicas(self):
         """Initialize vLLM rollout replicas and checkpoint manager.
@@ -270,6 +356,12 @@ class ColocatedBackend:
             replicas=self.rollout_replicas,
         )
 
+        if not self._enable_offload:
+            if self._lifecycle is not None:
+                self._lifecycle.mark_awake(ModelRole.ROLLOUT)
+            logger.info("[engine] server offload disabled: leaving actor/ref/rollout resident after init")
+            return
+
         # Bring the engine into a deterministic fully-slept post-init state.
         #
         # The bug being avoided: verl's ``rollout.update_weights`` only resumes
@@ -287,13 +379,14 @@ class ColocatedBackend:
         # generate so both ``weights`` AND ``kv_cache`` are mapped, then
         # (2) drive ``sleep_replicas`` once. Step (2) succeeds because step
         # (1) ensured everything is mapped, and the engine ends init in
-        # ``_replicas_awake=False``. Subsequent ``_ensure_replicas_slept``
+        # rollout marked asleep in the lifecycle tracker. Subsequent training
         # calls early-return; the first /asample (or full ``update_weights``)
         # re-wakes vLLM and rebuilds the invariant ``sleep is preceded by
         # full wake``.
         self._warmup_replicas()
         self.checkpoint_manager.sleep_replicas()
-        self._replicas_awake = False
+        if self._lifecycle is not None:
+            self._lifecycle.mark_asleep(ModelRole.ROLLOUT)
         logger.info("[engine] post-init transition: warmup + sleep done")
 
     def _is_vexact_rollout(self) -> bool:
@@ -369,34 +462,45 @@ class ColocatedBackend:
             return ray.get(result)
         return result
 
+    # ==================== Profiling ====================
+
+    def _next_profile_step(self) -> int:
+        self._profile_step += 1
+        return self._profile_step
+
+    def _should_profile_step(self, step: int) -> bool:
+        steps = OmegaConf.select(self.config, "global_profiler.steps")
+        if steps is None:
+            return False
+        return step in set(list(steps))
+
+    def _global_profiler_settings(self) -> dict[str, Any]:
+        steps = OmegaConf.select(self.config, "global_profiler.steps")
+        if steps is not None:
+            steps = list(steps)
+        return {
+            "tool": OmegaConf.select(self.config, "global_profiler.tool"),
+            "steps": steps,
+            "save_path": OmegaConf.select(self.config, "global_profiler.save_path"),
+        }
+
+    def _start_profile(self, step: int) -> None:
+        if self.actor_rollout_wg is None:
+            logger.info("[profiler] skip start step=%s reason=no actor_rollout_wg", step)
+            return
+        logger.info("[profiler] starting actor profiler step=%s settings=%s", step, self._global_profiler_settings())
+        self.actor_rollout_wg.start_profile(role="actor")
+        logger.info("[profiler] start dispatched step=%s", step)
+
+    def _stop_profile(self, step: int) -> None:
+        if self.actor_rollout_wg is None:
+            logger.info("[profiler] skip stop step=%s reason=no actor_rollout_wg", step)
+            return
+        logger.info("[profiler] stopping actor profiler step=%s", step)
+        self.actor_rollout_wg.stop_profile()
+        logger.info("[profiler] stopped actor profiler step=%s", step)
+
     # ==================== Replica lifecycle ====================
-
-    def _ensure_replicas_slept(self):
-        """Sleep vLLM replicas if they are currently awake.
-
-        In the standard VeRL trainer, sleep_replicas() is called after
-        generate_sequences() and before training ops (ray_trainer.py:1310).
-        In the remote architecture the client's GPUServerReplica.sleep() is a
-        no-op, so the server must manage the sleep/wake lifecycle itself.
-
-        Idempotent: skips if replicas are already slept.  This prevents the
-        CUDA error that occurs when CuMemAllocator.sleep() is called on
-        already-unmapped memory. The complementary case — the first sleep
-        firing before any generate has populated the KV-cache pool — is
-        handled at engine init by ``_warmup_replicas``.
-
-        No-op in no_rollout_deployment mode (no checkpoint_manager).
-        """
-        if self._no_rollout_deployment:
-            return
-        if not self._replicas_awake:
-            return
-        self.checkpoint_manager.sleep_replicas()
-        self._replicas_awake = False
-
-    def _mark_replicas_awake(self):
-        """Mark replicas as awake after update_weights() wakes them."""
-        self._replicas_awake = True
 
     async def _ensure_replicas_awake_for_generation(self):
         """Wake rollout replicas once before allowing concurrent generation.
@@ -407,17 +511,11 @@ class ColocatedBackend:
         """
         if self._no_rollout_deployment:
             return
-        if self._replicas_awake:
+        if not self._enable_offload:
             return
 
         async with self._replica_wake_lock:
-            if self._replicas_awake:
-                return
-            self._offload_actor_if_enabled("before rollout wake")
-            result = self.checkpoint_manager.wake_up_replicas()
-            if asyncio.iscoroutine(result):
-                await result
-            self._replicas_awake = True
+            await self._prepare_model_roles_async({ModelRole.ROLLOUT}, reason="before generation")
 
     # ==================== Operations ====================
 
@@ -448,14 +546,14 @@ class ColocatedBackend:
 
     def compute_log_prob(self, data):
         with self._engine_lock:
-            self._ensure_replicas_slept()
+            self._prepare_model_roles({ModelRole.ACTOR}, reason="compute_log_prob")
             return self.actor_rollout_wg.compute_log_prob(data)
 
     def compute_ref_log_prob(self, data):
         with self._engine_lock:
             if self.ref_policy_wg is None:
                 raise RuntimeError("Reference policy not initialized (need_reference_policy is False)")
-            self._ensure_replicas_slept()
+            self._prepare_model_roles({ModelRole.REF}, reason="compute_ref_log_prob")
             return self.ref_policy_wg.compute_ref_log_prob(data)
 
     def _ensure_ref_log_prob_for_kl_loss(self, data):
@@ -476,6 +574,8 @@ class ColocatedBackend:
                 "KL loss is enabled but reference policy is not initialized; "
                 "cannot populate missing ref_log_prob before forward_backward"
             )
+
+        self._prepare_model_roles({ModelRole.REF}, reason="kl ref_log_prob")
 
         ref_input = data.clone()
         tu.assign_non_tensor_data(ref_input, "compute_loss", False)
@@ -530,14 +630,28 @@ class ColocatedBackend:
 
     def forward_backward(self, data):
         with self._engine_lock:
-            self._ensure_replicas_slept()
+            profile_step = self._next_profile_step()
+            should_profile = self._should_profile_step(profile_step)
+            logger.info(
+                "[profiler] forward_backward step=%s should_profile=%s settings=%s",
+                profile_step,
+                should_profile,
+                self._global_profiler_settings(),
+            )
             self._ensure_ref_log_prob_for_kl_loss(data)
-            result = self.actor_rollout_wg.forward_backward(data)
-            return self._wait_for_nonblocking_result(result)
+            self._prepare_model_roles({ModelRole.ACTOR}, reason="forward_backward")
+            if should_profile:
+                self._start_profile(profile_step)
+            try:
+                result = self.actor_rollout_wg.forward_backward(data)
+                return self._wait_for_nonblocking_result(result)
+            finally:
+                if should_profile:
+                    self._stop_profile(profile_step)
 
     def optim_step(self, optim_step_params: dict[str, Any] | None = None):
         with self._engine_lock:
-            self._ensure_replicas_slept()
+            self._prepare_model_roles({ModelRole.ACTOR}, reason="optim_step")
             if optim_step_params is None:
                 return self.actor_rollout_wg.optimizer_step()
             return self.actor_rollout_wg.optimizer_step(optim_step_params=optim_step_params)
@@ -554,18 +668,24 @@ class ColocatedBackend:
         with self._engine_lock:
             if self._no_rollout_deployment:
                 raise RuntimeError("update_weights is not available in no_rollout_deployment mode")
-            self._ensure_replicas_slept()
+            self._prepare_model_roles({ModelRole.ACTOR}, reason="update_weights")
             self.checkpoint_manager.update_weights()
-            self._mark_replicas_awake()
+            if self._enable_offload:
+                self._move_actor("cpu", reason="after update_weights")
+                if self._lifecycle is not None:
+                    self._lifecycle.mark_asleep(ModelRole.ACTOR)
+                    self._lifecycle.mark_awake(ModelRole.ROLLOUT)
 
     def save_checkpoint(self, local_path: str, global_step: int = 0, max_ckpt_to_keep=None, **kwargs):
         with self._engine_lock:
+            self._prepare_model_roles({ModelRole.ACTOR}, reason="save_checkpoint")
             self.actor_rollout_wg.save_checkpoint(
                 local_path, global_step=global_step, max_ckpt_to_keep=max_ckpt_to_keep
             )
 
     def load_checkpoint(self, checkpoint_path: str, zero_optimizer_grad: bool = False, **kwargs):
         with self._engine_lock:
+            self._prepare_model_roles({ModelRole.ACTOR}, reason="load_checkpoint")
             self.actor_rollout_wg.load_checkpoint(checkpoint_path)
             if zero_optimizer_grad:
                 self.actor_rollout_wg.optimizer_zero_grad()

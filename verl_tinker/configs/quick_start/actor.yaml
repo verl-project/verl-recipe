@@ -5,13 +5,15 @@ server:
   checkpoint_dir: ${oc.env:TINKER_CHECKPOINT_DIR,/tmp/tinker-checkpoints}
   server_max_runtime: ${oc.env:TINKER_SERVER_MAX_RUNTIME,null} # an optional variable for the maximum uptime of the server, null means infinite
   max_concurrent_samples: ${oc.env:TINKER_SERVER_MAX_CONCURRENT_SAMPLES,32}
+  enable_offload: true
+  auto_merge_verl_default_config: true
 
 actor_rollout_ref: # this is the same as verl's config, this field is ALWAYS required.
   actor:
     strategy: veomni
     use_kl_loss: false
     veomni:
-      cross_entropy_loss_implementation: eager
+      cross_entropy_loss_implementation: chunk_loss
     optim:
       lr_scheduler_type: constant
       lr: 1.0e-06
@@ -21,10 +23,6 @@ actor_rollout_ref: # this is the same as verl's config, this field is ALWAYS req
     enable: false
   model:
     path: ${oc.env:TINKER_SERVER_MODEL,Qwen/Qwen3-1.7B}
-
-reward:
-  reward_model:
-    enable: false
 
 algorithm:
   adv_estimator: sft
