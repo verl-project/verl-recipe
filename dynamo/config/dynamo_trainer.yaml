@@ -1,0 +1,38 @@
+# Hydra config for the recipe-side dynamo rollout backend.
+#
+# Inherits everything from the standard ppo_trainer; the only deltas are:
+#   * actor_rollout_ref.rollout.name=dynamo  -> resolves to recipe.dynamo via
+#     the static entries in verl.workers.rollout.base._ROLLOUT_REGISTRY and
+#     verl.workers.rollout.replica.RolloutReplicaRegistry
+#   * actor_rollout_ref.rollout.mode=async   -> dynamo only ships an async
+#     ServerAdapter (mirrors trtllm/vllm async-server pattern)
+#
+# Anything dynamo-specific (router_mode, frontend_http_port, namespace,
+# etc.) lives under actor_rollout_ref.rollout.engine_kwargs.dynamo and is
+# parsed inside DynamoHttpServer (see dynamo_async_server.py:_dynamo_cfg).
+
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+actor_rollout_ref:
+  rollout:
+    name: dynamo
+    mode: async
+    engine_kwargs:
+      dynamo:
+        # All keys optional; sane defaults applied in DynamoHttpServer.
+        # namespace: verl_dynamo
+        # router_mode: kv               # round-robin | kv | random | least-loaded
+        # frontend_http_port: 0         # 0 = auto-assign on master node
+        # etcd_port: 0                  # 0 = auto-assign
+        # etcd_peer_port: 0             # 0 = auto-assign
+        # nats_port: 0                  # 0 = auto-assign
+        # served_model_name: <str>      # falls back to model_config.local_path
+
+trainer:
+  project_name: verl-dynamo
