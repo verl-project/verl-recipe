@@ -42,6 +42,7 @@ from tinker.types import (
 )
 
 from .backends.colocated import ColocatedBackend
+from .backends.teacher import TeacherInferenceBackend
 from .schemas import StatusResponse
 from .tinker_ops import (
     GLOBAL_MODEL_ID,
@@ -200,6 +201,7 @@ class TinkerServer:
         self._status = ServerStatus.INITIALIZING
         self._error: Optional[str] = None
         self._engine: Optional[ColocatedBackend] = None
+        self._teacher_backend: Optional[TeacherInferenceBackend] = None
         self._gpu_executor = ThreadPoolExecutor(max_workers=1)
         self._op_gate = FifoReadWriteGate(
             max_readers=config["server"].get("max_concurrent_samples", 16),
@@ -214,6 +216,7 @@ class TinkerServer:
         self._shutdown_task: Optional[asyncio.Task] = None
         self._sampling_to_model_path: dict[str, str] = {}
         self._sampling_to_base_model: dict[str, str] = {}
+        self._sampling_to_teacher: dict[str, str] = {}
         self._model_to_base_model: dict[str, str] = {}
         self._saved_state_paths: dict[str, str] = {}
         self._model_metadata: dict[str, dict[str, Any]] = {}
@@ -296,6 +299,8 @@ class TinkerServer:
     def _init_engine(self):
         try:
             self._engine = ColocatedBackend(self.config)
+            if TeacherInferenceBackend.is_enabled(self.config):
+                self._teacher_backend = TeacherInferenceBackend(self.config)
             if self._shutdown_started:
                 logger.info("Tinker server initialization complete after shutdown was requested")
             else:
@@ -303,6 +308,7 @@ class TinkerServer:
                 logger.info("Tinker server initialization complete")
         except Exception as e:
             logger.exception(f"Initialization failed: {e}")
+            self._shutdown_current_engine("failed initialization")
             if not self._shutdown_started:
                 self._status = ServerStatus.ERROR
                 self._error = str(e)
@@ -333,6 +339,16 @@ class TinkerServer:
         logger.info("Shutdown requested: cleanup complete; supervisor may stop Tinker server deployment")
 
     def _shutdown_current_engine(self, reason: str) -> None:
+        teacher_backend = getattr(self, "_teacher_backend", None)
+        if teacher_backend is not None:
+            try:
+                teacher_backend.shutdown()
+            except Exception:
+                logger.exception("%s requested: teacher shutdown failed", reason.capitalize())
+            finally:
+                if self._teacher_backend is teacher_backend:
+                    self._teacher_backend = None
+
         engine = self._engine
         if engine is None:
             logger.info("%s requested with no initialized engine to shut down", reason.capitalize())
@@ -426,7 +442,7 @@ class TinkerServer:
 
     @app.api_route("/api/v1/get_server_capabilities", methods=["GET", "POST"])
     async def get_server_capabilities(self):
-        return get_supported_models(self._get_engine())
+        return get_supported_models(self._get_engine(), getattr(self, "_teacher_backend", None))
 
     @app.post("/api/v1/client/config")
     async def client_config(self):
@@ -469,7 +485,10 @@ class TinkerServer:
     @app.get("/api/v1/sessions/{session_id}")
     async def get_session(self, session_id: str):
         self._reject_if_shutting_down()
-        return {"training_run_ids": [GLOBAL_MODEL_ID], "sampler_ids": [GLOBAL_SAMPLING_SESSION_ID]}
+        return {
+            "training_run_ids": [GLOBAL_MODEL_ID],
+            "sampler_ids": [GLOBAL_SAMPLING_SESSION_ID, *self._sampling_to_teacher],
+        }
 
     @app.post("/api/v1/sessions")
     async def list_sessions(self):
@@ -488,23 +507,54 @@ class TinkerServer:
     @app.post("/api/v1/create_sampling_session", response_model=CreateSamplingSessionResponse)
     async def create_sampling_session(self, req: CreateSamplingSessionRequest):
         self._reject_if_shutting_down()
+        sampler_id = GLOBAL_SAMPLING_SESSION_ID
+        teacher_backend = getattr(self, "_teacher_backend", None)
+        if teacher_backend is not None:
+            try:
+                teacher_key = teacher_backend.resolve(req.base_model, req.model_path)
+            except ValueError as exc:
+                raise HTTPException(HTTPStatus.BAD_REQUEST, str(exc)) from exc
+            if teacher_key is not None:
+                teacher_model_path = teacher_backend.get_model_path(teacher_key)
+                if req.model_path is not None and req.model_path != teacher_model_path:
+                    raise HTTPException(
+                        HTTPStatus.BAD_REQUEST,
+                        "Teacher models are frozen and do not support alternate checkpoint paths: "
+                        f"configured={teacher_model_path!r}, requested={req.model_path!r}",
+                    )
+                sampler_id = f"verl-remote-teacher-sampler-{uuid.uuid4().hex}"
+                self._sampling_to_teacher[sampler_id] = teacher_key
+                self._sampling_to_model_path[sampler_id] = teacher_model_path
+
         if req.model_path:
-            self._sampling_to_model_path[GLOBAL_SAMPLING_SESSION_ID] = req.model_path
+            self._sampling_to_model_path[sampler_id] = req.model_path
         if req.base_model:
-            self._sampling_to_base_model[GLOBAL_SAMPLING_SESSION_ID] = req.base_model
+            self._sampling_to_base_model[sampler_id] = req.base_model
+        if sampler_id == GLOBAL_SAMPLING_SESSION_ID and (req.base_model or req.model_path):
+            actor_name = get_configured_model_name(self._get_engine())
+            identifiers = {value for value in (req.base_model, req.model_path) if value}
+            if actor_name not in identifiers and not any(value.startswith("tinker://") for value in identifiers):
+                logger.warning(
+                    "No configured teacher matched sampling identifiers %s; routing to actor %s",
+                    sorted(identifiers),
+                    actor_name,
+                )
         return CreateSamplingSessionResponse(
             type="create_sampling_session",
-            sampling_session_id=GLOBAL_SAMPLING_SESSION_ID,
+            sampling_session_id=sampler_id,
         )
 
     @app.get("/api/v1/samplers/{sampler_id}")
     async def get_sampler(self, sampler_id: str):
         engine = self._get_engine()
-        base_model = self._sampling_to_base_model.get(sampler_id, get_configured_model_name(engine))
+        if sampler_id != GLOBAL_SAMPLING_SESSION_ID and sampler_id not in self._sampling_to_teacher:
+            raise HTTPException(HTTPStatus.NOT_FOUND, f"Unknown sampling session: {sampler_id}")
+        default_model = self._sampling_to_model_path.get(sampler_id, get_configured_model_name(engine))
+        base_model = self._sampling_to_base_model.get(sampler_id, default_model)
         return {
             "sampler_id": sampler_id,
             "base_model": base_model,
-            "model_path": self._sampling_to_model_path.get(sampler_id, str(engine.config.actor_rollout_ref.model.path)),
+            "model_path": default_model,
         }
 
     @app.post("/api/v1/weights_info")
@@ -602,10 +652,19 @@ class TinkerServer:
     @app.post("/api/v1/asample")
     async def asample(self, req: SampleRequest):
         self._reject_if_shutting_down()
+        sampler_id = req.sampling_session_id or GLOBAL_SAMPLING_SESSION_ID
+        if sampler_id == GLOBAL_SAMPLING_SESSION_ID:
+            sampling_engine = self._get_engine()
+        else:
+            teacher_key = self._sampling_to_teacher.get(sampler_id)
+            teacher_backend = getattr(self, "_teacher_backend", None)
+            if teacher_key is None or teacher_backend is None:
+                raise HTTPException(HTTPStatus.NOT_FOUND, f"Unknown sampling session: {sampler_id}")
+            sampling_engine = teacher_backend.get_client(teacher_key)
         request_id = uuid.uuid4().hex
         self._schedule(
             request_id,
-            tinker_sample(self._get_engine(), req),
+            tinker_sample(sampling_engine, req),
             ScheduledOpKind.SAMPLE,
         )
         return self._future_envelope(request_id, model_id=None)

@@ -83,7 +83,7 @@ async def test_sample_formats_topk_prompt_logprobs_for_current_tinker_schema():
 
     result = await sample(engine, req)
 
-    expected = [[(11, -1.1), (12, -2.2)], [(13, -3.3)], [(0, 0.0), (0, 0.0)]]
+    expected = [[], [(11, -1.1), (12, -2.2)], [(13, -3.3)]]
     assert result["topk_prompt_logprobs"] == expected
     assert not isinstance(result["topk_prompt_logprobs"], dict)
     assert engine.sampling_params["prompt_logprobs"] == 2
@@ -91,6 +91,48 @@ async def test_sample_formats_topk_prompt_logprobs_for_current_tinker_schema():
     if hasattr(SampleResponse, "model_validate"):
         response = SampleResponse.model_validate(result)
         assert response.topk_prompt_logprobs == expected
+
+
+@pytest.mark.asyncio
+async def test_sample_fans_out_multiple_sequences_and_offsets_seed():
+    req = SimpleNamespace(
+        prompt=_Prompt(),
+        sampling_params=SimpleNamespace(max_tokens=4, temperature=0.7, top_p=0.9, top_k=20, stop=None, seed=10),
+        num_samples=3,
+        prompt_logprobs=False,
+        topk_prompt_logprobs=0,
+    )
+
+    class MultiEngine(_Engine):
+        def __init__(self):
+            super().__init__()
+            self.seeds = []
+
+        async def generate(self, request_id, prompt_ids, sampling_params):
+            self.seeds.append(sampling_params["seed"])
+            seed = sampling_params["seed"]
+            return SimpleNamespace(token_ids=[seed], log_probs=[-0.1], stop_reason="stop", extra_fields={})
+
+    engine = MultiEngine()
+    result = await sample(engine, req)
+
+    assert engine.seeds == [10, 11, 12]
+    assert [sequence["tokens"] for sequence in result["sequences"]] == [[10], [11], [12]]
+
+
+@pytest.mark.asyncio
+async def test_sample_scalar_prompt_logprobs_have_leading_unscored_token():
+    req = SimpleNamespace(
+        prompt=_Prompt(),
+        sampling_params=SimpleNamespace(max_tokens=1, temperature=1, top_p=1, top_k=-1, stop=None, seed=None),
+        num_samples=1,
+        prompt_logprobs=True,
+        topk_prompt_logprobs=0,
+    )
+
+    result = await sample(_Engine(), req)
+
+    assert result["prompt_logprobs"] == [None, -1.1, -3.3]
 
 
 @pytest.mark.asyncio

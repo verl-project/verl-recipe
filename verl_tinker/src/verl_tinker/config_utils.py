@@ -25,6 +25,7 @@ _DEFAULT_TOP_LEVEL_SECTIONS = (
     "actor_rollout_ref",
     "algorithm",
     "data",
+    "distillation",
     "trainer",
 )
 _SUPPORTED_TOP_LEVEL_SECTIONS = (
@@ -32,6 +33,7 @@ _SUPPORTED_TOP_LEVEL_SECTIONS = (
     "actor_rollout_ref",
     "algorithm",
     "data",
+    "distillation",
     "trainer",
     "global_profiler",
     "external_libs",
@@ -339,6 +341,17 @@ def _validate_config(config) -> list[str]:
 
     if bool(config.get("critic", {}).get("enable", False)):
         errors.append("critic support has been removed from the Tinker server; set critic.enable=false")
+
+    if bool(config.get("distillation", {}).get("enabled", False)):
+        try:
+            distillation_config = omega_conf_to_dataclass(config.distillation)
+            for teacher in distillation_config.teacher_models.values():
+                if teacher.inference.name not in {"vllm", "sglang"}:
+                    raise ValueError(
+                        f"teacher inference engine {teacher.inference.name!r} is unsupported; use 'vllm' or 'sglang'"
+                    )
+        except Exception as e:
+            errors.append(f"Teacher config validation: {e}")
 
     if is_no_rollout_deployment(config):
         if not is_enable_false(config, "actor_rollout_ref.ref"):

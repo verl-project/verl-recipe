@@ -115,6 +115,85 @@ async def test_get_info_always_uses_configured_model_for_model_and_tokenizer(ser
     assert response["model_name"] == expected_model_name
 
 
+@pytest.mark.asyncio
+async def test_create_sampling_session_routes_exact_teacher_model_to_unique_sampler():
+    server = object.__new__(_router_class())
+    server._shutdown_started = False
+    server._status = ServerStatus.INITIALIZED
+    server._engine = SimpleNamespace(
+        config=OmegaConf.create({"server": {}, "actor_rollout_ref": {"model": {"path": "actor"}}})
+    )
+    server._teacher_backend = SimpleNamespace(
+        resolve=lambda *values: "teacher" if "teacher-model" in values else None,
+        get_model_path=lambda key: "teacher-model",
+    )
+    server._sampling_to_teacher = {}
+    server._sampling_to_model_path = {}
+    server._sampling_to_base_model = {}
+
+    response = await server.create_sampling_session(SimpleNamespace(base_model="teacher-model", model_path=None))
+
+    sampler_id = response.sampling_session_id
+    assert sampler_id.startswith("verl-remote-teacher-sampler-")
+    assert server._sampling_to_teacher[sampler_id] == "teacher"
+    assert server._sampling_to_base_model[sampler_id] == "teacher-model"
+    assert server._sampling_to_model_path[sampler_id] == "teacher-model"
+
+
+@pytest.mark.asyncio
+async def test_asample_routes_teacher_sampler_to_teacher_client():
+    server = object.__new__(_router_class())
+    server._shutdown_started = False
+    server._status = ServerStatus.INITIALIZED
+    server._op_gate = FifoReadWriteGate()
+    _init_future_tracking(server)
+
+    class TeacherClient:
+        def __init__(self):
+            self.calls = []
+
+        async def generate(self, request_id, *, prompt_ids, sampling_params):
+            self.calls.append((prompt_ids, sampling_params))
+            return SimpleNamespace(
+                token_ids=[3],
+                log_probs=[-0.2],
+                stop_reason="stop",
+                extra_fields={},
+            )
+
+    teacher_client = TeacherClient()
+    server._teacher_backend = SimpleNamespace(get_client=lambda key: teacher_client)
+    server._sampling_to_teacher = {"teacher-sampler": "teacher"}
+    req = SimpleNamespace(
+        sampling_session_id="teacher-sampler",
+        prompt=SimpleNamespace(to_ints=lambda: [1, 2]),
+        sampling_params=SimpleNamespace(max_tokens=1, temperature=1, top_p=1, top_k=-1, stop=None, seed=None),
+        num_samples=1,
+        prompt_logprobs=False,
+        topk_prompt_logprobs=0,
+    )
+
+    response = await server.asample(req)
+    await asyncio.gather(*server._pending.values())
+
+    assert teacher_client.calls[0][0] == [1, 2]
+    assert server._futures[response["request_id"]]["sequences"][0]["tokens"] == [3]
+
+
+@pytest.mark.asyncio
+async def test_asample_rejects_unknown_non_actor_sampler():
+    server = object.__new__(_router_class())
+    server._shutdown_started = False
+    server._status = ServerStatus.INITIALIZED
+    server._teacher_backend = None
+    server._sampling_to_teacher = {}
+
+    with pytest.raises(HTTPException) as exc_info:
+        await server.asample(SimpleNamespace(sampling_session_id="unknown"))
+
+    assert exc_info.value.status_code == HTTPStatus.NOT_FOUND
+
+
 def test_weights_info_metadata_uses_cookbook_lora_compat_shape():
     server = object.__new__(_router_class())
 

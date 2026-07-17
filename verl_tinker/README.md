@@ -230,7 +230,10 @@ Most long-running operations return a `request_id`. Poll
 
 ## Limitations
 
-- Critic, reward model, and teacher model serving are not supported.
+- Critic and reward model serving are not supported.
+- Frozen teacher models may be configured through VERL's `distillation`
+  section. They run on dedicated GPUs and support sampling and prompt
+  log-probabilities, but not training or checkpoint mutation.
 - LoRA training is not supported. Some LoRA-shaped metadata is returned for
   Tinker Cookbook compatibility, but the backend trains full model weights.
 - Multiple clients are not isolated: they share one model state, optimizer

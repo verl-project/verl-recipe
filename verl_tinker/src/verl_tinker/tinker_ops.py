@@ -45,7 +45,7 @@ def get_configured_model_name(engine) -> str:
     return str(engine.config.server.get("model_name") or engine.config.actor_rollout_ref.model.path)
 
 
-def get_supported_models(engine) -> dict:
+def get_supported_models(engine, teacher_backend=None) -> dict:
     """Return Tinker server capability metadata."""
     try:
         model_name = get_configured_model_name(engine)
@@ -55,7 +55,16 @@ def get_supported_models(engine) -> dict:
         max_ctx = int(engine.config.actor_rollout_ref.rollout.max_response_length)
     except Exception:
         max_ctx = 4096
-    return {"supported_models": [{"model_name": model_name, "max_context_length": max_ctx}]}
+    supported_models = [{"model_name": model_name, "max_context_length": max_ctx}]
+    if teacher_backend is not None:
+        supported_models.extend(
+            {
+                "model_name": descriptor.model_path,
+                "max_context_length": descriptor.max_context_length or max_ctx,
+            }
+            for descriptor in teacher_backend.descriptors
+        )
+    return {"supported_models": supported_models}
 
 
 def get_base_model_name(engine, model_to_base_model: dict[str, str]) -> str:
@@ -338,13 +347,16 @@ def _apply_sampling_stop(sampling_params: dict[str, Any], stop: Any) -> None:
 
 async def sample(engine, req) -> dict:
     prompt_ids = list(req.prompt.to_ints())
+    num_samples = int(req.num_samples)
+    if num_samples <= 0:
+        raise ValueError(f"num_samples must be positive, got {num_samples}")
     sp = req.sampling_params
     sampling_params = {
         "max_tokens": sp.max_tokens or 256,
         "temperature": float(sp.temperature),
         "top_p": float(sp.top_p),
         "top_k": int(sp.top_k),
-        "n": int(req.num_samples),
+        "n": 1,
         "logprobs": True,
     }
     _apply_sampling_stop(sampling_params, getattr(sp, "stop", None))
@@ -355,32 +367,39 @@ async def sample(engine, req) -> dict:
     if req.topk_prompt_logprobs:
         sampling_params["prompt_logprobs"] = int(req.topk_prompt_logprobs)
 
-    result = await engine.generate(
-        request_id=uuid.uuid4().hex,
-        prompt_ids=prompt_ids,
-        sampling_params=sampling_params,
-    )
-    token_ids = list(result.token_ids or [])
-    log_probs = list(result.log_probs) if result.log_probs is not None else None
-    tinker_stop_reason = _normalize_tinker_stop_reason(result.stop_reason)
-    sequences = [
-        {
-            "stop_reason": tinker_stop_reason,
-            "tokens": token_ids,
-            "logprobs": log_probs,
-        }
-    ]
+    async def _generate_one(sample_index: int):
+        per_sample_params = dict(sampling_params)
+        if "seed" in per_sample_params:
+            per_sample_params["seed"] += sample_index
+        return await engine.generate(
+            request_id=uuid.uuid4().hex,
+            prompt_ids=prompt_ids,
+            sampling_params=per_sample_params,
+        )
 
-    extras = getattr(result, "extra_fields", None) or {}
+    results = await asyncio.gather(*[_generate_one(i) for i in range(num_samples)])
+    sequences = []
+    for result in results:
+        sequences.append(
+            {
+                "stop_reason": _normalize_tinker_stop_reason(result.stop_reason),
+                "tokens": list(result.token_ids or []),
+                "logprobs": list(result.log_probs) if result.log_probs is not None else None,
+            }
+        )
+
+    extras = getattr(results[0], "extra_fields", None) or {}
     prompt_ids_raw = extras.get("prompt_ids")
     prompt_lp_raw = extras.get("prompt_logprobs")
     prompt_logprobs_out = None
     topk_prompt_logprobs_out = None
     if prompt_lp_raw is not None:
         if req.topk_prompt_logprobs:
-            topk_prompt_logprobs_out = _format_topk_prompt_logprobs(prompt_ids_raw, prompt_lp_raw)
+            formatted = _format_topk_prompt_logprobs(prompt_ids_raw, prompt_lp_raw) or []
+            topk_prompt_logprobs_out = [[]] + formatted[: max(0, len(prompt_ids) - 1)]
         else:
-            prompt_logprobs_out = [(pos[0] if isinstance(pos, list) and pos else None) for pos in prompt_lp_raw]
+            scored = [(pos[0] if isinstance(pos, list) and pos else None) for pos in prompt_lp_raw]
+            prompt_logprobs_out = [None] + scored[: max(0, len(prompt_ids) - 1)]
 
     return {
         "type": "sample",

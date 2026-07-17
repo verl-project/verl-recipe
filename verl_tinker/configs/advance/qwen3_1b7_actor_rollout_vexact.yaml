@@ -17,7 +17,6 @@ actor_rollout_ref: # this is the same as verl's config, this field is ALWAYS req
     ppo_micro_batch_size_per_gpu: 1
     use_torch_compile: false
     veomni:
-      fsdp_size: 8
       ulysses_parallel_size: 1
       expert_parallel_size: 1
       attn_implementation: flash_attention_3
@@ -79,4 +78,4 @@ trainer:
   project_name: verl_tinker_server
   experiment_name: tinker_server_qwen3_1b7_actor_rollout_vexact
   nnodes: 1
-  n_gpus_per_node: 8
+  n_gpus_per_node: ${oc.env:TINKER_SERVER_N_GPUS_PER_NODE,8}

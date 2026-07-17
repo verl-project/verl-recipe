@@ -3,12 +3,23 @@ import asyncio
 import os
 import traceback
 
-from tasks.math_rl.gsm8k import run_math_rl_gsm8k_test
-from tasks.math_sft_rl.gsm8k import run_math_sft_rl_gsm8k_test
-from tasks.sdft.single_task import run_sdft_single_task_test
-from tasks.sft.no_robots import run_no_robot_direct_sft_test, run_no_robot_test
-from tasks.sft.tulu3 import run_tulu3_test
-from tasks.utils import shutdown_server, wait_for_healthz_ready
+try:
+    from .tasks.math_rl.gsm8k import run_math_rl_gsm8k_test
+    from .tasks.math_sft_rl.gsm8k import run_math_sft_rl_gsm8k_test
+    from .tasks.opd.deepmath import DEFAULT_TEACHER_MODEL, run_opd_deepmath_test
+    from .tasks.sdft.single_task import run_sdft_single_task_test
+    from .tasks.sft.no_robots import run_no_robot_direct_sft_test, run_no_robot_test
+    from .tasks.sft.tulu3 import run_tulu3_test
+    from .tasks.utils import shutdown_server, wait_for_healthz_ready
+except ImportError:
+    # Direct ``python run_single_test.py`` execution from client_examples.
+    from tasks.math_rl.gsm8k import run_math_rl_gsm8k_test
+    from tasks.math_sft_rl.gsm8k import run_math_sft_rl_gsm8k_test
+    from tasks.opd.deepmath import DEFAULT_TEACHER_MODEL, run_opd_deepmath_test
+    from tasks.sdft.single_task import run_sdft_single_task_test
+    from tasks.sft.no_robots import run_no_robot_direct_sft_test, run_no_robot_test
+    from tasks.sft.tulu3 import run_tulu3_test
+    from tasks.utils import shutdown_server, wait_for_healthz_ready
 
 DEFAULT_MODEL_NAME = "Qwen/Qwen3-1.7B"
 DEFAULT_BASE_URL = "http://127.0.0.1:8000/"
@@ -21,6 +32,7 @@ ALL_TESTS = {
     "sdft_single_task": run_sdft_single_task_test,
     "rl_gsm8k": run_math_rl_gsm8k_test,
     "sft_rl_gsm8k": run_math_sft_rl_gsm8k_test,
+    "opd_deepmath": run_opd_deepmath_test,
 }
 
 
@@ -30,6 +42,7 @@ async def main(
     tokenizer_name_or_path: str | None,
     base_url: str,
     api_key: str,
+    teacher_model_name: str,
 ) -> int:
     tokenizer_name_or_path = tokenizer_name_or_path or model_name
     if test_name not in ALL_TESTS:
@@ -41,6 +54,7 @@ async def main(
 
     os.environ["TINKER_BASE_URL"] = base_url
     os.environ["TINKER_API_KEY"] = api_key
+    os.environ["TINKER_TEACHER_MODEL"] = teacher_model_name
 
     print(f"Using Tinker server URL: {base_url}")
 
@@ -92,6 +106,11 @@ if __name__ == "__main__":
         default=DEFAULT_API_KEY,
         help="Tinker API key compatibility value.",
     )
+    parser.add_argument(
+        "--teacher-model-name",
+        default=DEFAULT_TEACHER_MODEL,
+        help="Teacher model used by OPD workloads.",
+    )
     args = parser.parse_args()
 
     raise SystemExit(
@@ -102,6 +121,7 @@ if __name__ == "__main__":
                 tokenizer_name_or_path=args.tokenizer_name_or_path,
                 base_url=args.base_url,
                 api_key=args.api_key,
+                teacher_model_name=args.teacher_model_name,
             )
         )
     )

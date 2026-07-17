@@ -15,5 +15,6 @@
 """Public exports for the colocated Tinker server engine."""
 
 from .colocated import ColocatedBackend, NoRolloutWorker
+from .teacher import TeacherInferenceBackend
 
-__all__ = ["ColocatedBackend", "NoRolloutWorker"]
+__all__ = ["ColocatedBackend", "NoRolloutWorker", "TeacherInferenceBackend"]

@@ -34,7 +34,8 @@ def _minimal_tinker_config():
 def test_tinker_config_merges_verl_defaults_and_keeps_only_tinker_overrides():
     config = process_actor_rollout_ref_config(_minimal_tinker_config())
 
-    assert set(config.keys()) == {"server", "actor_rollout_ref", "algorithm", "data", "trainer"}
+    assert set(config.keys()) == {"server", "actor_rollout_ref", "algorithm", "data", "distillation", "trainer"}
+    assert config.distillation.enabled is False
     assert config.server.host == "0.0.0.0"
     assert config.server.port == 8000
     assert config.server.ray_address == "local"
@@ -126,17 +127,45 @@ def test_tinker_config_disables_verl_model_offload_flags():
     assert config.actor_rollout_ref.ref.veomni.optimizer_offload is False
 
 
-def test_tinker_config_does_not_keep_unsupported_ppo_sections():
+def test_tinker_config_keeps_distillation_but_not_other_unsupported_ppo_sections():
     config = _minimal_tinker_config()
     config.reward = {"reward_model": {"enable": True}}
     config.critic = {"enable": False}
-    config.distillation = {"enable": True}
+    config.distillation = {"enabled": False}
 
     config = process_actor_rollout_ref_config(config)
 
     assert "reward" not in config
     assert "critic" not in config
-    assert "distillation" not in config
+    assert config.distillation.enabled is False
+
+
+def test_tinker_config_preserves_and_validates_dedicated_teacher_config():
+    config = _minimal_tinker_config()
+    config.trainer.n_gpus_per_node = 4
+    config.distillation = {
+        "enabled": True,
+        "nnodes": 1,
+        "n_gpus_per_node": 4,
+        "teacher_models": {
+            "teacher_model": {
+                "model_path": "Qwen/Qwen3-30B-A3B",
+                "inference": {
+                    "name": "vllm",
+                    "tensor_model_parallel_size": 4,
+                    "engine_kwargs": {"vllm": {"max_logprobs": 128}},
+                },
+            }
+        },
+    }
+
+    processed = process_actor_rollout_ref_config(config)
+    errors = _validate_config(processed)
+
+    assert errors == []
+    assert processed.distillation.enabled is True
+    assert processed.distillation.teacher_models.teacher_model.model_path == "Qwen/Qwen3-30B-A3B"
+    assert processed.distillation.teacher_models.teacher_model.inference.tensor_model_parallel_size == 4
 
 
 def test_tinker_config_preserves_user_values_over_verl_defaults():
