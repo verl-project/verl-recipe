@@ -56,10 +56,9 @@ is ~0 → no gradient. Worse, the base policy's own successful rollouts never in
 (`update_reservation_*`) that held-out tasks require, so self-sampling cannot bootstrap them either.
 RL sharpens what a policy already does sometimes; it cannot invent a skill.
 
-The warm start is published so this is reproducible end-to-end:
-**[`yuyu0529nya/qwen2.5-7b-tau2-airline-sft-lora`](https://huggingface.co/yuyu0529nya/qwen2.5-7b-tau2-airline-sft-lora)**
-(LoRA, Apache-2.0, distilled from DeepSeek-V3 teacher trajectories). Merge it into the base and
-point `POLICY_MODEL` at the merged weights — that is exactly the `step 0` of the table above.
+Both the warm start and the teacher data it came from are published (links at the top). Merge the
+adapter into the base and point `POLICY_MODEL` at the merged weights — that is exactly the
+`step 0` of the table above.
 
 **2. The default learning rate is not the one that works.**
 At `lr=4e-6` / `2e-5` the curve is flat and looks like a structural problem. It is not — it is just
