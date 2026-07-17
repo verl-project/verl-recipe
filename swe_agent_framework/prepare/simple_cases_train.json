@@ -1,0 +1,242 @@
+[
+  {
+    "difficulty": "easy",
+    "problem_statement": "Fix the bug in calculator.py: the add function should return a + b, not a - b",
+    "repo_content": {"calculator.py": "def add(a, b):\n    return a - b"},
+    "expected_patch": "diff --git a/calculator.py b/calculator.py\n--- a/calculator.py\n+++ b/calculator.py\n@@ -1,2 +1,2 @@\n def add(a, b):\n-    return a - b\n+    return a + b"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "The `safe_divide` function in `calc.py` does not handle division by zero. Fix it to return 0.0 when the divisor is zero.",
+    "repo_content": {"calc.py": "def safe_divide(a, b):\n    return a / b\n"},
+    "expected_patch": "diff --git a/calc.py b/calc.py\n--- a/calc.py\n+++ b/calc.py\n@@ -1,2 +1,4 @@\n def safe_divide(a, b):\n+    if b == 0:\n+        return 0.0\n     return a / b"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "The `factorial` function in `mathlib.py` should compute n! but it returns n * (n-1) without the base case, causing infinite recursion. Fix it by adding the base case: return 1 when n <= 1.",
+    "repo_content": {"mathlib.py": "def factorial(n):\n    return n * factorial(n - 1)\n"},
+    "expected_patch": "diff --git a/mathlib.py b/mathlib.py\n--- a/mathlib.py\n+++ b/mathlib.py\n@@ -1,2 +1,4 @@\n def factorial(n):\n+    if n <= 1:\n+        return 1\n     return n * factorial(n - 1)"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "The `count_vowels` function in `textutil.py` only counts lowercase vowels. Fix it to also count uppercase vowels.",
+    "repo_content": {"textutil.py": "def count_vowels(text):\n    count = 0\n    for ch in text:\n        if ch in 'aeiou':\n            count += 1\n    return count\n"},
+    "expected_patch": "diff --git a/textutil.py b/textutil.py\n--- a/textutil.py\n+++ b/textutil.py\n@@ -1,6 +1,6 @@\n def count_vowels(text):\n     count = 0\n     for ch in text:\n-        if ch in 'aeiou':\n+        if ch.lower() in 'aeiou':\n             count += 1\n     return count"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "The `truncate` function in `strhelper.py` should cut the string to `max_len` characters and add '...' if it was truncated. Currently it always adds '...' even when the string is short enough. Fix it.",
+    "repo_content": {"strhelper.py": "def truncate(s, max_len):\n    return s[:max_len] + '...'\n"},
+    "expected_patch": "diff --git a/strhelper.py b/strhelper.py\n--- a/strhelper.py\n+++ b/strhelper.py\n@@ -1,2 +1,4 @@\n def truncate(s, max_len):\n-    return s[:max_len] + '...'\n+    if len(s) <= max_len:\n+        return s\n+    return s[:max_len] + '...'"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `utils.py`, the `flatten` function only handles one level of nesting. Fix it to recursively flatten arbitrarily nested lists.",
+    "repo_content": {"utils.py": "def flatten(lst):\n    result = []\n    for item in lst:\n        if isinstance(item, list):\n            result.extend(item)\n        else:\n            result.append(item)\n    return result\n"},
+    "expected_patch": "diff --git a/utils.py b/utils.py\n--- a/utils.py\n+++ b/utils.py\n@@ -3,7 +3,7 @@\n     for item in lst:\n         if isinstance(item, list):\n-            result.extend(item)\n+            result.extend(flatten(item))\n         else:\n             result.append(item)\n     return result"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "The `remove_duplicates` function in `listutil.py` returns a set instead of a list. Fix it to return a list preserving the original order.",
+    "repo_content": {"listutil.py": "def remove_duplicates(lst):\n    return set(lst)\n"},
+    "expected_patch": "diff --git a/listutil.py b/listutil.py\n--- a/listutil.py\n+++ b/listutil.py\n@@ -1,2 +1,7 @@\n def remove_duplicates(lst):\n-    return set(lst)\n+    seen = set()\n+    result = []\n+    for item in lst:\n+        if item not in seen:\n+            seen.add(item)\n+            result.append(item)\n+    return result"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `validators.py`, the `validate_email` function only checks for '@'. Fix it to also require at least one '.' after the '@'.",
+    "repo_content": {"validators.py": "def validate_email(email):\n    return '@' in email\n"},
+    "expected_patch": "diff --git a/validators.py b/validators.py\n--- a/validators.py\n+++ b/validators.py\n@@ -1,2 +1,4 @@\n def validate_email(email):\n-    return '@' in email\n+    if '@' not in email:\n+        return False\n+    return '.' in email.split('@')[1]"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `maxutil.py`, the `find_max` function returns the minimum instead of the maximum. Fix the comparison operator.",
+    "repo_content": {"maxutil.py": "def find_max(lst):\n    if not lst:\n        return None\n    result = lst[0]\n    for x in lst[1:]:\n        if x < result:\n            result = x\n    return result\n"},
+    "expected_patch": "diff --git a/maxutil.py b/maxutil.py\n--- a/maxutil.py\n+++ b/maxutil.py\n@@ -3,5 +3,5 @@\n     result = lst[0]\n     for x in lst[1:]:\n-        if x < result:\n+        if x > result:\n             result = x\n     return result"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `power.py`, the `power` function computes a + b instead of a ** b. Fix the operator.",
+    "repo_content": {"power.py": "def power(a, b):\n    return a + b\n"},
+    "expected_patch": "diff --git a/power.py b/power.py\n--- a/power.py\n+++ b/power.py\n@@ -1,2 +1,2 @@\n def power(a, b):\n-    return a + b\n+    return a ** b"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `reverser.py`, the `reverse_string` function returns the original string unchanged. Fix it to return the reversed string.",
+    "repo_content": {"reverser.py": "def reverse_string(s):\n    return s\n"},
+    "expected_patch": "diff --git a/reverser.py b/reverser.py\n--- a/reverser.py\n+++ b/reverser.py\n@@ -1,2 +1,2 @@\n def reverse_string(s):\n-    return s\n+    return s[::-1]"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `abs_val.py`, the `absolute` function returns negative values unchanged. Fix it to return the absolute value.",
+    "repo_content": {"abs_val.py": "def absolute(x):\n    return x\n"},
+    "expected_patch": "diff --git a/abs_val.py b/abs_val.py\n--- a/abs_val.py\n+++ b/abs_val.py\n@@ -1,2 +1,4 @@\n def absolute(x):\n-    return x\n+    if x < 0:\n+        return -x\n+    return x"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `subtract.py`, the `subtract` function returns a + b instead of a - b. Fix the operator.",
+    "repo_content": {"subtract.py": "def subtract(a, b):\n    return a + b\n"},
+    "expected_patch": "diff --git a/subtract.py b/subtract.py\n--- a/subtract.py\n+++ b/subtract.py\n@@ -1,2 +1,2 @@\n def subtract(a, b):\n-    return a + b\n+    return a - b"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `multiply.py`, the `multiply` function returns a / b instead of a * b. Fix the operator.",
+    "repo_content": {"multiply.py": "def multiply(a, b):\n    return a / b\n"},
+    "expected_patch": "diff --git a/multiply.py b/multiply.py\n--- a/multiply.py\n+++ b/multiply.py\n@@ -1,2 +1,2 @@\n def multiply(a, b):\n-    return a / b\n+    return a * b"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `is_even.py`, the `is_even` function checks if the number is odd instead of even. Fix the modulo check.",
+    "repo_content": {"is_even.py": "def is_even(n):\n    return n % 2 == 1\n"},
+    "expected_patch": "diff --git a/is_even.py b/is_even.py\n--- a/is_even.py\n+++ b/is_even.py\n@@ -1,2 +1,2 @@\n def is_even(n):\n-    return n % 2 == 1\n+    return n % 2 == 0"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `celsius.py`, the `to_fahrenheit` function uses the wrong formula. It computes celsius * 2 + 30. Fix it to use the correct formula: celsius * 9/5 + 32.",
+    "repo_content": {"celsius.py": "def to_fahrenheit(celsius):\n    return celsius * 2 + 30\n"},
+    "expected_patch": "diff --git a/celsius.py b/celsius.py\n--- a/celsius.py\n+++ b/celsius.py\n@@ -1,2 +1,2 @@\n def to_fahrenheit(celsius):\n-    return celsius * 2 + 30\n+    return celsius * 9 / 5 + 32"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `square.py`, the `square` function returns x * 2 instead of x * x. Fix it to compute the square.",
+    "repo_content": {"square.py": "def square(x):\n    return x * 2\n"},
+    "expected_patch": "diff --git a/square.py b/square.py\n--- a/square.py\n+++ b/square.py\n@@ -1,2 +1,2 @@\n def square(x):\n-    return x * 2\n+    return x * x"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `sign.py`, the `get_sign` function returns 'positive' for negative numbers and 'negative' for positive numbers. The labels are swapped. Fix them.",
+    "repo_content": {"sign.py": "def get_sign(n):\n    if n > 0:\n        return 'negative'\n    elif n < 0:\n        return 'positive'\n    return 'zero'\n"},
+    "expected_patch": "diff --git a/sign.py b/sign.py\n--- a/sign.py\n+++ b/sign.py\n@@ -1,6 +1,6 @@\n def get_sign(n):\n     if n > 0:\n-        return 'negative'\n+        return 'positive'\n     elif n < 0:\n-        return 'positive'\n+        return 'negative'\n     return 'zero'"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `uppercase.py`, the `to_upper` function calls `.lower()` instead of `.upper()`. Fix it.",
+    "repo_content": {"uppercase.py": "def to_upper(s):\n    return s.lower()\n"},
+    "expected_patch": "diff --git a/uppercase.py b/uppercase.py\n--- a/uppercase.py\n+++ b/uppercase.py\n@@ -1,2 +1,2 @@\n def to_upper(s):\n-    return s.lower()\n+    return s.upper()"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `first_char.py`, the `first_char` function returns the last character instead of the first. Fix the index.",
+    "repo_content": {"first_char.py": "def first_char(s):\n    if not s:\n        return ''\n    return s[-1]\n"},
+    "expected_patch": "diff --git a/first_char.py b/first_char.py\n--- a/first_char.py\n+++ b/first_char.py\n@@ -1,4 +1,4 @@\n def first_char(s):\n     if not s:\n         return ''\n-    return s[-1]\n+    return s[0]"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `last_elem.py`, the `last_element` function returns the first element of the list instead of the last. Fix it.",
+    "repo_content": {"last_elem.py": "def last_element(lst):\n    if not lst:\n        return None\n    return lst[0]\n"},
+    "expected_patch": "diff --git a/last_elem.py b/last_elem.py\n--- a/last_elem.py\n+++ b/last_elem.py\n@@ -1,4 +1,4 @@\n def last_element(lst):\n     if not lst:\n         return None\n-    return lst[0]\n+    return lst[-1]"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `list_sum.py`, the `sum_list` function starts with total = 1 instead of 0, so the sum is always off by one. Fix the initial value.",
+    "repo_content": {"list_sum.py": "def sum_list(numbers):\n    total = 1\n    for n in numbers:\n        total += n\n    return total\n"},
+    "expected_patch": "diff --git a/list_sum.py b/list_sum.py\n--- a/list_sum.py\n+++ b/list_sum.py\n@@ -1,5 +1,5 @@\n def sum_list(numbers):\n-    total = 1\n+    total = 0\n     for n in numbers:\n         total += n\n     return total"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `join_strings.py`, the `join_with_comma` function joins strings with a semicolon instead of a comma. Fix the separator.",
+    "repo_content": {"join_strings.py": "def join_with_comma(items):\n    return ';'.join(items)\n"},
+    "expected_patch": "diff --git a/join_strings.py b/join_strings.py\n--- a/join_strings.py\n+++ b/join_strings.py\n@@ -1,2 +1,2 @@\n def join_with_comma(items):\n-    return ';'.join(items)\n+    return ','.join(items)"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `repeat_str.py`, the `repeat` function returns the string once regardless of the count. Fix it to repeat the string `n` times.",
+    "repo_content": {"repeat_str.py": "def repeat(s, n):\n    return s\n"},
+    "expected_patch": "diff --git a/repeat_str.py b/repeat_str.py\n--- a/repeat_str.py\n+++ b/repeat_str.py\n@@ -1,2 +1,2 @@\n def repeat(s, n):\n-    return s\n+    return s * n"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `contains.py`, the `contains` function uses `not in` instead of `in`, returning True when the item is absent and False when present. Fix the logic.",
+    "repo_content": {"contains.py": "def contains(lst, item):\n    return item not in lst\n"},
+    "expected_patch": "diff --git a/contains.py b/contains.py\n--- a/contains.py\n+++ b/contains.py\n@@ -1,2 +1,2 @@\n def contains(lst, item):\n-    return item not in lst\n+    return item in lst"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `avg.py`, the `average` function divides the sum by a hardcoded 2 instead of the length of the list. Fix it.",
+    "repo_content": {"avg.py": "def average(numbers):\n    return sum(numbers) / 2\n"},
+    "expected_patch": "diff --git a/avg.py b/avg.py\n--- a/avg.py\n+++ b/avg.py\n@@ -1,2 +1,2 @@\n def average(numbers):\n-    return sum(numbers) / 2\n+    return sum(numbers) / len(numbers)"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `min_val.py`, the `find_min` function returns `max(lst)` instead of `min(lst)`. Fix it.",
+    "repo_content": {"min_val.py": "def find_min(lst):\n    if not lst:\n        return None\n    return max(lst)\n"},
+    "expected_patch": "diff --git a/min_val.py b/min_val.py\n--- a/min_val.py\n+++ b/min_val.py\n@@ -1,4 +1,4 @@\n def find_min(lst):\n     if not lst:\n         return None\n-    return max(lst)\n+    return min(lst)"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `count_chars.py`, the `count_char` function always returns 0 because it never increments the counter. Fix it to properly count occurrences of the target character.",
+    "repo_content": {"count_chars.py": "def count_char(text, target):\n    count = 0\n    for ch in text:\n        if ch == target:\n            pass\n    return count\n"},
+    "expected_patch": "diff --git a/count_chars.py b/count_chars.py\n--- a/count_chars.py\n+++ b/count_chars.py\n@@ -2,5 +2,5 @@\n     count = 0\n     for ch in text:\n         if ch == target:\n-            pass\n+            count += 1\n     return count"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `startswith.py`, the `starts_with` function uses `endswith` instead of `startswith`. Fix it.",
+    "repo_content": {"startswith.py": "def starts_with(text, prefix):\n    return text.endswith(prefix)\n"},
+    "expected_patch": "diff --git a/startswith.py b/startswith.py\n--- a/startswith.py\n+++ b/startswith.py\n@@ -1,2 +1,2 @@\n def starts_with(text, prefix):\n-    return text.endswith(prefix)\n+    return text.startswith(prefix)"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `swap.py`, the `swap_values` function returns (a, b) without actually swapping. Fix it to return (b, a).",
+    "repo_content": {"swap.py": "def swap_values(a, b):\n    return (a, b)\n"},
+    "expected_patch": "diff --git a/swap.py b/swap.py\n--- a/swap.py\n+++ b/swap.py\n@@ -1,2 +1,2 @@\n def swap_values(a, b):\n-    return (a, b)\n+    return (b, a)"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `double.py`, the `double_list` function triples each element instead of doubling. Fix the multiplier.",
+    "repo_content": {"double.py": "def double_list(lst):\n    return [x * 3 for x in lst]\n"},
+    "expected_patch": "diff --git a/double.py b/double.py\n--- a/double.py\n+++ b/double.py\n@@ -1,2 +1,2 @@\n def double_list(lst):\n-    return [x * 3 for x in lst]\n+    return [x * 2 for x in lst]"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `titlecase.py`, the `title_case` function calls `.lower()` instead of `.title()`. Fix it to properly capitalize each word.",
+    "repo_content": {"titlecase.py": "def title_case(s):\n    return s.lower()\n"},
+    "expected_patch": "diff --git a/titlecase.py b/titlecase.py\n--- a/titlecase.py\n+++ b/titlecase.py\n@@ -1,2 +1,2 @@\n def title_case(s):\n-    return s.lower()\n+    return s.title()"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `strip_spaces.py`, the `strip` function only strips left spaces using `.lstrip()`. Fix it to strip spaces from both sides using `.strip()`.",
+    "repo_content": {"strip_spaces.py": "def strip(s):\n    return s.lstrip()\n"},
+    "expected_patch": "diff --git a/strip_spaces.py b/strip_spaces.py\n--- a/strip_spaces.py\n+++ b/strip_spaces.py\n@@ -1,2 +1,2 @@\n def strip(s):\n-    return s.lstrip()\n+    return s.strip()"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `negate.py`, the `negate` function returns x instead of -x. Fix it.",
+    "repo_content": {"negate.py": "def negate(x):\n    return x\n"},
+    "expected_patch": "diff --git a/negate.py b/negate.py\n--- a/negate.py\n+++ b/negate.py\n@@ -1,2 +1,2 @@\n def negate(x):\n-    return x\n+    return -x"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `is_positive.py`, the `is_positive` function uses `<` instead of `>` to check if the number is positive. Fix the comparison.",
+    "repo_content": {"is_positive.py": "def is_positive(n):\n    return n < 0\n"},
+    "expected_patch": "diff --git a/is_positive.py b/is_positive.py\n--- a/is_positive.py\n+++ b/is_positive.py\n@@ -1,2 +1,2 @@\n def is_positive(n):\n-    return n < 0\n+    return n > 0"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `word_count.py`, the `count_words` function splits on commas instead of whitespace. Fix it to split on spaces.",
+    "repo_content": {"word_count.py": "def count_words(text):\n    return len(text.split(','))\n"},
+    "expected_patch": "diff --git a/word_count.py b/word_count.py\n--- a/word_count.py\n+++ b/word_count.py\n@@ -1,2 +1,2 @@\n def count_words(text):\n-    return len(text.split(','))\n+    return len(text.split())"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `index_of.py`, the `index_of` function returns -1 unconditionally even when the item is in the list. Fix it to return the index when found.",
+    "repo_content": {"index_of.py": "def index_of(lst, item):\n    for i, val in enumerate(lst):\n        if val == item:\n            return -1\n    return -1\n"},
+    "expected_patch": "diff --git a/index_of.py b/index_of.py\n--- a/index_of.py\n+++ b/index_of.py\n@@ -1,5 +1,5 @@\n def index_of(lst, item):\n     for i, val in enumerate(lst):\n         if val == item:\n-            return -1\n+            return i\n     return -1"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `increment.py`, the `increment` function decrements the value by 1 instead of incrementing. Fix the operator.",
+    "repo_content": {"increment.py": "def increment(n):\n    return n - 1\n"},
+    "expected_patch": "diff --git a/increment.py b/increment.py\n--- a/increment.py\n+++ b/increment.py\n@@ -1,2 +1,2 @@\n def increment(n):\n-    return n - 1\n+    return n + 1"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `clamp_val.py`, the `clamp` function has the return values swapped: it returns max_val when value is below min_val, and min_val when above max_val. Fix it.",
+    "repo_content": {"clamp_val.py": "def clamp(value, min_val, max_val):\n    if value < min_val:\n        return max_val\n    if value > max_val:\n        return min_val\n    return value\n"},
+    "expected_patch": "diff --git a/clamp_val.py b/clamp_val.py\n--- a/clamp_val.py\n+++ b/clamp_val.py\n@@ -1,6 +1,6 @@\n def clamp(value, min_val, max_val):\n     if value < min_val:\n-        return max_val\n+        return min_val\n     if value > max_val:\n-        return min_val\n+        return max_val\n     return value"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `list_len.py`, the `list_length` function always returns 0. Fix it to return the actual length of the list.",
+    "repo_content": {"list_len.py": "def list_length(lst):\n    return 0\n"},
+    "expected_patch": "diff --git a/list_len.py b/list_len.py\n--- a/list_len.py\n+++ b/list_len.py\n@@ -1,2 +1,2 @@\n def list_length(lst):\n-    return 0\n+    return len(lst)"
+  }
+]
