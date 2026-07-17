@@ -3,7 +3,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from omegaconf import OmegaConf
-
 from verl_tinker.backends.teacher import TeacherClient, TeacherInferenceBackend
 
 

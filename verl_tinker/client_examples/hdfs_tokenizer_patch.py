@@ -122,7 +122,9 @@ def install_hdfs_tokenizer_patch() -> None:
         original_from_pretrained = AutoTokenizer.from_pretrained
 
         def from_pretrained(cls, pretrained_model_name_or_path, *inputs, **kwargs):
-            if isinstance(pretrained_model_name_or_path, str) and pretrained_model_name_or_path.startswith(_HDFS_PREFIX):
+            if isinstance(pretrained_model_name_or_path, str) and pretrained_model_name_or_path.startswith(
+                _HDFS_PREFIX
+            ):
                 pretrained_model_name_or_path = _resolve_hdfs_path(pretrained_model_name_or_path)
             return original_from_pretrained(pretrained_model_name_or_path, *inputs, **kwargs)
 

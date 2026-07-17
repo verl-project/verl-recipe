@@ -41,11 +41,7 @@ class TeacherClient:
 
     async def generate(self, request_id, *, prompt_ids, sampling_params, **kwargs):
         requested = sampling_params.get("prompt_logprobs")
-        if (
-            requested is not None
-            and self.max_prompt_logprobs is not None
-            and int(requested) > self.max_prompt_logprobs
-        ):
+        if requested is not None and self.max_prompt_logprobs is not None and int(requested) > self.max_prompt_logprobs:
             raise ValueError(
                 f"Teacher {self.model_path!r} supports at most {self.max_prompt_logprobs} prompt logprobs, "
                 f"but the request asked for {requested}. Increase inference.engine_kwargs.vllm.max_logprobs."
