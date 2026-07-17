@@ -21,8 +21,11 @@ This recipe supplies the pieces verl does not have for that setting:
 
 It plugs in through verl's **public AgentLoop extension point** — no verl source changes.
 
-The RL warm start this recipe trains from is published separately (RL from raw base is null here —
-see below): **[`yuyu0529nya/qwen2.5-7b-tau2-airline-sft-lora`](https://huggingface.co/yuyu0529nya/qwen2.5-7b-tau2-airline-sft-lora)**.
+Everything needed to reproduce the numbers below is public — RL from raw base is null here (see
+the note under *Results*), so the warm start is part of the recipe, not an optional extra:
+
+- **warm start:** [`yuyu0529nya/qwen2.5-7b-tau2-airline-sft-lora`](https://huggingface.co/yuyu0529nya/qwen2.5-7b-tau2-airline-sft-lora) (LoRA, Apache-2.0)
+- **teacher data it was distilled from:** [`yuyu0529nya/tau2-airline-deepseek-distill`](https://huggingface.co/datasets/yuyu0529nya/tau2-airline-deepseek-distill) (326 DeepSeek V4 Flash trajectories, Apache-2.0)
 
 ## Required `verl` version
 
