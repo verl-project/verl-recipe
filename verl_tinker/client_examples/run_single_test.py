@@ -45,6 +45,7 @@ async def main(
     base_url: str,
     api_key: str,
     teacher_model_name: str,
+    patch_hdfs_tokenizer_import: bool = False,
 ) -> int:
     tokenizer_name_or_path = tokenizer_name_or_path or model_name
     if test_name not in ALL_TESTS:
@@ -63,7 +64,9 @@ async def main(
     wait_for_healthz_ready(base_url)
 
     test = ALL_TESTS[test_name]
-    install_hdfs_tokenizer_patch()
+    if patch_hdfs_tokenizer_import:
+        print("WARNING: enabling unsupported HDFS tokenizer monkey patch")
+        install_hdfs_tokenizer_patch()
 
     success = True
     try:
@@ -114,6 +117,11 @@ if __name__ == "__main__":
         default=DEFAULT_TEACHER_MODEL,
         help="Teacher model used by OPD workloads.",
     )
+    parser.add_argument(
+        "--patch-hdfs-tokenizer-import",
+        action="store_true",
+        help="Enable the unsupported Tinker/Transformers monkey patch for hdfs:// tokenizer paths.",
+    )
     args = parser.parse_args()
 
     raise SystemExit(
@@ -125,6 +133,7 @@ if __name__ == "__main__":
                 base_url=args.base_url,
                 api_key=args.api_key,
                 teacher_model_name=args.teacher_model_name,
+                patch_hdfs_tokenizer_import=args.patch_hdfs_tokenizer_import,
             )
         )
     )

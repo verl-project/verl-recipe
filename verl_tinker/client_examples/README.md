@@ -85,6 +85,8 @@ Useful arguments:
 - `--test-name`: workload selector.
 - `--teacher-model-name`: teacher requested by OPD workloads. Defaults to
   `Qwen/Qwen3-30B-A3B`.
+- `--patch-hdfs-tokenizer-import`: opt in to the unsupported HDFS tokenizer
+  monkey patch described below. Disabled by default.
 
 Run the one-step OPD smoke workload with:
 
@@ -94,6 +96,27 @@ uv run run_single_test.py \
   --model-name Qwen/Qwen3-1.7B \
   --teacher-model-name Qwen/Qwen3-30B-A3B
 ```
+
+### HDFS tokenizer compatibility patch
+
+The Tinker SDK and Tinker Cookbook assume tokenizer identifiers are local paths
+or Hugging Face model IDs. They also split model identifiers at `:`, which
+breaks `hdfs://` URIs. If a test server exposes an HDFS tokenizer URI, the
+client runner can install a monkey patch before running the workload:
+
+```bash
+uv run run_single_test.py \
+  --test-name opd_deepmath \
+  --patch-hdfs-tokenizer-import
+```
+
+This is intentionally disabled by default and is a fragile compatibility
+workaround, not supported HDFS integration. It patches private Tinker SDK and
+Cookbook functions plus `AutoTokenizer.from_pretrained`, so upstream package
+updates can break it. Prefer configuring a normal Hugging Face tokenizer ID or
+a local tokenizer path whenever possible. On a cache miss, the workaround
+copies only tokenizer/config files from HDFS into `/tmp`; it excludes model
+weight files.
 
 Some workloads download Hugging Face datasets. Configure the standard Hugging
 Face cache environment variables if you need offline or pre-populated datasets.
