@@ -21,6 +21,9 @@ This recipe supplies the pieces verl does not have for that setting:
 
 It plugs in through verl's **public AgentLoop extension point** — no verl source changes.
 
+The RL warm start this recipe trains from is published separately (RL from raw base is null here —
+see below): **[`yuyu0529nya/qwen2.5-7b-tau2-airline-sft-lora`](https://huggingface.co/yuyu0529nya/qwen2.5-7b-tau2-airline-sft-lora)**.
+
 ## Required `verl` version
 
 See [`REQUIRED_VERL.txt`](REQUIRED_VERL.txt). Pinned to `ad2e3c2` (2026-07-10), the commit every
@@ -43,11 +46,17 @@ band, and both seeds land inside 0.0125 of each other.
 
 ### ⚠️ Two things you need to know before you try to reproduce this
 
-**1. Those runs start from a teacher-distilled SFT checkpoint, which is not distributed here.**
-From raw `Qwen2.5-7B-Instruct`, GRPO on this task is **null**, and that is a property of the task,
-not a bug: base success is ~20%, so most groups come back all-fail → zero intra-group variance →
-the group-relative advantage is ~0 → no gradient. You need a warm start that already exhibits the
-target skills before GRPO has anything to sharpen.
+**1. You must start from the distilled SFT warm start, not raw `Qwen2.5-7B-Instruct`.**
+From raw base, GRPO on this task is **null** — a property of the task, not a bug: base success is
+~20%, so most groups come back all-fail → zero intra-group variance → the group-relative advantage
+is ~0 → no gradient. Worse, the base policy's own successful rollouts never invoke the write-tools
+(`update_reservation_*`) that held-out tasks require, so self-sampling cannot bootstrap them either.
+RL sharpens what a policy already does sometimes; it cannot invent a skill.
+
+The warm start is published so this is reproducible end-to-end:
+**[`yuyu0529nya/qwen2.5-7b-tau2-airline-sft-lora`](https://huggingface.co/yuyu0529nya/qwen2.5-7b-tau2-airline-sft-lora)**
+(LoRA, Apache-2.0, distilled from DeepSeek-V3 teacher trajectories). Merge it into the base and
+point `POLICY_MODEL` at the merged weights — that is exactly the `step 0` of the table above.
 
 **2. The default learning rate is not the one that works.**
 At `lr=4e-6` / `2e-5` the curve is flat and looks like a structural problem. It is not — it is just
@@ -63,6 +72,19 @@ pip install tau2-bench        # or install from source: https://github.com/sierr
 
 python data_prep_airline.py   # -> train.parquet / test.parquet
 python test_tau2_loop_offline.py   # CPU-only sanity check, see Tests below
+```
+
+### Warm start (required — see the note above)
+
+```python
+from peft import PeftModel
+from transformers import AutoModelForCausalLM
+
+base = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-7B-Instruct", torch_dtype="auto")
+merged = PeftModel.from_pretrained(
+    base, "yuyu0529nya/qwen2.5-7b-tau2-airline-sft-lora"
+).merge_and_unload()
+merged.save_pretrained("./models/qwen25-7b-sft-airline")   # -> POLICY_MODEL
 ```
 
 ### User simulator: pick one
@@ -83,7 +105,7 @@ across any comparison you care about.
 
 ```bash
 LR=1e-4 TRAIN_BS=24 ROLLOUT_N=12 EPOCHS=20 TEST_FREQ=5 \
-POLICY_MODEL=/path/to/your/sft-checkpoint \
+POLICY_MODEL=./models/qwen25-7b-sft-airline \
 bash example/run_tau2_grpo_7b.sh
 ```
 
