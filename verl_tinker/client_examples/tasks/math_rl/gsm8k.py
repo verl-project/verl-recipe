@@ -2,6 +2,8 @@ from tinker_cookbook import checkpoint_utils, cli_utils, model_info
 from tinker_cookbook.recipes.math_rl import math_env
 from tinker_cookbook.rl.train import Config, KLReferenceConfig, main
 
+from ..utils import model_name_slug
+
 
 async def run_math_rl_gsm8k_test(base_url, model_name, tokenizer_name_or_path=None):
     tokenizer_name_or_path = tokenizer_name_or_path or model_name
@@ -38,7 +40,7 @@ async def run_math_rl_gsm8k_test(base_url, model_name, tokenizer_name_or_path=No
         kl_reference_config=KLReferenceConfig(base_model=model_name),
         # Logging / saving
         wandb_project="verl-tinker-ci",
-        wandb_name="math-rl-gsm8k-qwen3-1.7b",
+        wandb_name=f"math-rl-gsm8k-{model_name_slug(model_name)}",
         log_path="/tmp/tinker-gsm8k-rl-smoke",
         eval_every=0,
         save_every=0,

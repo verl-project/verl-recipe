@@ -14,6 +14,8 @@ from tinker_cookbook.supervised.data import conversation_to_datum
 from tinker_cookbook.supervised.types import ChatDatasetBuilderCommonConfig
 from tinker_cookbook.tokenizer_utils import get_tokenizer
 
+from ..utils import model_name_slug
+
 
 async def run_no_robot_test(base_url, model_name, tokenizer_name_or_path=None):
     tokenizer_name_or_path = tokenizer_name_or_path or model_name
@@ -37,7 +39,7 @@ async def run_no_robot_test(base_url, model_name, tokenizer_name_or_path=None):
         base_url=base_url,
         # WandB
         wandb_project="verl-tinker-ci",
-        wandb_name="sft-norobot-qwen3-1.7b",
+        wandb_name=f"sft-norobot-{model_name_slug(model_name)}",
     )
     cli_utils.check_log_dir(config.log_path, behavior_if_exists="delete")
     await train.main(config)

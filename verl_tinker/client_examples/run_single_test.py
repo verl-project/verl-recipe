@@ -4,6 +4,7 @@ import os
 import traceback
 
 try:
+    from .hdfs_tokenizer_patch import install_hdfs_tokenizer_patch
     from .tasks.math_rl.gsm8k import run_math_rl_gsm8k_test
     from .tasks.math_sft_rl.gsm8k import run_math_sft_rl_gsm8k_test
     from .tasks.opd.deepmath import DEFAULT_TEACHER_MODEL, run_opd_deepmath_test
@@ -13,6 +14,7 @@ try:
     from .tasks.utils import shutdown_server, wait_for_healthz_ready
 except ImportError:
     # Direct ``python run_single_test.py`` execution from client_examples.
+    from hdfs_tokenizer_patch import install_hdfs_tokenizer_patch
     from tasks.math_rl.gsm8k import run_math_rl_gsm8k_test
     from tasks.math_sft_rl.gsm8k import run_math_sft_rl_gsm8k_test
     from tasks.opd.deepmath import DEFAULT_TEACHER_MODEL, run_opd_deepmath_test
@@ -61,6 +63,7 @@ async def main(
     wait_for_healthz_ready(base_url)
 
     test = ALL_TESTS[test_name]
+    install_hdfs_tokenizer_patch()
 
     success = True
     try:

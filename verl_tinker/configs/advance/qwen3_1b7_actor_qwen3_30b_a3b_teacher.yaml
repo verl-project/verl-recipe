@@ -34,7 +34,8 @@ actor_rollout_ref:
   ref:
     enable: false
   model:
-    path: ${oc.env:TINKER_SERVER_MODEL,Qwen/Qwen3-1.7B}
+    # path: ${oc.env:TINKER_SERVER_MODEL,Qwen/Qwen3-1.7B}
+    path: hdfs://harunava/home/byte_arnold_va_ssd/mlsys/models/Qwen3-1.7B
     use_remove_padding: true
     enable_gradient_checkpointing: true
     trust_remote_code: true
@@ -45,7 +46,8 @@ distillation:
   n_gpus_per_node: 4
   teacher_models:
     teacher_model:
-      model_path: ${oc.env:TINKER_TEACHER_MODEL,Qwen/Qwen3-30B-A3B}
+      # model_path: ${oc.env:TINKER_TEACHER_MODEL,Qwen/Qwen3-30B-A3B}
+      model_path: hdfs://harunava/home/byte_arnold_va_ssd/mlsys/models/Qwen3-30B-A3B
       inference:
         name: vllm
         tensor_model_parallel_size: 4

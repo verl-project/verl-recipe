@@ -59,7 +59,7 @@ async def run_opd_deepmath_test(base_url: str, model_name: str, tokenizer_name_o
         compute_post_kl=False,
         eval_every=0,
         save_every=0,
-        max_steps=1,
+        max_steps=50,
     )
 
     cli_utils.check_log_dir(config.log_path, behavior_if_exists="delete")

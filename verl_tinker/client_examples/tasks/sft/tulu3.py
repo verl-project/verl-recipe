@@ -4,6 +4,8 @@ from tinker_cookbook.renderers import TrainOnWhat
 from tinker_cookbook.supervised import train
 from tinker_cookbook.supervised.types import ChatDatasetBuilderCommonConfig
 
+from ..utils import model_name_slug
+
 
 async def run_tulu3_test(base_url, model_name, tokenizer_name_or_path=None):
     tokenizer_name_or_path = tokenizer_name_or_path or model_name
@@ -28,7 +30,7 @@ async def run_tulu3_test(base_url, model_name, tokenizer_name_or_path=None):
         base_url=base_url,
         # WandB
         wandb_project="verl-tinker-ci",
-        wandb_name="sft-tulu3-qwen3-1.7b",
+        wandb_name=f"sft-tulu3-{model_name_slug(model_name)}",
     )
     cli_utils.check_log_dir(config.log_path, behavior_if_exists="delete")
     await train.main(config)

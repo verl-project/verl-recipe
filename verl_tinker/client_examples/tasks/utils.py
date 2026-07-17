@@ -1,7 +1,16 @@
+import re
 import time
 from urllib.parse import urljoin
 
 import requests
+
+
+def model_name_slug(model_name: str) -> str:
+    """Return a W&B-safe run-name component for a model identifier or path."""
+
+    normalized = model_name.rstrip("/").rsplit("/", 1)[-1].lower()
+    slug = re.sub(r"[^a-z0-9._-]+", "-", normalized).strip("-._")
+    return slug or "model"
 
 
 def wait_for_healthz_ready(url: str, max_wait_time: int = 7200):
