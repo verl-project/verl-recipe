@@ -20,6 +20,7 @@ from typing import Any, Optional
 import ray
 
 from verl.single_controller.ray import RayClassWithInitArgs
+from verl.utils.profiler import marked_timer
 from verl.workers.rollout.replica import TokenOutput
 from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer, vLLMReplica
 
@@ -34,76 +35,6 @@ def _patch_expandable_segments():
         logger.info("Server process: patched PYTORCH_NPU_ALLOC_CONF to disable expandable_segments")
 
 
-class LegacyAsyncFlowHttpServer(vLLMHttpServer):
-    """vLLMHttpServer with model_version tracking for async flow."""
-
-    def __init__(self, *args, **kwargs):
-        _patch_expandable_segments()
-        super().__init__(*args, **kwargs)
-        self.model_version: int = 0
-        self._pause_cond = asyncio.Condition()
-        self._paused = False
-        self.logger = logging.getLogger(__name__)
-        self.logger.info("Using legacy vllm api")
-
-    def get_model_version(self) -> int:
-        return self.model_version
-
-    def set_model_version(self, version: int):
-        self.model_version = version
-
-    async def generate(
-        self,
-        prompt_ids: list[int],
-        sampling_params: dict[str, Any],
-        request_id: str,
-        image_data: Optional[list[Any]] = None,
-        video_data: Optional[list[Any]] = None,
-    ) -> TokenOutput:
-        """Generate sequence with token-in-token-out."""
-        async with self._pause_cond:
-            await self._pause_cond.wait_for(lambda: not self._paused)
-
-        return await super().generate(prompt_ids, sampling_params, request_id, image_data, video_data)
-
-    async def pause_generation(
-        self,
-        *,
-        wait_for_inflight_requests: bool = False,
-        clear_cache: bool = True,
-        timeout_s: float = 600.0,
-    ) -> None:
-        async with self._pause_cond:
-            if self._paused:
-                return
-            self._paused = True
-
-        if not wait_for_inflight_requests:
-            request_ids = list(self.engine.output_processor.request_states.keys())
-            if request_ids:
-                await self.abort_all_requests(reset_prefix_cache=False)
-
-        # Drain inflight before clearing cache / returning (matches "block until truly paused")
-        await asyncio.wait_for(self.wait_for_requests_to_drain(), timeout=timeout_s)
-
-        if clear_cache:
-            try:
-                await self.clear_kv_cache()
-            except Exception as e:
-                self.logger.warning(f"clear_kv_cache failed during pause: {e}")
-
-    async def resume_generation(self) -> None:
-        """Resume generation after pause_generation."""
-        async with self._pause_cond:
-            self._paused = False
-            self._pause_cond.notify_all()  # Wake up all waiting requests
-
-    async def is_paused(self) -> bool:
-        """Return whether the server is currently paused."""
-        async with self._pause_cond:
-            return self._paused
-
-
 class AsyncFlowHttpServer(vLLMHttpServer):
     """vLLMHttpServer with model_version tracking for async flow."""
 
@@ -111,6 +42,14 @@ class AsyncFlowHttpServer(vLLMHttpServer):
         _patch_expandable_segments()
         super().__init__(*args, **kwargs)
         self.logger = logging.getLogger(__name__)
+
+        # ── cluster trace auto-install (vLLM engine replica) ─────────────
+        if os.environ.get("VERL_CLUSTER_TRACE"):
+            from recipe.async_flow.utils.cluster_trace.trace_logger import install
+
+            install(role="vllm_engine", rank=self.replica_rank)
+        # ─────────────────────────────────────────────────────────────────
+
         self.logger.info("Using new vllm api")
 
     def get_model_version(self) -> int:
@@ -119,25 +58,39 @@ class AsyncFlowHttpServer(vLLMHttpServer):
     def set_model_version(self, version: int):
         self.global_steps = version
 
+    async def generate(
+        self,
+        prompt_ids: list[int],
+        sampling_params: dict[str, Any],
+        request_id: str,
+        image_data: Optional[list[Any]] = None,
+        video_data: Optional[list[Any]] = None,
+        priority: int = 0,
+    ) -> TokenOutput:
+        with marked_timer("vllm_generate", {}):
+            return await super().generate(prompt_ids, sampling_params, request_id, image_data, video_data, priority)
+
     async def pause_generation(
         self,
         *,
         wait_for_inflight_requests: bool = False,
         clear_cache: bool = True,
-        timeout_s: float = 600.0,
+        timeout_s: float = 3600.0,
     ) -> None:
         self.logger.debug("begin pausing")
-        await asyncio.wait_for(
-            self.engine.pause_generation(
-                wait_for_inflight_requests=wait_for_inflight_requests, clear_cache=clear_cache
-            ),
-            timeout=timeout_s,
-        )
+        with marked_timer("vllm_pause", {}):
+            await asyncio.wait_for(
+                self.engine.pause_generation(
+                    wait_for_inflight_requests=wait_for_inflight_requests, clear_cache=clear_cache
+                ),
+                timeout=timeout_s,
+            )
         self.logger.debug("end pausing")
 
     async def resume_generation(self) -> None:
         self.logger.debug("begin resuming")
-        await self.engine.resume_generation()
+        with marked_timer("vllm_resume", {}):
+            await self.engine.resume_generation()
         self.logger.debug("end resuming")
 
     async def is_paused(self) -> bool:
@@ -153,13 +106,17 @@ class AsyncFlowReplica(vLLMReplica):
         from packaging.version import Version
 
         vllm_version = Version(vllm.__version__)
-        if vllm_version < Version("0.11"):
-            self.server_class = ray.remote(LegacyAsyncFlowHttpServer)
-        else:
-            self.server_class = ray.remote(AsyncFlowHttpServer)
+        assert vllm_version > Version("0.11"), f"current {vllm_version=}, requried its version > 0.11"
+        self.server_class = ray.remote(AsyncFlowHttpServer)
+        self.ckpt_backend = self.config.checkpoint_engine.backend
 
     def get_ray_class_with_init_args(self) -> RayClassWithInitArgs:
-        from recipe.async_flow.workers.rollout_worker import AsyncFlowCheckpointEngineWorker
+        if self.ckpt_backend == "flexfetch":
+            from recipe.async_flow.utils.async_flow_flexfetch_checkpoint_engine import (
+                AsyncFlowCheckpointEngineWorker,
+            )
+        else:
+            from verl.checkpoint_engine.base import CheckpointEngineWorker as AsyncFlowCheckpointEngineWorker
 
         worker_dict_cls = RayClassWithInitArgs(
             cls=ray.remote(AsyncFlowCheckpointEngineWorker),
@@ -174,7 +131,7 @@ class AsyncFlowReplica(vLLMReplica):
         *,
         wait_for_inflight_requests: bool = True,
         clear_cache: bool = True,
-        timeout_s: float = 900.0,
+        timeout_s: float = 3600.0,
     ) -> dict[str, Any]:
         await self._server_handle.pause_generation.remote(
             wait_for_inflight_requests=wait_for_inflight_requests,

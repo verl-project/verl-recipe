@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.#
+import copy
 import logging
 import os
 import time
@@ -25,9 +26,8 @@ from omegaconf import OmegaConf
 from ray.util.queue import Queue
 from recipe.async_flow.agent_loop.agent_loop import AsyncFlowAgentLoopManager
 from recipe.async_flow.config import get_resource_pool_spec, is_role_enabled
-from recipe.async_flow.utils.async_flow_checkpoint_engine import AsyncFlowCheckpointEngineManager
-from recipe.async_flow.utils.metics_util import aggregate_metrics_before_reduce, reduce_timing_metrics
 from recipe.async_flow.utils.metric.prometheus import marked_timer
+from recipe.async_flow.utils.metrics_util import aggregate_metrics_before_reduce, reduce_timing_metrics
 from recipe.async_flow.utils.transfer_queue.tq_client import get_transferqueue_client
 from recipe.async_flow.utils.transfer_queue.tq_mgr import TransferQueueManager
 from recipe.async_flow.workers import (
@@ -87,6 +87,14 @@ class AsyncFlowGRPOTrainer(RayPPOTrainer):
         self.wg_names = ["actor_fwd_wg", "ref_fwd_wg", "advantage_wg", "actor_train_wg"]
         self.async_rollout_mode = True
         self.async_rollout_manager = None
+        self.ckpt_backend = None
+
+        # ── cluster trace auto-install (driver orchestration) ────────────
+        if os.environ.get("VERL_CLUSTER_TRACE"):
+            from recipe.async_flow.utils.cluster_trace.trace_logger import install
+
+            install(role="driver_ctrl", rank=0)
+        # ─────────────────────────────────────────────────────────────────
 
         self._init_transfer_queue()
         self._init_flow_control_queue()
@@ -108,6 +116,12 @@ class AsyncFlowGRPOTrainer(RayPPOTrainer):
         from verl.utils.config import omega_conf_to_dataclass
 
         ckpt_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
+        if self.ckpt_backend == "flexfetch":
+            from recipe.async_flow.utils.async_flow_flexfetch_checkpoint_engine import (
+                AsyncFlowCheckpointEngineManager,
+            )
+        else:
+            from recipe.async_flow.utils.async_flow_checkpoint_engine_hccl import AsyncFlowCheckpointEngineManager
         self.train_rollout_fwd_ckpt_manager = AsyncFlowCheckpointEngineManager(
             config=ckpt_engine_config,
             trainer_wg=self.actor_train_wg,
@@ -160,7 +174,17 @@ class AsyncFlowGRPOTrainer(RayPPOTrainer):
         method_start_time = time.perf_counter()
         default_init_args = {"config": self.config}
 
-        train_init_args = {"config": self.config, "flow_control_queue": self.flow_control_queue}
+        train_init_args = {"config": copy.deepcopy(self.config), "flow_control_queue": self.flow_control_queue}
+
+        self.ckpt_backend = self.config.actor_rollout_ref.rollout.checkpoint_engine.backend
+        if self.ckpt_backend == "flexfetch":
+            OmegaConf.set_struct(train_init_args["config"].actor_rollout_ref, True)
+            OmegaConf.update(
+                train_init_args["config"],
+                "actor_rollout_ref.rollout.checkpoint_engine.engine_kwargs.flexfetch.is_trainer",
+                True,
+                force_add=True,  # 允许自动创建不存在的 key
+            )
 
         worker_defs = [
             ("actor_fwd", "actor_fwd_wg", ActorForwardWorker, default_init_args),
@@ -189,7 +213,16 @@ class AsyncFlowGRPOTrainer(RayPPOTrainer):
                     "worker_cls": worker_cls,
                     "resource_pool": RayResourcePool(process_on_nodes=process_on_nodes, use_gpu=use_gpu),
                     "init_args": init_args,
+                    "gpu_count": sum(process_on_nodes) if use_gpu else 0,
                 }
+            )
+
+        sorted_tasks_for_pg = sorted(tasks, key=lambda t: t["gpu_count"], reverse=True)
+        for t in sorted_tasks_for_pg:
+            pg_start = time.perf_counter()
+            t["resource_pool"].get_placement_groups(strategy="STRICT_PACK", device_name=self.device_name)
+            logger.info(
+                f"PG ready for [{t['name']}] gpu_count={t['gpu_count']} cost time:{time.perf_counter() - pg_start}"
             )
 
         with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
@@ -274,7 +307,11 @@ class AsyncFlowGRPOTrainer(RayPPOTrainer):
         Returns:
             同步后的 model_version。
         """
-        train_versions = self.actor_train_wg.get_current_version()
+        self._check_worker_health()
+        try:
+            train_versions = self.actor_train_wg.get_current_version()
+        except Exception as e:
+            raise RuntimeError(f"Failed to communicate with train worker: {e}") from e
         current_train_version = train_versions[0]
 
         if current_train_version <= current_model_version:
@@ -288,6 +325,7 @@ class AsyncFlowGRPOTrainer(RayPPOTrainer):
 
         logger.info(f"Syncing weights: v{current_model_version} -> v{current_train_version}")
         timing_raw = {}
+        wait_for_inflight_requests = self.config.async_flow.get("wait_for_inflight_requests", True)
 
         is_last_step = self.global_steps >= self.total_training_steps
         self.progress_bar.update(1)
@@ -302,7 +340,9 @@ class AsyncFlowGRPOTrainer(RayPPOTrainer):
                 self._save_checkpoint()
 
         with marked_timer("sync_param", timing_raw):
-            self.train_rollout_fwd_ckpt_manager.update_weights_rollout_fwd(version_id=current_train_version)
+            self.train_rollout_fwd_ckpt_manager.update_weights_rollout_fwd(
+                version_id=current_train_version, wait_for_inflight=wait_for_inflight_requests
+            )
 
         logger.info(f"[CKPT Engine Metrics] Sync param cost time:{timing_raw['sync_param']}")
         logger.info(f"Weight sync complete for version {current_train_version}")
@@ -347,10 +387,45 @@ class AsyncFlowGRPOTrainer(RayPPOTrainer):
         )
         self.logger_tracking.log(data=timing_metrics_aggregated, step=self.global_steps)
 
+    def _check_worker_health(self) -> None:
+        """Check health of all async workers and raise RuntimeError if any has failed."""
+        for wg_name in self.wg_names:
+            if not hasattr(self, wg_name):
+                continue
+            wg = getattr(self, wg_name)
+            try:
+                stats_list = wg.get_stats()
+                for stats in stats_list:
+                    if stats.get("last_error"):
+                        raise RuntimeError(f"Worker {stats['consumer_name']} fatal error: {stats['last_error']}")
+                    if not stats.get("running", True):
+                        raise RuntimeError(
+                            f"Worker {stats['consumer_name']} loop stopped unexpectedly "
+                            f"(errors={stats.get('errors', 0)})"
+                        )
+            except RuntimeError:
+                raise
+            except Exception as e:
+                raise RuntimeError(f"Failed to get stats from {wg_name} -- worker may have crashed: {e}") from e
+
+        if self.async_rollout_manager is not None:
+            error = self.async_rollout_manager.check_health()
+            if error is not None:
+                raise RuntimeError(f"AgentLoop error: {error}")
+
     def shutdown(self):
         for wg_name in self.wg_names:
             if hasattr(self, wg_name):
-                getattr(self, wg_name).stop_async_loop()
+                try:
+                    getattr(self, wg_name).stop_async_loop()
+                except Exception as e:
+                    logger.warning(f"Error stopping {wg_name}: {e}")
+        if self.async_rollout_manager is not None:
+            try:
+                if hasattr(self.async_rollout_manager, "_loop") and self.async_rollout_manager._loop is not None:
+                    self.async_rollout_manager._loop.call_soon_threadsafe(self.async_rollout_manager._loop.stop)
+            except Exception as e:
+                logger.warning(f"Error stopping agent loop: {e}")
         logger.info("All async workers stopped")
 
     def fit(self):
@@ -392,6 +467,7 @@ class AsyncFlowGRPOTrainer(RayPPOTrainer):
 
         for epoch in range(current_epoch, self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
+                self._check_worker_health()
                 if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
                     self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=False)
                 metrics = {}
@@ -405,16 +481,17 @@ class AsyncFlowGRPOTrainer(RayPPOTrainer):
                     )
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
                 num_prompts = len(batch.batch)
-
+                data_waiting = 0
                 while self.flow_control_queue.qsize() + num_prompts > self.flow_control_queue.maxsize:
-                    with marked_timer("flow_control", timing_raw):
-                        time.sleep(3)
-                        logger.info(
-                            f"Flow control queue backpressure: "
-                            f"inflight({self.flow_control_queue.qsize()}) + new({num_prompts}) = "
-                            f"{self.flow_control_queue.qsize() + num_prompts} > "
-                            f"capacity({self.flow_control_queue.maxsize}), waiting for generation to complete..."
-                        )
+                    if data_waiting % 60 == 0:
+                        self._check_worker_health()
+                    time.sleep(3)
+                    logger.info(
+                        f"Flow control queue backpressure: "
+                        f"inflight({self.flow_control_queue.qsize()}) + new({num_prompts}) = "
+                        f"{self.flow_control_queue.qsize() + num_prompts} > "
+                        f"capacity({self.flow_control_queue.maxsize}), waiting for generation to complete..."
+                    )
 
                 batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
 

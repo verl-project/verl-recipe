@@ -14,11 +14,15 @@
 # limitations under the License.#
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from enum import Enum, auto
 from typing import Any, Optional
 
 import torch
+import torch.distributed as dist
 from recipe.async_flow.utils.transfer_queue.tq_client import TransferQueueClient
+
+from verl.utils.device import get_device_id, get_device_name
 
 logger = logging.getLogger(__name__)
 
@@ -115,11 +119,24 @@ class FSDPStrategy(DispatchStrategy):
 
     每个 rank 独立从 TQ 获取不同的数据，独立写回结果。
     TQ 需要保证不同 rank 获取到不同的数据（通过 consumer 机制）。
+
+    可选 pre-dispatch 就绪检查：当提供 ``query_usable_count_fn`` 时，
+    ``dispatch_data`` 会先轮询 TQ，跨 rank all_reduce(MIN) 同步，
+    确认可用样本 >= ``needed_count`` 后才真正 fetch 数据。
     """
 
-    def __init__(self, rank: int = 0, world_size: int = 1):
+    def __init__(
+        self,
+        rank: int = 0,
+        world_size: int = 1,
+        query_usable_count_fn: Optional[Callable[[], Any]] = None,
+        needed_count_fn: Optional[Callable[[], int]] = None,
+    ):
         self.rank = rank
         self.world_size = world_size
+        # pre-dispatch readiness check 回调
+        self._query_usable_count_fn = query_usable_count_fn
+        self._needed_count_fn = needed_count_fn
 
     def is_master_for_dispatch(self) -> bool:
         # FSDP 中每个 rank 都独立获取数据，都是自己的 "master"
@@ -140,8 +157,31 @@ class FSDPStrategy(DispatchStrategy):
         TQ 的 consumer 机制保证不同 rank 获取到不同的数据。
         barrier 确保所有 rank 都拿到数据后再开始 FSDP 计算。
         """
+        if self._query_usable_count_fn is not None:
+            ready = await self._is_usable_cnt_ready()
+            if not ready:
+                return None, None
+
         payload, indexes = await tq_client.get_experience_async(**fetch_params)
         return payload, indexes
+
+    async def _is_usable_cnt_ready(self) -> bool:
+        """轮询 TQ 可用样本数，跨 rank all_reduce(MIN) 同步，直到数据足够。"""
+        needed_global = self._needed_count_fn() if self._needed_count_fn else 0
+        dp_world_size = dist.get_world_size() if dist.is_available() and dist.is_initialized() else 1
+
+        local_usable_experience_count = await self._query_usable_count_fn()
+
+        # 跨 rank 同步：取 MIN，防止 RPC 抖动导致 rank 间读到不一致的值。
+        if dp_world_size > 1:
+            device = torch.device(f"{get_device_name()}:{get_device_id()}")
+            flag = torch.tensor([local_usable_experience_count], dtype=torch.int64, device=device)
+            dist.all_reduce(flag, op=dist.ReduceOp.MIN)
+            min_usable_experience_count = int(flag.item())
+        else:
+            min_usable_experience_count = local_usable_experience_count
+
+        return min_usable_experience_count >= needed_global
 
     async def collect_data(
         self,

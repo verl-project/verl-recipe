@@ -28,6 +28,9 @@ class AsyncFlowGRPOConfig(BaseConfig):
 
     # Staleness control
     staleness: int = 0
+    # partial rollout related
+    rollout_max_resume_attempts: int = 1
+    wait_for_inflight_requests: bool = True
     # Transfer Queue 配置
     experience_topic: str = "experience"
     ref_experience_count: int = 4

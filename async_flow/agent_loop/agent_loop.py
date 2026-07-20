@@ -57,7 +57,7 @@ def _extract_worker_idx(actor_name: str) -> int:
 class AsyncFlowLLMServerManager(AsyncLLMServerManager):
     """AsyncLLMServerManager with model_version support.
 
-    Adds generate_with_version() that returns (TokenOutput, model_version)
+    Adds generate_with_version() that returns (TokenOutput, model_version, abort_stats)
     by querying the chosen server's model_version in parallel with generation.
     """
 
@@ -69,7 +69,7 @@ class AsyncFlowLLMServerManager(AsyncLLMServerManager):
         sampling_params: dict[str, Any],
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
-    ) -> tuple[TokenOutput, int]:
+    ) -> tuple[TokenOutput, int, dict]:
         """Generate tokens and return model_version from the chosen server.
 
         Args:
@@ -80,21 +80,55 @@ class AsyncFlowLLMServerManager(AsyncLLMServerManager):
             video_data: Optional video data.
 
         Returns:
-            Tuple[TokenOutput, int]: (token output, model_version)
+            Tuple[TokenOutput, int, dict]: (token output, model_version, abort_stats)
         """
         server_id, server = await self._acquire_server(request_id)
         try:
-            output, model_version = await asyncio.gather(
-                server.generate.remote(
-                    request_id=uuid4().hex,
-                    prompt_ids=prompt_ids,
-                    sampling_params=sampling_params,
-                    image_data=image_data,
-                    video_data=video_data,
-                ),
-                server.get_model_version.remote(),
-            )
-            return output, model_version
+            partial_prompt_ids = prompt_ids.copy()
+            output_list = []
+            token_budget = self.config.data.get("max_response_length", 1)
+            attempts = self.config.async_flow.get("rollout_max_resume_attempts", 1)
+            attempt = 0
+            while attempt < attempts:
+                attempt += 1
+                sampling_params["max_tokens"] = token_budget
+                output, model_version = await asyncio.gather(
+                    server.generate.remote(
+                        request_id=uuid4().hex,
+                        prompt_ids=partial_prompt_ids,
+                        sampling_params=sampling_params,
+                        image_data=image_data,
+                        video_data=video_data,
+                    ),
+                    server.get_model_version.remote(),
+                )
+                output_list.append(output)
+
+                if output.stop_reason == "aborted":
+                    logger.info(f"aborted request resume generation {output_list}")
+                    partial_prompt_ids.extend(output.token_ids)
+                    token_budget -= len(output.token_ids)
+                    if token_budget <= 0:
+                        break
+                else:
+                    break
+
+            if len(output_list) != 1:
+                response_ids = []
+                response_logp = []
+                for output in output_list:
+                    response_ids.extend(output.token_ids)
+                    if output.log_probs is not None:
+                        response_logp.extend(output.log_probs)
+
+                if len(response_logp) == 0:
+                    response_logp = None
+                output = TokenOutput(token_ids=response_ids, log_probs=response_logp, stop_reason=output.stop_reason)
+                logger.info(f"aborted request completed {output_list} {output} {len(prompt_ids)} {len(response_ids)}")
+
+            num_aborts = len(output_list) - 1
+            abort_stats = {"is_partial": num_aborts > 0, "num_aborts": num_aborts}
+            return output, model_version, abort_stats
         finally:
             self._release_server(server_id)
 
@@ -141,16 +175,36 @@ class AsyncFlowAgentLoopManager(AgentLoopManager):
 
         self.prompt_pool = asyncio.Queue()
         self._semaphore = None
-        # 从配置里读train_bs, 实际运行池大小为chunk_size * num_workers, 此处的inflight_limit只做上限限制
-        self.inflight_limit = self.config.data.train_batch_size
+        self.inflight_limit = self.config.data.train_batch_size * (self.config.async_flow.staleness + 1)
+        self._fatal_error = None
+        self._error_lock = threading.Lock()
 
+        self.total_size = self.config.data.train_batch_size * self.config.actor_rollout_ref.rollout.n
         self.task_monitor = {}
+        self.global_steps = 0
         self.logger_tracking = Tracking(
             project_name=self.config.trainer.project_name,
             experiment_name=self.config.trainer.experiment_name,
             default_backend=self.config.trainer.logger,
             config=OmegaConf.to_container(self.config, resolve=True),
         )
+
+    def reset_monitor(self, step):
+        num_workers = len(self.agent_loop_workers)
+        self.task_monitor = {
+            "step": step,
+            "num_workers": num_workers,
+            "task_done": 0,
+            "total_size": self.total_size,
+            "start_time": time.perf_counter(),
+            "total_num_tokens": 0,
+            "response_length": 0,  # Tensor sum
+            "prompt_length": 0,  # Tensor sum
+            "max_response": 0,  # Tensor sum
+            "partial_count": 0,
+            "total_aborts": 0,
+            "max_aborts": 0,
+        }
 
     @classmethod
     @auto_await
@@ -172,6 +226,8 @@ class AsyncFlowAgentLoopManager(AgentLoopManager):
         def run_loop():
             asyncio.set_event_loop(self._loop)
             self._semaphore = asyncio.Semaphore(self.inflight_limit)
+            # 初始化性能指标
+            self.reset_monitor(self.global_steps)
             # 为每个 Worker 启动一个消费循环
             for worker in self.agent_loop_workers:
                 self._loop.create_task(self._worker_pull_loop(worker))
@@ -182,21 +238,9 @@ class AsyncFlowAgentLoopManager(AgentLoopManager):
         self._loop_thread.start()
 
     def generate_sequences(self, prompts: DataProto) -> None:
-        num_workers = len(self.agent_loop_workers)
         step = prompts.meta_info.get("global_steps", 0)
         batch_size = len(prompts)
 
-        self.task_monitor[step] = {
-            "num_workers": num_workers,
-            "task_done": 0,
-            "total_size": batch_size,
-            "start_time": time.perf_counter(),
-            "total_num_tokens": 0,
-            "response_length": 0,  # Tensor sum
-            "prompt_length": 0,  # Tensor sum
-        }
-
-        batch_size = len(prompts)
         # 从配置里读n_sample
         num_chunks = batch_size // self.config.actor_rollout_ref.rollout.n
 
@@ -213,44 +257,66 @@ class AsyncFlowAgentLoopManager(AgentLoopManager):
         self._loop.call_soon_threadsafe(inject)
 
     async def _worker_pull_loop(self, worker):
-        while True:
+        worker_name = str(worker)
+        while self._fatal_error is None:
             try:
-                # 拿到一个Chunk（包含 1 条 Prompt 的所有 n_sample 个采样）
                 chunk = await self.prompt_pool.get()
+                if self._fatal_error is not None:
+                    break
                 async with self._semaphore:
                     try:
                         future = worker.generate_sequences.remote(chunk)
                         result = await asyncio.wrap_future(future.future())
                         await self._process_and_writeback(result, chunk)
                     except Exception as e:
-                        # 记录具体的推理或处理错误，但不中断循环
-                        logger.exception(f"Inference or writeback error for chunk: {e}")
-
+                        error_msg = f"{type(e).__name__}: {str(e)}"
+                        logger.exception(f"Inference/writeback error: {error_msg}")
+                        with self._error_lock:
+                            self._fatal_error = f"Worker {worker_name}: {error_msg}"
+                        break
                 self.prompt_pool.task_done()
-
+            except asyncio.CancelledError:
+                break
             except Exception as e:
-                logger.error(f"Critical error in worker pull loop: {e}")
-                await asyncio.sleep(1)
+                error_msg = f"Critical: {type(e).__name__}: {str(e)}"
+                logger.exception(error_msg)
+                with self._error_lock:
+                    self._fatal_error = error_msg
+                break
 
     async def _process_and_writeback(self, result: DataProto, original_chunk: DataProto):
         """融合原生的 Metric 累加逻辑"""
-        step = original_chunk.meta_info.get("step", 0)
         await self._put_batch_to_tq(result, original_chunk)
 
         response_len_vec = result.batch["response_mask"].sum(dim=-1).float()
         prompt_len_vec = result.batch["attention_mask"].sum(dim=-1).float() - response_len_vec
         tokens = int(result.batch["attention_mask"].sum().item())
+        max_response_batch = response_len_vec.max().item()
 
-        monitor = self.task_monitor.get(step)
+        monitor = self.task_monitor
         if monitor:
             monitor["task_done"] += len(result.batch)
             monitor["total_num_tokens"] += tokens
             monitor["response_length"] += response_len_vec.sum().item()
             monitor["prompt_length"] += prompt_len_vec.sum().item()
+            monitor["max_response"] = max(max_response_batch, monitor["max_response"])
+
+            # Partial rollout statistics
+            if result.non_tensor_batch and "is_partial" in result.non_tensor_batch:
+                is_partial_list = result.non_tensor_batch["is_partial"]
+                num_aborts_list = result.non_tensor_batch.get("num_aborts")
+                for i, is_partial in enumerate(is_partial_list):
+                    if is_partial:
+                        monitor["partial_count"] += 1
+                    if num_aborts_list is not None:
+                        aborts = int(num_aborts_list[i])
+                        monitor["total_aborts"] += aborts
+                        monitor["max_aborts"] = max(monitor["max_aborts"], aborts)
 
             if monitor["task_done"] >= monitor["total_size"]:
-                self._log_final_metrics(step, monitor)
-                del self.task_monitor[step]
+                self._log_final_metrics(self.global_steps, monitor)
+                self.global_steps = self.global_steps + 1
+                self.reset_monitor(self.global_steps)
 
     async def _put_batch_to_tq(self, batch_with_response: DataProto, chunk: DataProto):
         batch_size = len(batch_with_response.batch)
@@ -274,7 +340,7 @@ class AsyncFlowAgentLoopManager(AgentLoopManager):
         model_version = [torch.tensor(0, dtype=torch.long)] * batch_size
         if batch_with_response.non_tensor_batch and "model_version" in batch_with_response.non_tensor_batch:
             model_version_list = batch_with_response.non_tensor_batch["model_version"]
-            model_version = [torch.tensor(item, dtype=torch.long) for item in model_version_list]
+            model_version = [torch.tensor(item if item else 0, dtype=torch.long) for item in model_version_list]
 
         data_dict = {
             "prompt": prompt_tensors.cpu(),
@@ -308,17 +374,40 @@ class AsyncFlowAgentLoopManager(AgentLoopManager):
         duration_s = time.perf_counter() - monitor["start_time"]
         total_responses = monitor["response_length"]
         total_prompts = monitor["prompt_length"]
+        max_response = monitor["max_response"]
 
         actual_global_tps = (total_responses / tp_size) / max(duration_s, 1e-6)
 
         timing_metrics["rollout/total_num_tokens"] = monitor["total_num_tokens"]
         timing_metrics["rollout/e2e_max_rollout"] = duration_s
-        timing_metrics["rollout/throughtput"] = actual_global_tps
-        timing_metrics["rollout/total_propmts"] = total_prompts
+        timing_metrics["rollout/throughput"] = actual_global_tps
+        timing_metrics["rollout/total_prompts"] = total_prompts
         timing_metrics["rollout/total_responses"] = total_responses
+        timing_metrics["rollout/max_response"] = max_response
+
+        # Partial rollout metrics
+        total_sequences = monitor["task_done"]
+        partial_count = monitor["partial_count"]
+        total_aborts = monitor["total_aborts"]
+        max_aborts = monitor["max_aborts"]
+        partial_ratio = partial_count / max(total_sequences, 1)
+
+        timing_metrics["rollout/partial_ratio"] = partial_ratio
+        timing_metrics["rollout/partial_count"] = partial_count
+        timing_metrics["rollout/total_aborts"] = total_aborts
+        timing_metrics["rollout/max_aborts_per_sequence"] = max_aborts
 
         self.logger_tracking.log(data=timing_metrics, step=current_version)
 
         update_metric("af_rollout_sequence_length", monitor["total_num_tokens"], labels={"step": current_version})
         update_metric("af_rollout_duration_seconds", duration_s, labels={"step": current_version})
         logger.info(f"Step {current_version} Metrics logged. TPS: {actual_global_tps:.2f}")
+
+    def check_health(self) -> Optional[str]:
+        """Check if the agent loop has encountered a fatal error.
+
+        Returns:
+            Error message string if a fatal error occurred, None otherwise.
+        """
+        with self._error_lock:
+            return self._fatal_error

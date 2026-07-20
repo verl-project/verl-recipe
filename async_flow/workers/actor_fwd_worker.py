@@ -20,6 +20,7 @@ from typing import Any
 import ray
 import torch
 from omegaconf import DictConfig
+from recipe.async_flow.utils.metric.prometheus import marked_timer
 from recipe.async_flow.utils.transfer_queue.tq_client import get_transferqueue_client
 from recipe.async_flow.workers.base_async_worker import AsyncWorkerMixin
 from recipe.async_flow.workers.data_dispatch_strategy import EngineBackend
@@ -73,7 +74,12 @@ class ActorForwardWorker(ActorRolloutRefWorker, AsyncWorkerMixin):
 
         # 模型权重更新变量
         self._paused = False
-
+        checkpoint_engine_config = omega_conf_to_dataclass(self.config.rollout.checkpoint_engine)
+        self.ckpt_backend = checkpoint_engine_config.backend
+        if self.ckpt_backend == "flexfetch":
+            from recipe.async_flow.utils.checkpoint_engine.flexfetch_checkpoint_engine import (  # noqa: F401
+                FlexFetchCheckpointEngine,
+            )
         self.staleness = config.async_flow.staleness
         self.temp_queue = deque(maxlen=self.staleness + 1)
         self.ckpt_queue = deque(maxlen=self.staleness + 1)
@@ -86,33 +92,46 @@ class ActorForwardWorker(ActorRolloutRefWorker, AsyncWorkerMixin):
         self.experience_step = train_batch_size // (experience_count * worker_count)
 
         self.EXTRA_FETCH_KWARGS = {"get_n_samples": False}
+        self._state_dict = {}
         self.init_async_worker(
             tq_client=get_transferqueue_client(),
             topic=topic,
             experience_count=experience_count,
             engine_backend=EngineBackend.FSDP,
-            dispatch_strategy_kwargs={"rank": self.rank, "world_size": self.world_size},
+            dispatch_strategy_kwargs={
+                "rank": self.rank,
+                "world_size": self.world_size,
+                "query_usable_count_fn": self._query_usable_count,
+                "needed_count_fn": lambda: int(self._experience_count) * self.world_size,
+            },
         )
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_ckpt_engine(self):
-        checkpoint_engine_config = omega_conf_to_dataclass(self.config.rollout.checkpoint_engine)
-        backend = checkpoint_engine_config.backend
-        bucket_size = checkpoint_engine_config.update_weights_bucket_megabytes << 20
-        engine_kwargs = checkpoint_engine_config.engine_kwargs.get(backend, {})
-        checkpoint_engine = CheckpointEngineRegistry.new(backend, bucket_size=bucket_size, **engine_kwargs)
-        from recipe.async_flow.utils.async_flow_checkpoint_engine import (
-            AsyncFlowCheckpointEngineWithCache,
-            ReceiverRole,
-        )
-
-        self.checkpoint_engine = AsyncFlowCheckpointEngineWithCache(
-            non_cache_engine=checkpoint_engine, role=ReceiverRole.ActorFwd, worker_backend=self.config.actor.strategy
-        )
+        if self.ckpt_backend != "flexfetch":
+            checkpoint_engine_config = omega_conf_to_dataclass(self.config.rollout.checkpoint_engine)
+            backend = checkpoint_engine_config.backend
+            bucket_size = checkpoint_engine_config.update_weights_bucket_megabytes << 20
+            engine_kwargs = checkpoint_engine_config.engine_kwargs.get(backend, {})
+            self.checkpoint_engine = CheckpointEngineRegistry.new(backend, bucket_size=bucket_size, **engine_kwargs)
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE, blocking=False)
     def execute_checkpoint_engine(self, method: str, *args, **kwargs):
         return getattr(self.checkpoint_engine, method)(*args, **kwargs)
+
+    async def _query_usable_count(self) -> int:
+        """异步查询 TQ 当前 (topic, consumer) 视角下的全局可用样本数。
+
+        get_data_usable_set 只查询不消费，可以反复调用。
+        通过 ray 的 asyncio 接口获取，不阻塞 event loop。
+        """
+        # TODO: 切换到tq_client的接口，而不是通过manager调用
+        count, _ = await self._tq_client.manager.get_data_usable_set.remote(
+            self._topic,
+            self.CONSUMER_NAME,
+            list(self.INPUT_COLUMNS),
+        )
+        return int(count)
 
     def on_process_begin(self) -> None:
         paused_time = 0
@@ -120,7 +139,6 @@ class ActorForwardWorker(ActorRolloutRefWorker, AsyncWorkerMixin):
             time.sleep(1)
             paused_time += 1
             self.logger.debug(f"[FWD] {self.rank=} waiting for weight update ...")
-        self.logger.debug(f"[FWD] {self.rank=} paused {paused_time} seconds")
 
     def process_batch(self, payload: dict[str, Any], indexes: list[int]) -> dict[str, Any]:
         """处理一个批次：计算 actor log probs。"""
@@ -146,12 +164,17 @@ class ActorForwardWorker(ActorRolloutRefWorker, AsyncWorkerMixin):
         input_data = data.to_tensordict()
         input_data = left_right_2_no_padding(input_data)
 
-        # 调用父类计算 log probs
-
-        self.logger.debug(f"[FWD] {self.rank=} get in lock")
         if self._active_version != self._pending_version:
             self.logger.debug(f"[FWD] {self.rank=} loading weights {self._pending_version=}")
-            self.load_weights(self._pending_version)
+            with marked_timer("load_weight", {}):
+                model = self.actor.engine.module
+                options = StateDictOptions(full_state_dict=True, broadcast_from_rank0=False, strict=False)
+                load_result = set_model_state_dict(model=model, model_state_dict=self._state_dict, options=options)
+            self._active_version = self._pending_version
+            if isinstance(self._state_dict, dict):
+                self._state_dict.clear()
+            self._state_dict = {}
+            self.logger.info(f"[FWD] finishes updating weights with version {self._active_version=} {load_result=}")
 
         output_proto = self._do_compute_log_prob(input_data)
         self.logger.debug(f"[FWD] {self.rank=} finish computing")
@@ -190,24 +213,14 @@ class ActorForwardWorker(ActorRolloutRefWorker, AsyncWorkerMixin):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def update_weights(self, version_id):
         self.logger.info(f"[FWDWorker] starts to receive weights (with version {version_id}) at {self.rank=}")
-        torch.distributed.barrier()
-        await self.checkpoint_engine.receive_weights(version_id)
+        with marked_timer("update_weights", {}):
+            if self.ckpt_backend == "flexfetch":
+                weights_gen = self.checkpoint_engine.receive_weights(version_id=version_id)
+            else:
+                weights_gen = self.checkpoint_engine.receive_weights()
+            async for name, tensor in weights_gen:
+                self._state_dict[name] = tensor.detach().cpu()
+        self.logger.info(f"[FWDWorker]  finishes updating weights with version {self._active_version=} .")
         self._pending_version = version_id
         self._paused = False
         self.logger.info(f"[FWDWorker] finish receiving weights (with version {version_id}) at {self.rank=}")
-
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    def load_weights(self, version_id):
-        self.logger.debug(f"[FWDWorker] starts to load weights (with version {version_id}) at {self.rank=}")
-        torch.distributed.barrier()
-        weights_gen, _ = self.checkpoint_engine.get_weights(version_id)
-        state_dict = {name: param for name, param in weights_gen}
-        model = self.actor.engine.module
-        options = StateDictOptions(full_state_dict=True, broadcast_from_rank0=True, strict=False)
-        load_result = set_model_state_dict(model=model, model_state_dict=state_dict, options=options)
-        self._active_version = version_id
-        self.logger.info(
-            f"[FWDWorker]  finishes updating weights with version "
-            f"{self._pending_version=}, {self._active_version=}, {version_id=} "
-            f"{load_result=}."
-        )

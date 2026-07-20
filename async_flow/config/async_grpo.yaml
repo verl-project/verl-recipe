@@ -43,7 +43,6 @@ actor_rollout_ref:
     pipeline_model_parallel_size: 1
     log_prob_micro_batch_size_per_gpu: 4
     temperature: 1.0
-    response_length: 1024
     checkpoint_engine:
       backend: hccl
       update_weights_bucket_megabytes: 2048
@@ -88,6 +87,8 @@ async_flow:
   _target_: recipe.async_flow.async_flow_trainer.AsyncFlowGRPOConfig
   experience_topic: "experience"
   staleness: 1
+  rollout_max_resume_attempts: 5
+  wait_for_inflight_requests: False
   ref_experience_count: 4
   fwd_experience_count: 4
   reward_experience_count: 8
