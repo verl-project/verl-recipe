@@ -516,7 +516,7 @@ class TinkerServer:
                 raise HTTPException(HTTPStatus.BAD_REQUEST, str(exc)) from exc
             if teacher_key is not None:
                 teacher_model_path = teacher_backend.get_model_path(teacher_key)
-                if req.model_path is not None and req.model_path != teacher_model_path:
+                if req.model_path is not None and teacher_backend.resolve(req.model_path) != teacher_key:
                     raise HTTPException(
                         HTTPStatus.BAD_REQUEST,
                         "Teacher models are frozen and do not support alternate checkpoint paths: "
@@ -526,7 +526,7 @@ class TinkerServer:
                 self._sampling_to_teacher[sampler_id] = teacher_key
                 self._sampling_to_model_path[sampler_id] = teacher_model_path
 
-        if req.model_path:
+        if req.model_path and sampler_id == GLOBAL_SAMPLING_SESSION_ID:
             self._sampling_to_model_path[sampler_id] = req.model_path
         if req.base_model:
             self._sampling_to_base_model[sampler_id] = req.base_model

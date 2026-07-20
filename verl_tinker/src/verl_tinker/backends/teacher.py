@@ -15,10 +15,10 @@ from omegaconf import DictConfig
 from verl.experimental.teacher_loop.teacher_model import TeacherModelManager
 from verl.single_controller.ray import RayResourcePool
 from verl.single_controller.ray.base import split_resource_pool
-from verl.utils.config import omega_conf_to_dataclass
 from verl.workers.config import DistillationConfig
 from verl.workers.rollout.llm_server import LLMServerClient
 
+from ..config_utils import _normalize_teacher_model_identifiers, _to_verl_distillation_config
 from .backend_utils import kill_ray_actors_and_wait, remove_placement_groups_and_wait
 
 logger = logging.getLogger(__name__)
@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class TeacherDescriptor:
     key: str
+    model_name: str
     model_path: str
     max_context_length: int | None
 
@@ -59,7 +60,11 @@ class TeacherInferenceBackend:
 
     def __init__(self, config: DictConfig):
         self.config = config
-        self.distillation_config: DistillationConfig = omega_conf_to_dataclass(config.distillation)
+        identifier_errors = _normalize_teacher_model_identifiers(config)
+        if identifier_errors:
+            raise ValueError("; ".join(identifier_errors))
+        self._model_names = self._get_model_names(config.distillation.teacher_models)
+        self.distillation_config: DistillationConfig = _to_verl_distillation_config(config.distillation)
         self._resource_pool: RayResourcePool | None = None
         self._managers: dict[str, TeacherModelManager] = {}
         self._clients: dict[str, TeacherClient] = {}
@@ -80,6 +85,7 @@ class TeacherInferenceBackend:
         return [
             TeacherDescriptor(
                 key=key,
+                model_name=self._model_names[key],
                 model_path=teacher.model_path,
                 max_context_length=teacher.inference.max_model_len,
             )
@@ -112,7 +118,18 @@ class TeacherInferenceBackend:
                 max_prompt_logprobs=max_prompt_logprobs,
             )
             self._register_alias(key, key)
+            self._register_alias(self._model_names[key], key)
             self._register_alias(teacher_config.model_path, key)
+
+    def _get_model_names(self, teacher_models: DictConfig) -> dict[str, str]:
+        if len(teacher_models) == 1:
+            teacher = next(iter(teacher_models.values()))
+            return {"default": str(teacher.model_name)}
+        return {
+            str(teacher.key): str(teacher.model_name)
+            for entry_name, teacher in teacher_models.items()
+            if entry_name != "teacher_model"
+        }
 
     def _register_alias(self, alias: str | None, key: str) -> None:
         if not alias:

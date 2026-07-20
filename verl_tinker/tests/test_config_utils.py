@@ -149,6 +149,7 @@ def test_tinker_config_preserves_and_validates_dedicated_teacher_config():
         "n_gpus_per_node": 4,
         "teacher_models": {
             "teacher_model": {
+                "model_name": "Qwen/Qwen3-30B-A3B",
                 "model_path": "Qwen/Qwen3-30B-A3B",
                 "inference": {
                     "name": "vllm",
@@ -164,8 +165,52 @@ def test_tinker_config_preserves_and_validates_dedicated_teacher_config():
 
     assert errors == []
     assert processed.distillation.enabled is True
+    assert processed.distillation.teacher_models.teacher_model.model_name == "Qwen/Qwen3-30B-A3B"
     assert processed.distillation.teacher_models.teacher_model.model_path == "Qwen/Qwen3-30B-A3B"
     assert processed.distillation.teacher_models.teacher_model.inference.tensor_model_parallel_size == 4
+
+
+@pytest.mark.parametrize(
+    ("teacher_identifiers", "expected_name", "expected_path"),
+    [
+        ({"model_path": "Qwen/path"}, "Qwen/path", "Qwen/path"),
+        ({"model_name": "Qwen/name"}, "Qwen/name", "Qwen/name"),
+    ],
+)
+def test_teacher_model_name_and_path_default_to_each_other(teacher_identifiers, expected_name, expected_path):
+    config = _minimal_tinker_config()
+    config.trainer.n_gpus_per_node = 1
+    config.distillation = {
+        "enabled": True,
+        "nnodes": 1,
+        "n_gpus_per_node": 1,
+        "teacher_models": {
+            "teacher_model": {
+                **teacher_identifiers,
+                "inference": {"name": "vllm", "tensor_model_parallel_size": 1},
+            }
+        },
+    }
+
+    processed = process_actor_rollout_ref_config(config)
+
+    assert _validate_config(processed) == []
+    assert processed.distillation.teacher_models.teacher_model.model_name == expected_name
+    assert processed.distillation.teacher_models.teacher_model.model_path == expected_path
+
+
+def test_teacher_model_requires_name_or_path():
+    config = _minimal_tinker_config()
+    config.distillation = {
+        "enabled": True,
+        "teacher_models": {"teacher_model": {"inference": {"name": "vllm"}}},
+    }
+
+    processed = process_actor_rollout_ref_config(config)
+
+    assert _validate_config(processed) == [
+        "distillation.teacher_models.teacher_model requires at least one of model_name or model_path"
+    ]
 
 
 def test_tinker_config_preserves_user_values_over_verl_defaults():

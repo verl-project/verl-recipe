@@ -141,6 +141,30 @@ async def test_create_sampling_session_routes_exact_teacher_model_to_unique_samp
 
 
 @pytest.mark.asyncio
+async def test_create_sampling_session_accepts_teacher_name_in_model_path_and_loads_configured_path():
+    server = object.__new__(_router_class())
+    server._shutdown_started = False
+    server._status = ServerStatus.INITIALIZED
+    server._engine = SimpleNamespace(
+        config=OmegaConf.create({"server": {}, "actor_rollout_ref": {"model": {"path": "actor"}}})
+    )
+    aliases = {"teacher-name": "teacher", "/models/teacher": "teacher"}
+    server._teacher_backend = SimpleNamespace(
+        resolve=lambda *values: next((aliases[value] for value in values if value in aliases), None),
+        get_model_path=lambda key: "/models/teacher",
+    )
+    server._sampling_to_teacher = {}
+    server._sampling_to_model_path = {}
+    server._sampling_to_base_model = {}
+
+    response = await server.create_sampling_session(SimpleNamespace(base_model=None, model_path="teacher-name"))
+
+    sampler_id = response.sampling_session_id
+    assert server._sampling_to_teacher[sampler_id] == "teacher"
+    assert server._sampling_to_model_path[sampler_id] == "/models/teacher"
+
+
+@pytest.mark.asyncio
 async def test_asample_routes_teacher_sampler_to_teacher_client():
     server = object.__new__(_router_class())
     server._shutdown_started = False

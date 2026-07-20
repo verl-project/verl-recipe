@@ -45,7 +45,8 @@ distillation:
   n_gpus_per_node: 4
   teacher_models:
     teacher_model:
-      model_path: ${oc.env:TINKER_TEACHER_MODEL,Qwen/Qwen3-30B-A3B}
+      model_name: ${oc.env:TINKER_TEACHER_MODEL_NAME,Qwen/Qwen3-30B-A3B}
+      model_path: ${oc.env:TINKER_TEACHER_MODEL_PATH,Qwen/Qwen3-30B-A3B}
       inference:
         name: vllm
         tensor_model_parallel_size: 4

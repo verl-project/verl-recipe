@@ -57,13 +57,14 @@ def get_supported_models(engine, teacher_backend=None) -> dict:
         max_ctx = 4096
     supported_models = [{"model_name": model_name, "max_context_length": max_ctx}]
     if teacher_backend is not None:
-        supported_models.extend(
-            {
-                "model_name": descriptor.model_path,
-                "max_context_length": descriptor.max_context_length or max_ctx,
-            }
-            for descriptor in teacher_backend.descriptors
-        )
+        for descriptor in teacher_backend.descriptors:
+            for identifier in dict.fromkeys((descriptor.model_name, descriptor.model_path)):
+                supported_models.append(
+                    {
+                        "model_name": identifier,
+                        "max_context_length": descriptor.max_context_length or max_ctx,
+                    }
+                )
     return {"supported_models": supported_models}
 
 

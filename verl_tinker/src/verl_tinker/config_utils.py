@@ -131,6 +131,7 @@ def process_actor_rollout_ref_config(config: DictConfig) -> DictConfig:
         user_set_actor_profiler_all_ranks=user_set_actor_profiler_all_ranks,
         user_set_actor_profiler_ranks=user_set_actor_profiler_ranks,
     )
+    _normalize_teacher_model_identifiers(config)
     return config
 
 
@@ -343,13 +344,17 @@ def _validate_config(config) -> list[str]:
         errors.append("critic support has been removed from the Tinker server; set critic.enable=false")
 
     if bool(config.get("distillation", {}).get("enabled", False)):
+        teacher_identifier_errors = _normalize_teacher_model_identifiers(config)
+        errors.extend(teacher_identifier_errors)
         try:
-            distillation_config = omega_conf_to_dataclass(config.distillation)
-            for teacher in distillation_config.teacher_models.values():
-                if teacher.inference.name not in {"vllm", "sglang"}:
-                    raise ValueError(
-                        f"teacher inference engine {teacher.inference.name!r} is unsupported; use 'vllm' or 'sglang'"
-                    )
+            if not teacher_identifier_errors:
+                distillation_config = _to_verl_distillation_config(config.distillation)
+                for teacher in distillation_config.teacher_models.values():
+                    if teacher.inference.name not in {"vllm", "sglang"}:
+                        raise ValueError(
+                            f"teacher inference engine {teacher.inference.name!r} is unsupported; "
+                            "use 'vllm' or 'sglang'"
+                        )
         except Exception as e:
             errors.append(f"Teacher config validation: {e}")
 
@@ -363,6 +368,38 @@ def _validate_config(config) -> list[str]:
             errors.append(f"VeRL config validation: {e}")
 
     return errors
+
+
+def _normalize_teacher_model_identifiers(config: DictConfig) -> list[str]:
+    """Fill missing teacher name/path aliases and report fully unidentified teachers."""
+    if not bool(config.get("distillation", {}).get("enabled", False)):
+        return []
+
+    errors = []
+    teacher_models = config.get("distillation", {}).get("teacher_models", {})
+    for key, teacher in teacher_models.items():
+        model_name = teacher.get("model_name")
+        model_path = teacher.get("model_path")
+        name_missing = _is_missing(model_name)
+        path_missing = _is_missing(model_path)
+        if name_missing and path_missing:
+            errors.append(f"distillation.teacher_models.{key} requires at least one of model_name or model_path")
+        elif name_missing:
+            teacher.model_name = model_path
+        elif path_missing:
+            teacher.model_path = model_name
+    return errors
+
+
+def _to_verl_distillation_config(distillation_config: DictConfig):
+    """Convert Tinker's extended teacher config to VeRL's path-only dataclass."""
+    # Resolve while the node is still attached to the root config so VeRL's
+    # cross-section interpolations (for example actor rollout lengths) retain
+    # their values in the detached copy.
+    verl_config = OmegaConf.create(OmegaConf.to_container(distillation_config, resolve=True))
+    for teacher in verl_config.get("teacher_models", {}).values():
+        teacher.pop("model_name", None)
+    return omega_conf_to_dataclass(verl_config)
 
 
 def _validate_supported_verl_config(config: DictConfig, use_reference_policy: bool) -> None:

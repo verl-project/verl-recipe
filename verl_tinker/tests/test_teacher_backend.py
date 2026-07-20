@@ -6,9 +6,10 @@ from omegaconf import OmegaConf
 from verl_tinker.backends.teacher import TeacherClient, TeacherInferenceBackend
 
 
-def _teacher(key, path, world_size=2, engine="vllm"):
+def _teacher(key, path, name=None, world_size=2, engine="vllm"):
     return SimpleNamespace(
         key=key,
+        model_name=name or path,
         model_path=path,
         world_size=world_size,
         inference=SimpleNamespace(
@@ -20,10 +21,21 @@ def _teacher(key, path, world_size=2, engine="vllm"):
 
 def test_teacher_backend_partitions_pool_and_builds_one_manager_per_teacher():
     teachers = {
-        "small": _teacher("small", "Qwen/Qwen3-1.7B"),
-        "large": _teacher("large", "Qwen/Qwen3-30B-A3B"),
+        "small": _teacher("small", "/models/qwen3-1.7b", "Qwen/Qwen3-1.7B"),
+        "large": _teacher("large", "/models/qwen3-30b", "Qwen/Qwen3-30B-A3B"),
     }
     distillation = SimpleNamespace(nnodes=1, n_gpus_per_node=4, teacher_models=teachers)
+    config = OmegaConf.create(
+        {
+            "distillation": {
+                "enabled": True,
+                "teacher_models": {
+                    "small": {"key": "small", "model_name": "Qwen/Qwen3-1.7B", "model_path": "/models/qwen3-1.7b"},
+                    "large": {"key": "large", "model_name": "Qwen/Qwen3-30B-A3B", "model_path": "/models/qwen3-30b"},
+                },
+            }
+        }
+    )
     pool = SimpleNamespace(pgs=None)
     manager_calls = []
 
@@ -34,7 +46,7 @@ def test_teacher_backend_partitions_pool_and_builds_one_manager_per_teacher():
             self.rollout_replicas = []
 
     with (
-        patch("verl_tinker.backends.teacher.omega_conf_to_dataclass", return_value=distillation),
+        patch("verl_tinker.config_utils.omega_conf_to_dataclass", return_value=distillation),
         patch("verl_tinker.backends.teacher.RayResourcePool", return_value=pool) as mock_pool,
         patch("verl_tinker.backends.teacher.split_resource_pool", return_value=["pool-a", "pool-b"]) as mock_split,
         patch("verl_tinker.backends.teacher.TeacherModelManager", FakeManager),
@@ -42,7 +54,7 @@ def test_teacher_backend_partitions_pool_and_builds_one_manager_per_teacher():
         patch("verl_tinker.backends.teacher.kill_ray_actors_and_wait"),
         patch("verl_tinker.backends.teacher.remove_placement_groups_and_wait"),
     ):
-        backend = TeacherInferenceBackend(OmegaConf.create({"distillation": {"enabled": True}}))
+        backend = TeacherInferenceBackend(config)
 
     mock_pool.assert_called_once_with(
         process_on_nodes=[4],
@@ -51,8 +63,9 @@ def test_teacher_backend_partitions_pool_and_builds_one_manager_per_teacher():
         name_prefix="teacher_pool",
     )
     mock_split.assert_called_once_with(pool, [2, 2])
-    assert [call[1].model_path for call in manager_calls] == ["Qwen/Qwen3-1.7B", "Qwen/Qwen3-30B-A3B"]
+    assert [call[1].model_path for call in manager_calls] == ["/models/qwen3-1.7b", "/models/qwen3-30b"]
     assert backend.resolve("Qwen/Qwen3-30B-A3B") == "large"
+    assert backend.resolve("/models/qwen3-30b") == "large"
     assert backend.resolve("small") == "small"
 
 
