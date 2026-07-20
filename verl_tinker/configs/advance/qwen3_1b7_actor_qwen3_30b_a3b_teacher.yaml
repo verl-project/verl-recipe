@@ -45,6 +45,8 @@ distillation:
   n_gpus_per_node: 4
   teacher_models:
     teacher_model:
+      # the client side can use both names as model input, while the server
+      # side will load the weights from model_path
       model_name: ${oc.env:TINKER_TEACHER_MODEL_NAME,Qwen/Qwen3-30B-A3B}
       model_path: ${oc.env:TINKER_TEACHER_MODEL_PATH,Qwen/Qwen3-30B-A3B}
       inference:

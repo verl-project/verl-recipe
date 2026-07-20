@@ -8,6 +8,8 @@ from tinker_cookbook.distillation.datasets import (
     TeacherConfig,
 )
 
+from ..utils import model_name_slug
+
 DEFAULT_TEACHER_MODEL = "Qwen/Qwen3-30B-A3B"
 
 
@@ -51,8 +53,8 @@ async def run_opd_deepmath_test(base_url: str, model_name: str, tokenizer_name_o
         num_substeps=1,
         loss_fn="importance_sampling",
         loss_fn_config=None,
-        wandb_project=None,
-        wandb_name=None,
+        wandb_project="verl-tinker-ci",
+        wandb_name=f"opd-deepmath-{model_name_slug(model_name)}-teacher-{model_name_slug(teacher_model)}",
         log_path="/tmp/tinker-deepmath-opd-smoke",
         base_url=base_url,
         load_checkpoint_path=None,

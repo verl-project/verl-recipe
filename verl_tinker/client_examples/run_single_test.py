@@ -4,7 +4,6 @@ import os
 import traceback
 
 try:
-    from .hdfs_tokenizer_patch import install_hdfs_tokenizer_patch
     from .tasks.math_rl.gsm8k import run_math_rl_gsm8k_test
     from .tasks.math_sft_rl.gsm8k import run_math_sft_rl_gsm8k_test
     from .tasks.opd.deepmath import DEFAULT_TEACHER_MODEL, run_opd_deepmath_test
@@ -14,7 +13,6 @@ try:
     from .tasks.utils import shutdown_server, wait_for_healthz_ready
 except ImportError:
     # Direct ``python run_single_test.py`` execution from client_examples.
-    from hdfs_tokenizer_patch import install_hdfs_tokenizer_patch
     from tasks.math_rl.gsm8k import run_math_rl_gsm8k_test
     from tasks.math_sft_rl.gsm8k import run_math_sft_rl_gsm8k_test
     from tasks.opd.deepmath import DEFAULT_TEACHER_MODEL, run_opd_deepmath_test
@@ -45,7 +43,6 @@ async def main(
     base_url: str,
     api_key: str,
     teacher_model_name: str,
-    patch_hdfs_tokenizer_import: bool = False,
 ) -> int:
     tokenizer_name_or_path = tokenizer_name_or_path or model_name
     if test_name not in ALL_TESTS:
@@ -64,10 +61,6 @@ async def main(
     wait_for_healthz_ready(base_url)
 
     test = ALL_TESTS[test_name]
-    if patch_hdfs_tokenizer_import:
-        print("WARNING: enabling unsupported HDFS tokenizer monkey patch")
-        install_hdfs_tokenizer_patch()
-
     success = True
     try:
         await test(base_url, model_name=model_name, tokenizer_name_or_path=tokenizer_name_or_path)
@@ -117,11 +110,6 @@ if __name__ == "__main__":
         default=DEFAULT_TEACHER_MODEL,
         help="Teacher model used by OPD workloads.",
     )
-    parser.add_argument(
-        "--patch-hdfs-tokenizer-import",
-        action="store_true",
-        help="Enable the unsupported Tinker/Transformers monkey patch for hdfs:// tokenizer paths.",
-    )
     args = parser.parse_args()
 
     raise SystemExit(
@@ -133,7 +121,6 @@ if __name__ == "__main__":
                 base_url=args.base_url,
                 api_key=args.api_key,
                 teacher_model_name=args.teacher_model_name,
-                patch_hdfs_tokenizer_import=args.patch_hdfs_tokenizer_import,
             )
         )
     )
