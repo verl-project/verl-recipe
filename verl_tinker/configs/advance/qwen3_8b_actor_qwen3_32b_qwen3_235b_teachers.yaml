@@ -80,6 +80,7 @@ distillation:
         name: vllm
         tensor_model_parallel_size: 8
         data_parallel_size: 1
+        expert_parallel_size: 8
         pipeline_model_parallel_size: 1
         gpu_memory_utilization: 0.9
         prompt_length: 1024
