@@ -21,11 +21,15 @@ actor_rollout_ref: # this is the same as verl's config, this field is ALWAYS req
       lr_scheduler_type: constant
       lr: 1.0e-06
     veomni:
-      cross_entropy_loss_implementation: chunk_loss
-
       # Expert parallelism for MoE expert weights
       fsdp_size: -1
-      expert_parallel_size: 32
+      expert_parallel_size: 8
+      ops_implementation:
+        # GPT-OSS attention uses sliding windows and learnable sinks, which are
+        # supported by VeOmni's FlashAttention 4 integration.
+        attn_implementation: flash_attention_4
+        # GPT-OSS uses interleaved gate/up projections; use its Quack backend.
+        moe_implementation: fused_quack
     use_dynamic_bsz: true
     ppo_mini_batch_size: 1
     ppo_micro_batch_size_per_gpu: 1
