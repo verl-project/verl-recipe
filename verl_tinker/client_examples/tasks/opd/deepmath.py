@@ -14,7 +14,7 @@ DEFAULT_TEACHER_MODEL = "Qwen/Qwen3-30B-A3B"
 
 
 async def run_opd_deepmath_test(base_url: str, model_name: str, tokenizer_name_or_path: str | None = None):
-    """One-step OPD smoke run with actor rollouts and a frozen teacher sampler."""
+    """Medium-cost OPD run using the Tinker Cookbook implementation directly."""
 
     tokenizer_name_or_path = tokenizer_name_or_path or model_name
     teacher_model = os.environ.get("TINKER_TEACHER_MODEL", DEFAULT_TEACHER_MODEL)
@@ -25,14 +25,16 @@ async def run_opd_deepmath_test(base_url: str, model_name: str, tokenizer_name_o
         base_url=base_url,
     )
 
-    groups_per_batch = 2
+    # A larger on-policy batch makes the Cookbook's Monte Carlo teacher_kl
+    # metric substantially less noisy than the original 2 x 2 smoke test.
+    groups_per_batch = 16
     dataset_builder = PromptOnlyDatasetBuilder(
         dataset_name="deepmath",
         groups_per_batch=groups_per_batch,
         group_size=2,
         model_name_for_tokenizer=tokenizer_name_or_path,
         renderer_name=renderer_name,
-        max_prompt_tokens=512,
+        max_prompt_tokens=1024,
     )
     dataset_config = DistillationDatasetConfig(
         dataset_builder=dataset_builder,
@@ -41,12 +43,12 @@ async def run_opd_deepmath_test(base_url: str, model_name: str, tokenizer_name_o
     )
 
     config = train_on_policy.Config(
-        learning_rate=1e-5,
+        learning_rate=2e-6,
         dataset_configs=[dataset_config],
         model_name=model_name,
         renderer_name=renderer_name,
         lora_rank=0,
-        max_tokens=512,
+        max_tokens=2048,
         temperature=1.0,
         kl_penalty_coef=1.0,
         kl_discount_factor=0.0,
@@ -54,14 +56,14 @@ async def run_opd_deepmath_test(base_url: str, model_name: str, tokenizer_name_o
         loss_fn="importance_sampling",
         loss_fn_config=None,
         wandb_project="verl-tinker-ci",
-        wandb_name=f"opd-deepmath-{model_name_slug(model_name)}-teacher-{model_name_slug(teacher_model)}",
-        log_path="/tmp/tinker-deepmath-opd-smoke",
+        wandb_name=(f"opd-deepmath-{model_name_slug(model_name)}-teacher-{model_name_slug(teacher_model)}"),
+        log_path="/tmp/tinker-deepmath-opd-demo",
         base_url=base_url,
         load_checkpoint_path=None,
-        compute_post_kl=False,
+        compute_post_kl=True,
         eval_every=0,
         save_every=0,
-        max_steps=50,
+        max_steps=100,
     )
 
     cli_utils.check_log_dir(config.log_path, behavior_if_exists="delete")
