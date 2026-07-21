@@ -378,6 +378,10 @@ def _normalize_teacher_model_identifiers(config: DictConfig) -> list[str]:
     errors = []
     teacher_models = config.get("distillation", {}).get("teacher_models", {})
     for key, teacher in teacher_models.items():
+        # VeRL merges a placeholder named ``teacher_model`` into every config
+        # and removes it when named multi-teacher entries are present.
+        if key == "teacher_model" and len(teacher_models) > 1:
+            continue
         model_name = teacher.get("model_name")
         model_path = teacher.get("model_path")
         name_missing = _is_missing(model_name)
@@ -397,6 +401,9 @@ def _to_verl_distillation_config(distillation_config: DictConfig):
     # cross-section interpolations (for example actor rollout lengths) retain
     # their values in the detached copy.
     verl_config = OmegaConf.create(OmegaConf.to_container(distillation_config, resolve=True))
+    # Tinker can optionally give each teacher its own strictly packed Ray pool;
+    # this is a server placement concern rather than part of VeRL's dataclass.
+    verl_config.pop("dedicated_resource_pools", None)
     for teacher in verl_config.get("teacher_models", {}).values():
         teacher.pop("model_name", None)
     return omega_conf_to_dataclass(verl_config)

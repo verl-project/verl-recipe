@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 from dataclasses import dataclass
 
@@ -64,8 +65,9 @@ class TeacherInferenceBackend:
         if identifier_errors:
             raise ValueError("; ".join(identifier_errors))
         self._model_names = self._get_model_names(config.distillation.teacher_models)
+        self._dedicated_resource_pools = bool(config.distillation.get("dedicated_resource_pools", False))
         self.distillation_config: DistillationConfig = _to_verl_distillation_config(config.distillation)
-        self._resource_pool: RayResourcePool | None = None
+        self._resource_pools: list[RayResourcePool] = []
         self._managers: dict[str, TeacherModelManager] = {}
         self._clients: dict[str, TeacherClient] = {}
         self._aliases: dict[str, str] = {}
@@ -94,32 +96,63 @@ class TeacherInferenceBackend:
 
     def _initialize(self) -> None:
         cfg = self.distillation_config
-        self._resource_pool = RayResourcePool(
-            process_on_nodes=[cfg.n_gpus_per_node] * cfg.nnodes,
-            use_gpu=True,
-            max_colocate_count=3,
-            name_prefix="teacher_pool",
-        )
         teachers = list(cfg.teacher_models.items())
-        sub_pools = split_resource_pool(self._resource_pool, [teacher.world_size for _, teacher in teachers])
-
-        for (key, teacher_config), sub_pool in zip(teachers, sub_pools, strict=True):
-            # Keep the partially initialized object reachable so shutdown can
-            # clean actors created before a constructor failure.
-            manager = TeacherModelManager.__new__(TeacherModelManager)
-            self._managers[key] = manager
-            manager.__init__(cfg, teacher_config, sub_pool)
-
-            client = LLMServerClient(config=self.config, load_balancer_handle=manager.load_balancer_handle)
-            max_prompt_logprobs = self._max_prompt_logprobs(teacher_config)
-            self._clients[key] = TeacherClient(
-                client,
-                model_path=teacher_config.model_path,
-                max_prompt_logprobs=max_prompt_logprobs,
+        if self._dedicated_resource_pools:
+            # The actor pool is initialized before the teacher backend. Starting
+            # the largest teacher first lets a TP8 teacher claim the untouched
+            # eight-GPU node, after which a TP4 teacher can pack beside a
+            # four-GPU actor on the other node.
+            teachers.sort(key=lambda item: item[1].world_size, reverse=True)
+            teacher_resources = []
+            for key, teacher_config in teachers:
+                pool = RayResourcePool(
+                    process_on_nodes=[teacher_config.world_size],
+                    use_gpu=True,
+                    max_colocate_count=3,
+                    name_prefix=f"teacher_pool_{key}",
+                )
+                self._resource_pools.append(pool)
+                # TeacherModelManager uses n_gpus_per_node both for replica
+                # boundary validation and rollout-server topology. Give it the
+                # actual strictly packed node shape instead of the aggregate
+                # multi-teacher accounting (for example 6 GPUs x 2 nodes).
+                manager_config = copy.deepcopy(cfg)
+                manager_config.teacher_models = {key: teacher_config}
+                manager_config.nnodes = 1
+                manager_config.n_gpus_per_node = teacher_config.world_size
+                teacher_resources.append((pool, manager_config))
+        else:
+            pool = RayResourcePool(
+                process_on_nodes=[cfg.n_gpus_per_node] * cfg.nnodes,
+                use_gpu=True,
+                max_colocate_count=3,
+                name_prefix="teacher_pool",
             )
-            self._register_alias(key, key)
-            self._register_alias(self._model_names[key], key)
-            self._register_alias(teacher_config.model_path, key)
+            self._resource_pools.append(pool)
+            teacher_pools = split_resource_pool(pool, [teacher.world_size for _, teacher in teachers])
+            teacher_resources = [(teacher_pool, cfg) for teacher_pool in teacher_pools]
+
+        for (key, teacher_config), (teacher_pool, manager_config) in zip(teachers, teacher_resources, strict=True):
+            self._initialize_teacher(key, teacher_config, teacher_pool, manager_config)
+
+    def _initialize_teacher(
+        self, key: str, teacher_config, resource_pool, distillation_config: DistillationConfig
+    ) -> None:
+        """Initialize one teacher while keeping partial state recoverable."""
+        manager = TeacherModelManager.__new__(TeacherModelManager)
+        self._managers[key] = manager
+        manager.__init__(distillation_config, teacher_config, resource_pool)
+
+        client = LLMServerClient(config=self.config, load_balancer_handle=manager.load_balancer_handle)
+        max_prompt_logprobs = self._max_prompt_logprobs(teacher_config)
+        self._clients[key] = TeacherClient(
+            client,
+            model_path=teacher_config.model_path,
+            max_prompt_logprobs=max_prompt_logprobs,
+        )
+        self._register_alias(key, key)
+        self._register_alias(self._model_names[key], key)
+        self._register_alias(teacher_config.model_path, key)
 
     def _get_model_names(self, teacher_models: DictConfig) -> dict[str, str]:
         if len(teacher_models) == 1:
@@ -169,7 +202,11 @@ class TeacherInferenceBackend:
                 if workers is not None:
                     actors.extend(workers)
 
-        placement_groups = list(getattr(self._resource_pool, "pgs", None) or [])
+        placement_groups = [
+            placement_group
+            for resource_pool in self._resource_pools
+            for placement_group in (getattr(resource_pool, "pgs", None) or [])
+        ]
         try:
             kill_ray_actors_and_wait(actors, logger=logger, description="teacher backend", ray_module=ray)
         finally:
@@ -184,4 +221,4 @@ class TeacherInferenceBackend:
                 self._clients.clear()
                 self._managers.clear()
                 self._aliases.clear()
-                self._resource_pool = None
+                self._resource_pools.clear()

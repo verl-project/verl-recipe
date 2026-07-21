@@ -170,6 +170,24 @@ def test_tinker_config_preserves_and_validates_dedicated_teacher_config():
     assert processed.distillation.teacher_models.teacher_model.inference.tensor_model_parallel_size == 4
 
 
+def test_multi_teacher_config_uses_dedicated_pools_and_validates_gpu_footprints():
+    config = OmegaConf.load(_TINKER_CONFIG_DIR / "advance" / "qwen3_8b_actor_qwen3_32b_qwen3_235b_teachers.yaml")
+
+    processed = process_actor_rollout_ref_config(config)
+    errors = _validate_config(processed)
+
+    assert errors == []
+    assert processed.trainer.nnodes == 1
+    assert processed.trainer.n_gpus_per_node == 4
+    assert processed.distillation.nnodes == 2
+    assert processed.distillation.n_gpus_per_node == 6
+    assert processed.distillation.dedicated_resource_pools is True
+    assert processed.distillation.teacher_models.deepmath_teacher.key == "deepmath"
+    assert processed.distillation.teacher_models.deepmath_teacher.inference.tensor_model_parallel_size == 4
+    assert processed.distillation.teacher_models.tulu3_teacher.key == "tulu3"
+    assert processed.distillation.teacher_models.tulu3_teacher.inference.tensor_model_parallel_size == 8
+
+
 @pytest.mark.parametrize(
     ("teacher_identifiers", "expected_name", "expected_path"),
     [

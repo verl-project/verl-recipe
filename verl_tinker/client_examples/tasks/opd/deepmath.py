@@ -1,5 +1,3 @@
-import os
-
 from tinker_cookbook import checkpoint_utils, cli_utils, model_info
 from tinker_cookbook.distillation import train_on_policy
 from tinker_cookbook.distillation.datasets import (
@@ -10,14 +8,13 @@ from tinker_cookbook.distillation.datasets import (
 
 from ..utils import model_name_slug
 
-DEFAULT_TEACHER_MODEL = "Qwen/Qwen3-30B-A3B"
+TEACHER_MODEL = "Qwen/Qwen3-30B-A3B"
 
 
 async def run_opd_deepmath_test(base_url: str, model_name: str, tokenizer_name_or_path: str | None = None):
     """Medium-cost OPD run using the Tinker Cookbook implementation directly."""
 
     tokenizer_name_or_path = tokenizer_name_or_path or model_name
-    teacher_model = os.environ.get("TINKER_TEACHER_MODEL", DEFAULT_TEACHER_MODEL)
     renderer_name = await checkpoint_utils.resolve_renderer_name_from_checkpoint_or_default_async(
         model_name=model_name,
         explicit_renderer_name=model_info.get_recommended_renderer_name(model_name),
@@ -38,7 +35,7 @@ async def run_opd_deepmath_test(base_url: str, model_name: str, tokenizer_name_o
     )
     dataset_config = DistillationDatasetConfig(
         dataset_builder=dataset_builder,
-        teacher_config=TeacherConfig(base_model=teacher_model),
+        teacher_config=TeacherConfig(base_model=TEACHER_MODEL),
         groups_per_batch=groups_per_batch,
     )
 
@@ -56,7 +53,7 @@ async def run_opd_deepmath_test(base_url: str, model_name: str, tokenizer_name_o
         loss_fn="importance_sampling",
         loss_fn_config=None,
         wandb_project="verl-tinker-ci",
-        wandb_name=(f"opd-deepmath-{model_name_slug(model_name)}-teacher-{model_name_slug(teacher_model)}"),
+        wandb_name=(f"opd-deepmath-{model_name_slug(model_name)}-teacher-{model_name_slug(TEACHER_MODEL)}"),
         log_path="/tmp/tinker-deepmath-opd-demo",
         base_url=base_url,
         load_checkpoint_path=None,

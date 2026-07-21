@@ -45,6 +45,18 @@ python -m verl_tinker.start \
   --config configs/advance/qwen3_1b7_actor_qwen3_30b_a3b_teacher.yaml
 ```
 
+For the Cookbook-faithful multi-teacher nightly workload, connect two
+eight-GPU nodes to the same Ray cluster and use:
+
+```bash
+python -m verl_tinker.start \
+  --config configs/advance/qwen3_8b_actor_qwen3_32b_qwen3_235b_teachers.yaml
+```
+
+The server strictly packs the Qwen3-235B teacher onto all eight GPUs of one
+node. The other node is split between the TP4 Qwen3-32B teacher and the
+four-GPU Qwen3-8B actor/rollout.
+
 ## Run A Workload
 
 In another shell, change into the client examples directory so `uv run` uses the
@@ -72,6 +84,7 @@ Set `--test-name` to one of:
 - `rl_gsm8k`
 - `sft_rl_gsm8k`
 - `opd_deepmath`
+- `opd_multi_teacher`
 
 If `--test-name` is not set, the runner defaults to `sft_tulu3`.
 
@@ -83,17 +96,28 @@ Useful arguments:
   `--model-name`.
 - `--api-key`: Tinker API key compatibility value.
 - `--test-name`: workload selector.
-- `--teacher-model-name`: teacher requested by OPD workloads. Defaults to
-  `Qwen/Qwen3-30B-A3B`.
-
 Run the one-step OPD smoke workload with:
 
 ```bash
 uv run run_single_test.py \
   --test-name opd_deepmath \
-  --model-name Qwen/Qwen3-1.7B \
-  --teacher-model-name Qwen/Qwen3-30B-A3B
+  --model-name Qwen/Qwen3-1.7B
 ```
+
+Run the 100-step nightly multi-teacher workload with:
+
+```bash
+uv run run_single_test.py \
+  --test-name opd_multi_teacher \
+  --model-name Qwen/Qwen3-8B
+```
+
+This follows the Cookbook's DeepMath + Tulu3 teacher assignment, with 16
+groups per teacher and two rollouts per prompt. `verl_tinker` trains full model
+weights, so the Cookbook's LoRA setting is intentionally replaced by
+`lora_rank=0`. A healthy run emits both `teacher_kl/dataset_0` (DeepMath) and
+`teacher_kl/dataset_1` (Tulu3). Teacher identities are fixed in the client
+recipes rather than exposed as runner arguments.
 
 Some workloads download Hugging Face datasets. Configure the standard Hugging
 Face cache environment variables if you need offline or pre-populated datasets.

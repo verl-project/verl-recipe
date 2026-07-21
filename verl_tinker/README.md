@@ -234,6 +234,9 @@ Most long-running operations return a `request_id`. Poll
 - Frozen teacher models may be configured through VERL's `distillation`
   section. They run on dedicated GPUs and support sampling and prompt
   log-probabilities, but not training or checkpoint mutation.
+- Multi-teacher deployments can set `distillation.dedicated_resource_pools=true`
+  to strictly pack each teacher into its own Ray placement group. Teachers are
+  allocated largest-first; each teacher must fit on a single node.
 - LoRA training is not supported. Some LoRA-shaped metadata is returned for
   Tinker Cookbook compatibility, but the backend trains full model weights.
 - Multiple clients are not isolated: they share one model state, optimizer
