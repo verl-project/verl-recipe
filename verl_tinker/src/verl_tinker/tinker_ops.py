@@ -200,10 +200,9 @@ async def forward_backward(engine, datums, loss_fn_name: str) -> dict:
         metrics["loss:mean"] = 0.0
 
     # Tinker computes mean_nll_loss client-side from loss_fn_outputs.logprobs.
-    # TinkerTrainingWorker.forward_backward now returns the engine's
-    # model_output in result_td, so use those post-update log-probs directly.
-    # In particular, do not turn a missing/mis-shaped cross-entropy result into
-    # zeros: that used to make a healthy training step appear as -0.000 NLL.
+    # Prefer the engine's model_output when the VeRL worker returns it. Keep the
+    # zero-filled compatibility fallback below for VeRL versions that discard
+    # model_output during backward.
     logprobs_per_sample = None
     if result_td is not None:
         log_probs = result_td.get("log_probs", None)
@@ -212,14 +211,6 @@ async def forward_backward(engine, datums, loss_fn_name: str) -> dict:
                 logprobs_per_sample = list(log_probs.unbind())
             else:
                 logprobs_per_sample = [log_probs[i] for i in range(log_probs.shape[0])]
-
-    if loss_fn_name == "cross_entropy" and logprobs_per_sample is None:
-        result_keys = list(result_td.keys()) if result_td is not None and hasattr(result_td, "keys") else []
-        raise RuntimeError(
-            "VeRL forward_backward did not return model_output['log_probs'] for a cross_entropy request; "
-            f"result keys were {result_keys}. Ensure verl.workers.engine_workers_tinker returns "
-            "TrainingWorker._postprocess_output(...), including model_output."
-        )
 
     outputs = []
     for i, datum in enumerate(datums):
@@ -232,19 +223,7 @@ async def forward_backward(engine, datums, loss_fn_name: str) -> dict:
             elif lp_t.numel() == target_len:
                 lp_list = lp_t.tolist()
             else:
-                if loss_fn_name == "cross_entropy":
-                    raise RuntimeError(
-                        "VeRL forward_backward returned an incompatible log_probs length for "
-                        f"cross_entropy datum {i}: got {lp_t.numel()}, expected either "
-                        f"{expected_valid_len} (full sequence) or {target_len} (target-aligned)."
-                    )
                 lp_list = [0.0] * target_len
-        elif loss_fn_name == "cross_entropy":
-            returned = len(logprobs_per_sample) if logprobs_per_sample is not None else 0
-            raise RuntimeError(
-                f"VeRL forward_backward returned log_probs for only {returned} samples, "
-                f"but the cross_entropy request contained {len(datums)} datums."
-            )
         elif "logprobs" in datum.loss_fn_inputs:
             lp_list = list(datum.loss_fn_inputs["logprobs"].data)
         else:

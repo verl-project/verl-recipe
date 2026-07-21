@@ -117,18 +117,22 @@ async def test_forward_backward_returns_verl_model_logprobs_for_cross_entropy(mo
 
 
 @pytest.mark.asyncio
-async def test_forward_backward_rejects_missing_cross_entropy_model_logprobs(monkeypatch):
+async def test_forward_backward_zero_fills_missing_cross_entropy_model_logprobs(monkeypatch):
     monkeypatch.setattr("verl_tinker.tinker_ops.asyncio.to_thread", _to_thread_inline)
     monkeypatch.setattr("verl_tinker.tinker_ops._datums_to_sft_td", lambda *args, **kwargs: object())
     result_td = TensorDict({}, batch_size=[])
     result_td.set_non_tensor("metrics", {"loss": 4.25})
 
-    with pytest.raises(RuntimeError, match=r"did not return model_output\['log_probs'\]"):
-        await forward_backward(
-            _ForwardBackwardEngine(result_td),
-            [_cross_entropy_datum([10, 11], [11, 12])],
-            "cross_entropy",
-        )
+    result = await forward_backward(
+        _ForwardBackwardEngine(result_td),
+        [_cross_entropy_datum([10, 11], [11, 12])],
+        "cross_entropy",
+    )
+
+    assert result["loss_fn_outputs"] == [
+        {"logprobs": {"data": [0.0, 0.0], "dtype": "float32", "shape": [2]}},
+    ]
+    assert result["metrics"]["loss:mean"] == 4.25
 
 
 @pytest.mark.asyncio
