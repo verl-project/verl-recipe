@@ -42,6 +42,8 @@ DEFAULT_SERVER_CONFIG = {
     "host": "0.0.0.0",
     "port": 8000,
     "ray_address": "local",
+    "disk_check_path": "/tmp",
+    "disk_check_min_free_gb": 0,
     "checkpoint_dir": "/tmp/tinker-checkpoints",
     "server_max_runtime": None,
     "max_concurrent_samples": 32,
@@ -327,6 +329,14 @@ def _is_missing(value: Any) -> bool:
 def _validate_config(config) -> list[str]:
     """Validate config before initialization. Returns list of error messages."""
     errors = []
+
+    disk_check_min_free_gb = config.get("server", {}).get("disk_check_min_free_gb", 0)
+    try:
+        disk_check_min_free_gb = float(disk_check_min_free_gb)
+        if disk_check_min_free_gb < 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        errors.append("server.disk_check_min_free_gb must be a non-negative number")
 
     if not config.get("actor_rollout_ref", {}).get("model", {}).get("path"):
         errors.append("actor_rollout_ref.model.path is required")
