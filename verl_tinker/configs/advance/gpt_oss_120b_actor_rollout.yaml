@@ -33,6 +33,12 @@ actor_rollout_ref: # this is the same as verl's config, this field is ALWAYS req
     use_dynamic_bsz: true
     ppo_mini_batch_size: 1
     ppo_micro_batch_size_per_gpu: 1
+    profiler:
+      enable: true
+      all_ranks: true
+      tool_config:
+        torch:
+          contents: [cuda, cpu]
 
 
   rollout:
@@ -82,3 +88,10 @@ trainer:
   experiment_name: tinker_server_gpt_oss_120b_actor_rollout_4nodes
   nnodes: 4
   n_gpus_per_node: 8
+
+global_profiler:
+  tool: torch
+  steps: [1, 3]
+  profile_continuous_steps: false
+  save_path: /mnt/hdfs/profiler_output/gpt-oss-120b
+  all_ranks: true
