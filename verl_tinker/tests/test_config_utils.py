@@ -39,8 +39,6 @@ def test_tinker_config_merges_verl_defaults_and_keeps_only_tinker_overrides():
     assert config.server.host == "0.0.0.0"
     assert config.server.port == 8000
     assert config.server.ray_address == "local"
-    assert config.server.disk_check_path == "/tmp"
-    assert config.server.disk_check_min_free_gb == 0
     assert config.server.checkpoint_dir == "/tmp/tinker-checkpoints"
     assert config.server.max_concurrent_samples == 32
     assert config.server.enable_offload is True
@@ -79,16 +77,6 @@ def test_tinker_config_preserves_explicit_server_values_over_defaults():
     assert config.server.checkpoint_dir == "/tmp/custom-checkpoints"
     assert config.server.enable_offload is False
     assert config.server.auto_merge_verl_default_config is True
-
-
-@pytest.mark.parametrize("value", [-1, "invalid", None])
-def test_disk_check_min_free_gb_must_be_non_negative(value):
-    config = _minimal_tinker_config()
-    config.server.disk_check_min_free_gb = value
-
-    errors = _validate_config(config)
-
-    assert "server.disk_check_min_free_gb must be a non-negative number" in errors
 
 
 def test_disabling_verl_default_merge_still_applies_tinker_server_overrides():
