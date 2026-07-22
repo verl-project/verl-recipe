@@ -1,9 +1,14 @@
+# Note: this config requires 16 B200 gpus or more
+#
 # Two-node, sixteen-GPU multi-teacher on-policy distillation example:
 #   node 1: frozen Qwen3-235B-A22B-Instruct-2507 teacher (one TP8 replica)
 #   node 2: trainable Qwen3-8B actor/rollout (4 GPUs) + frozen Qwen3-32B teacher (one TP4 replica)
 #
 # The actor pool is initialized first. Dedicated teacher pools are then allocated
 # largest-first so the TP8 teacher strictly packs onto the untouched node.
+#
+# Teacher naming designed to match client_examples/tasks/opd/multi_teacher.py,
+# but feel free to change for your custom workflow.
 
 server:
   host: ${oc.env:TINKER_SERVER_HOST,0.0.0.0}

@@ -1,6 +1,4 @@
-# Note: this config is designed for quick CI funcitonal tests, for more serious training you
-# MOST LIKELY will need to increase the amount of GPU resources and configure this file
-# a bit more
+# Note: this config requires 16 B200 gpus or more
 
 server:
   host: ${oc.env:TINKER_SERVER_HOST,0.0.0.0}
