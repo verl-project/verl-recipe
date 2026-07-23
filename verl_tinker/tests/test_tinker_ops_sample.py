@@ -23,6 +23,7 @@ from verl_tinker.tinker_ops import (
     load_state,
     optim_step,
     sample,
+    save_state,
 )
 
 
@@ -67,6 +68,14 @@ class _LoadStateEngine:
 
     def load_checkpoint(self, local_dir, zero_optimizer_grad=False):
         self.load_calls.append((local_dir, zero_optimizer_grad))
+
+
+class _SaveStateEngine:
+    def __init__(self):
+        self.save_calls = []
+
+    def save_checkpoint(self, local_dir, step):
+        self.save_calls.append((local_dir, step))
 
 
 class _ForwardBackwardEngine:
@@ -360,3 +369,30 @@ async def test_load_state_preserves_loaded_optimizer_by_default(monkeypatch):
     )
 
     assert engine.load_calls == [("/tmp/local-checkpoint", False)]
+
+
+@pytest.mark.asyncio
+async def test_save_state_creates_router_local_directory_for_metadata(monkeypatch, tmp_path):
+    monkeypatch.setattr("verl_tinker.tinker_ops.asyncio.to_thread", _to_thread_inline)
+    engine = _SaveStateEngine()
+    saved_state_paths = {}
+    saved_state_metadata = {}
+    checkpoint_root = tmp_path / "checkpoints"
+
+    result = await save_state(
+        engine,
+        str(checkpoint_root),
+        saved_state_paths,
+        saved_state_metadata,
+        {"epoch": 1},
+        step=3,
+        name="final",
+    )
+
+    uri = "tinker://verl-tinker/state/final"
+    local_dir = checkpoint_root / "final"
+    assert result == {"type": "save_weights", "path": uri}
+    assert engine.save_calls == [(str(local_dir), 3)]
+    assert saved_state_paths == {uri: str(local_dir)}
+    assert saved_state_metadata == {uri: {"epoch": 1}}
+    assert (local_dir / "metadata.json").read_text() == '{"epoch": 1}\n'

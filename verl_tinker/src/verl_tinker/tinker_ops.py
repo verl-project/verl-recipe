@@ -307,7 +307,9 @@ async def save_state(
     saved_state_paths[uri] = local_dir
     if state_metadata is not None:
         saved_state_metadata[uri] = dict(state_metadata)
-        state_metadata_path(local_dir).write_text(json.dumps(state_metadata) + "\n")
+        metadata_path = state_metadata_path(local_dir)
+        metadata_path.parent.mkdir(parents=True, exist_ok=True)
+        metadata_path.write_text(json.dumps(state_metadata) + "\n")
     logger.info(f"[tinker_router] save_weights uri={uri} -> {local_dir}")
     return {"type": "save_weights", "path": uri}
 
