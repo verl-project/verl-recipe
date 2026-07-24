@@ -386,9 +386,7 @@ async def test_named_sampler_save_binds_path_to_current_rollout(monkeypatch):
         update_weights,
     )
 
-    result = await server._run_save_weights_for_sampler(
-        SimpleNamespace(path="saved", sampling_session_seq_id=None)
-    )
+    result = await server._run_save_weights_for_sampler(SimpleNamespace(path="saved", sampling_session_seq_id=None))
     response = await server.create_sampling_session(
         SimpleNamespace(
             session_id="session",
@@ -449,12 +447,8 @@ async def test_unnamed_sampler_saves_return_distinct_sampler_ids(monkeypatch):
         update_weights,
     )
 
-    first = await server._run_save_weights_for_sampler(
-        SimpleNamespace(path=None, sampling_session_seq_id=2)
-    )
-    second = await server._run_save_weights_for_sampler(
-        SimpleNamespace(path=None, sampling_session_seq_id=3)
-    )
+    first = await server._run_save_weights_for_sampler(SimpleNamespace(path=None, sampling_session_seq_id=2))
+    second = await server._run_save_weights_for_sampler(SimpleNamespace(path=None, sampling_session_seq_id=3))
 
     assert first["sampling_session_id"] == "verl-remote-actor:sample:2"
     assert second["sampling_session_id"] == "verl-remote-actor:sample:3"
@@ -522,9 +516,7 @@ async def test_rollout_sync_failure_marks_rollout_unknown_without_shutting_down(
     )
 
     with pytest.raises(RuntimeError, match="sync exploded"):
-        await server._run_save_weights_for_sampler(
-            SimpleNamespace(path=None, sampling_session_seq_id=9)
-        )
+        await server._run_save_weights_for_sampler(SimpleNamespace(path=None, sampling_session_seq_id=9))
 
     assert server._state_tracker.rollout_id is None
     assert server._status is ServerStatus.INITIALIZED

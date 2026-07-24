@@ -88,8 +88,7 @@ class ModelStateTracker:
             previous = self._teacher_model_paths.get(identifier)
             if previous is not None and previous != model_path:
                 raise StateTrackerError(
-                    f"Teacher identifier {identifier!r} is ambiguous between "
-                    f"{previous!r} and {model_path!r}"
+                    f"Teacher identifier {identifier!r} is ambiguous between {previous!r} and {model_path!r}"
                 )
             self._teacher_model_paths[identifier] = model_path
 
@@ -225,9 +224,7 @@ class ModelStateTracker:
                 legal_rollout_ids=frozenset({0}),
             )
         else:
-            raise StateTrackerError(
-                f"Unknown sampling model: base_model={base_model!r}, model_path={model_path!r}"
-            )
+            raise StateTrackerError(f"Unknown sampling model: base_model={base_model!r}, model_path={model_path!r}")
 
         if sampler_id is not None:
             return self._register_sampler(binding)
@@ -250,9 +247,7 @@ class ModelStateTracker:
             raise StateTrackerError("Cannot register a sampler without a sampler ID")
         previous = self._samplers.get(binding.sampler_id)
         if previous is not None and previous != binding:
-            raise StateTrackerError(
-                f"Sampler ID {binding.sampler_id!r} was reused for a different target"
-            )
+            raise StateTrackerError(f"Sampler ID {binding.sampler_id!r} was reused for a different target")
         self._samplers[binding.sampler_id] = binding
         return binding
 
