@@ -70,7 +70,6 @@ class TeacherInferenceBackend:
         self._resource_pools: list[RayResourcePool] = []
         self._managers: dict[str, TeacherModelManager] = {}
         self._clients: dict[str, TeacherClient] = {}
-        self._aliases: dict[str, str] = {}
 
         try:
             self._initialize()
@@ -93,6 +92,20 @@ class TeacherInferenceBackend:
             )
             for key, teacher in self.distillation_config.teacher_models.items()
         ]
+
+    @property
+    def sampling_targets(self) -> list[tuple[str, str]]:
+        """Return public identifiers paired with the model path backing their client."""
+        targets = []
+        for key, teacher in self.distillation_config.teacher_models.items():
+            model_path = str(teacher.model_path)
+            targets.extend(
+                (
+                    (self._model_names[key], model_path),
+                    (model_path, model_path),
+                )
+            )
+        return targets
 
     def _initialize(self) -> None:
         cfg = self.distillation_config
@@ -145,14 +158,11 @@ class TeacherInferenceBackend:
 
         client = LLMServerClient(config=self.config, load_balancer_handle=manager.load_balancer_handle)
         max_prompt_logprobs = self._max_prompt_logprobs(teacher_config)
-        self._clients[key] = TeacherClient(
+        self._clients[teacher_config.model_path] = TeacherClient(
             client,
             model_path=teacher_config.model_path,
             max_prompt_logprobs=max_prompt_logprobs,
         )
-        self._register_alias(key, key)
-        self._register_alias(self._model_names[key], key)
-        self._register_alias(teacher_config.model_path, key)
 
     def _get_model_names(self, teacher_models: DictConfig) -> dict[str, str]:
         if len(teacher_models) == 1:
@@ -164,14 +174,6 @@ class TeacherInferenceBackend:
             if entry_name != "teacher_model"
         }
 
-    def _register_alias(self, alias: str | None, key: str) -> None:
-        if not alias:
-            return
-        previous = self._aliases.get(alias)
-        if previous is not None and previous != key:
-            raise ValueError(f"Teacher identifier {alias!r} is ambiguous between {previous!r} and {key!r}")
-        self._aliases[alias] = key
-
     @staticmethod
     def _max_prompt_logprobs(teacher_config) -> int | None:
         if teacher_config.inference.name != "vllm":
@@ -179,17 +181,8 @@ class TeacherInferenceBackend:
         vllm_kwargs = teacher_config.inference.engine_kwargs.get("vllm", {})
         return int(vllm_kwargs.get("max_logprobs", 20))
 
-    def resolve(self, *identifiers: str | None) -> str | None:
-        matches = {self._aliases[value] for value in identifiers if value in self._aliases}
-        if len(matches) > 1:
-            raise ValueError(f"Sampling request identifies multiple teachers: {sorted(matches)}")
-        return next(iter(matches), None)
-
-    def get_client(self, key: str) -> TeacherClient:
-        return self._clients[key]
-
-    def get_model_path(self, key: str) -> str:
-        return self.distillation_config.teacher_models[key].model_path
+    def get_client(self, model_path: str) -> TeacherClient:
+        return self._clients[model_path]
 
     def shutdown(self) -> None:
         actors = []
@@ -220,5 +213,4 @@ class TeacherInferenceBackend:
             finally:
                 self._clients.clear()
                 self._managers.clear()
-                self._aliases.clear()
                 self._resource_pools.clear()

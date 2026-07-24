@@ -36,13 +36,12 @@ logger = logging.getLogger(__name__)
 
 GLOBAL_SESSION_ID = "verl-remote-actor"
 GLOBAL_MODEL_ID = "verl-remote-actor-model"
-GLOBAL_SAMPLING_SESSION_ID = "verl-remote-actor-sampler"
 STATE_METADATA_FILE = "metadata.json"
 
 
 def get_configured_model_name(engine) -> str:
     """Return the client-visible model name configured for this server."""
-    return str(engine.config.server.get("model_name") or engine.config.actor_rollout_ref.model.path)
+    return str(engine.config.server.model_name)
 
 
 def get_supported_models(engine, teacher_backend=None) -> dict:
@@ -256,7 +255,7 @@ async def save_weights_for_sampler(engine, named: bool) -> dict:
     return {
         "type": "save_weights_for_sampler",
         "path": None,
-        "sampling_session_id": GLOBAL_SAMPLING_SESSION_ID,
+        "sampling_session_id": None,
     }
 
 

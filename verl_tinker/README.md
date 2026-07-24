@@ -10,7 +10,8 @@ one active training client at a time, not isolated multi-client sessions.
 
 ## News
 
-- 2026-07-03: Released `verl-tinker` 🚀
+- 2026-07-04: Released `verl-tinker` 🚀
+- 2026-07-24: Add in support for Teacher models to enable OPD workflows 🧑‍🏫
 
 ## Install
 
@@ -57,7 +58,8 @@ Quick-start configs are under `verl_tinker/configs/quick_start/`.
 Common environment overrides:
 
 ```bash
-export TINKER_SERVER_MODEL=Qwen/Qwen3-1.7B
+export TINKER_SERVER_MODEL_NAME=Qwen/Qwen3-1.7B
+export TINKER_SERVER_MODEL_PATH=/mnt/models/Qwen3-1.7B
 export TINKER_SERVER_N_GPUS_PER_NODE=8
 export TINKER_SERVER_PORT=8000
 export TINKER_CHECKPOINT_DIR=/tmp/tinker-checkpoints

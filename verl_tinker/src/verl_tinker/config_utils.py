@@ -131,6 +131,7 @@ def process_actor_rollout_ref_config(config: DictConfig) -> DictConfig:
         user_set_actor_profiler_all_ranks=user_set_actor_profiler_all_ranks,
         user_set_actor_profiler_ranks=user_set_actor_profiler_ranks,
     )
+    _normalize_actor_model_identifiers(config)
     _normalize_teacher_model_identifiers(config)
     return config
 
@@ -328,8 +329,7 @@ def _validate_config(config) -> list[str]:
     """Validate config before initialization. Returns list of error messages."""
     errors = []
 
-    if not config.get("actor_rollout_ref", {}).get("model", {}).get("path"):
-        errors.append("actor_rollout_ref.model.path is required")
+    errors.extend(_normalize_actor_model_identifiers(config))
     if "algorithm" not in config:
         errors.append("algorithm config is required")
     trainer_cfg = config.get("trainer", {})
@@ -368,6 +368,22 @@ def _validate_config(config) -> list[str]:
             errors.append(f"VeRL config validation: {e}")
 
     return errors
+
+
+def _normalize_actor_model_identifiers(config: DictConfig) -> list[str]:
+    """Fill the actor's client-visible name and load path from one another."""
+    model_name = _select(config, "server.model_name")
+    model_path = _select(config, "actor_rollout_ref.model.path")
+    name_missing = _is_missing(model_name)
+    path_missing = _is_missing(model_path)
+
+    if name_missing and path_missing:
+        return ["at least one of server.model_name or actor_rollout_ref.model.path is required"]
+    if name_missing:
+        OmegaConf.update(config, "server.model_name", model_path, merge=True)
+    elif path_missing:
+        OmegaConf.update(config, "actor_rollout_ref.model.path", model_name, merge=True)
+    return []
 
 
 def _normalize_teacher_model_identifiers(config: DictConfig) -> list[str]:

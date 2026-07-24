@@ -64,9 +64,9 @@ def test_teacher_backend_partitions_pool_and_builds_one_manager_per_teacher():
     )
     mock_split.assert_called_once_with(pool, [2, 2])
     assert [call[1].model_path for call in manager_calls] == ["/models/qwen3-1.7b", "/models/qwen3-30b"]
-    assert backend.resolve("Qwen/Qwen3-30B-A3B") == "large"
-    assert backend.resolve("/models/qwen3-30b") == "large"
-    assert backend.resolve("small") == "small"
+    assert ("Qwen/Qwen3-30B-A3B", "/models/qwen3-30b") in backend.sampling_targets
+    assert ("/models/qwen3-30b", "/models/qwen3-30b") in backend.sampling_targets
+    assert backend.get_client("/models/qwen3-30b").model_path == "/models/qwen3-30b"
 
 
 def test_teacher_backend_dedicated_pools_allocate_largest_teacher_first():
@@ -130,8 +130,11 @@ def test_teacher_backend_dedicated_pools_allocate_largest_teacher_first():
         (1, 4),
     ]
     mock_split.assert_not_called()
-    assert backend.resolve("Qwen/Qwen3-32B") == "deepmath"
-    assert backend.resolve("Qwen/Qwen3-235B-A22B-Instruct-2507") == "tulu3"
+    assert ("Qwen/Qwen3-32B", "/models/qwen3-32b") in backend.sampling_targets
+    assert (
+        "Qwen/Qwen3-235B-A22B-Instruct-2507",
+        "/models/qwen3-235b",
+    ) in backend.sampling_targets
 
 
 def test_dedicated_pool_startup_failure_cleans_all_created_pools():
@@ -195,7 +198,6 @@ def test_teacher_backend_shutdown_releases_server_workers_and_pools():
     replica = SimpleNamespace(servers=[server], _server_handle=server, workers=[worker])
     backend._managers = {"teacher": SimpleNamespace(load_balancer_handle=load_balancer, rollout_replicas=[replica])}
     backend._clients = {"teacher": MagicMock()}
-    backend._aliases = {"teacher": "teacher"}
     placement_groups = [MagicMock(), MagicMock()]
     backend._resource_pools = [
         SimpleNamespace(pgs=[placement_groups[0]]),

@@ -43,6 +43,7 @@ def test_tinker_config_merges_verl_defaults_and_keeps_only_tinker_overrides():
     assert config.server.max_concurrent_samples == 32
     assert config.server.enable_offload is True
     assert config.server.auto_merge_verl_default_config is True
+    assert config.server.model_name == "/models/qwen"
     assert config.actor_rollout_ref.actor._target_ == "verl.workers.config.VeOmniActorConfig"
     assert config.actor_rollout_ref.model._target_ == "verl.workers.config.HFModelConfig"
     assert config.actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu == 1
@@ -50,6 +51,34 @@ def test_tinker_config_merges_verl_defaults_and_keeps_only_tinker_overrides():
     assert config.actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu == 1
     assert "hf_model" in config.actor_rollout_ref.actor.checkpoint.save_contents
     assert "hf_model" in config.actor_rollout_ref.actor.checkpoint.load_contents
+
+
+@pytest.mark.parametrize(
+    ("model_name", "model_path", "expected_name", "expected_path"),
+    [
+        ("client-name", None, "client-name", "client-name"),
+        (None, "/models/actor", "/models/actor", "/models/actor"),
+        ("client-name", "/models/actor", "client-name", "/models/actor"),
+    ],
+)
+def test_actor_model_name_and_path_are_normalized(model_name, model_path, expected_name, expected_path):
+    config = _minimal_tinker_config()
+    config.server.model_name = model_name
+    config.actor_rollout_ref.model.path = model_path
+
+    config = process_actor_rollout_ref_config(config)
+
+    assert config.server.model_name == expected_name
+    assert config.actor_rollout_ref.model.path == expected_path
+
+
+def test_actor_model_name_and_path_both_missing_hard_fail():
+    config = _minimal_tinker_config()
+    config.server.model_name = None
+    config.actor_rollout_ref.model.path = None
+
+    with pytest.raises(ValueError, match="at least one of server.model_name or actor_rollout_ref.model.path"):
+        process_config(config)
 
 
 def test_config_utils_cli_validates_and_prints_processed_config(capsys):

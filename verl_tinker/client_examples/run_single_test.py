@@ -3,25 +3,14 @@ import asyncio
 import os
 import traceback
 
-try:
-    from .tasks.math_rl.gsm8k import run_math_rl_gsm8k_test
-    from .tasks.math_sft_rl.gsm8k import run_math_sft_rl_gsm8k_test
-    from .tasks.opd.deepmath import run_opd_deepmath_test
-    from .tasks.opd.multi_teacher import run_opd_multi_teacher_test
-    from .tasks.sdft.single_task import run_sdft_single_task_test
-    from .tasks.sft.no_robots import run_no_robot_direct_sft_test, run_no_robot_test
-    from .tasks.sft.tulu3 import run_tulu3_test
-    from .tasks.utils import shutdown_server, wait_for_healthz_ready
-except ImportError:
-    # Direct ``python run_single_test.py`` execution from client_examples.
-    from tasks.math_rl.gsm8k import run_math_rl_gsm8k_test
-    from tasks.math_sft_rl.gsm8k import run_math_sft_rl_gsm8k_test
-    from tasks.opd.deepmath import run_opd_deepmath_test
-    from tasks.opd.multi_teacher import run_opd_multi_teacher_test
-    from tasks.sdft.single_task import run_sdft_single_task_test
-    from tasks.sft.no_robots import run_no_robot_direct_sft_test, run_no_robot_test
-    from tasks.sft.tulu3 import run_tulu3_test
-    from tasks.utils import shutdown_server, wait_for_healthz_ready
+from tasks.math_rl.gsm8k import run_math_rl_gsm8k_test
+from tasks.math_sft_rl.gsm8k import run_math_sft_rl_gsm8k_test
+from tasks.opd.deepmath import run_opd_deepmath_test
+from tasks.opd.multi_teacher import run_opd_multi_teacher_test
+from tasks.sdft.single_task import run_sdft_single_task_test
+from tasks.sft.no_robots import run_no_robot_direct_sft_test, run_no_robot_test
+from tasks.sft.tulu3 import run_tulu3_test
+from tasks.utils import shutdown_server, wait_for_healthz_ready
 
 DEFAULT_MODEL_NAME = "Qwen/Qwen3-1.7B"
 DEFAULT_BASE_URL = "http://127.0.0.1:8000/"
