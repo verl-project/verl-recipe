@@ -1,0 +1,11 @@
+# context_management — rolling; refresh the commit against your verl checkout before publishing
+UPSTREAM=https://github.com/verl-project/verl.git
+MODE=rolling
+BRANCH=main
+# Core-library commit this recipe was developed/tested against. Refresh before opening the PR.
+VERL_COMMIT=9c38b8bb1876a81273d76de3e79328b2dd2b7b32
+PIP_INSTALL=pip install verl@git+https://github.com/verl-project/verl.git@9c38b8bb1876a81273d76de3e79328b2dd2b7b32
+GIT_SETUP=git clone https://github.com/verl-project/verl.git && cd verl && git checkout 9c38b8bb1876a81273d76de3e79328b2dd2b7b32 && git submodule update --init --recursive recipe
+RECIPE_FOLDER=context_management
+NOTES=Depends only on stable verl core APIs: verl.experimental.agent_loop.agent_loop (AgentLoopBase, register, AgentLoopOutput, AgentLoopMetrics), verl.tools, verl.utils.chat_template, verl.utils.tokenizer, verl.workers.rollout.replica.TokenOutput. No core code changes are required to use this recipe.
+REFRESH=Recompute VERL_COMMIT: (cd verl && git rev-parse HEAD). Re-run the tests under recipe/context_management/ after bumping.
