@@ -1,4 +1,4 @@
-# Note: this config requires 16 B200 gpus or more
+# Note: this config requires 32 H100 gpus
 
 server:
   host: ${oc.env:TINKER_SERVER_HOST,0.0.0.0}

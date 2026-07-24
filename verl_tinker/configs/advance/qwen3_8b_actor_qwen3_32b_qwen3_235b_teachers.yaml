@@ -1,4 +1,4 @@
-# Note: this config requires 16 B200 gpus or more
+# Note: this config requires 16 H100 gpus
 #
 # Two-node, sixteen-GPU multi-teacher on-policy distillation example:
 #   node 1: frozen Qwen3-235B-A22B-Instruct-2507 teacher (one TP8 replica)
