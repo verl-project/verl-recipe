@@ -36,16 +36,15 @@ logger = logging.getLogger(__name__)
 
 GLOBAL_SESSION_ID = "verl-remote-actor"
 GLOBAL_MODEL_ID = "verl-remote-actor-model"
-GLOBAL_SAMPLING_SESSION_ID = "verl-remote-actor-sampler"
 STATE_METADATA_FILE = "metadata.json"
 
 
 def get_configured_model_name(engine) -> str:
     """Return the client-visible model name configured for this server."""
-    return str(engine.config.server.get("model_name") or engine.config.actor_rollout_ref.model.path)
+    return str(engine.config.server.model_name)
 
 
-def get_supported_models(engine) -> dict:
+def get_supported_models(engine, teacher_backend=None) -> dict:
     """Return Tinker server capability metadata."""
     try:
         model_name = get_configured_model_name(engine)
@@ -55,7 +54,17 @@ def get_supported_models(engine) -> dict:
         max_ctx = int(engine.config.actor_rollout_ref.rollout.max_response_length)
     except Exception:
         max_ctx = 4096
-    return {"supported_models": [{"model_name": model_name, "max_context_length": max_ctx}]}
+    supported_models = [{"model_name": model_name, "max_context_length": max_ctx}]
+    if teacher_backend is not None:
+        for descriptor in teacher_backend.descriptors:
+            for identifier in dict.fromkeys((descriptor.model_name, descriptor.model_path)):
+                supported_models.append(
+                    {
+                        "model_name": identifier,
+                        "max_context_length": descriptor.max_context_length or max_ctx,
+                    }
+                )
+    return {"supported_models": supported_models}
 
 
 def get_base_model_name(engine, model_to_base_model: dict[str, str]) -> str:
@@ -189,6 +198,10 @@ async def forward_backward(engine, datums, loss_fn_name: str) -> dict:
     if not any(k.startswith("loss:") for k in metrics):
         metrics["loss:mean"] = 0.0
 
+    # Tinker computes mean_nll_loss client-side from loss_fn_outputs.logprobs.
+    # Prefer the engine's model_output when the VeRL worker returns it. Keep the
+    # zero-filled compatibility fallback below for VeRL versions that discard
+    # model_output during backward.
     logprobs_per_sample = None
     if result_td is not None:
         log_probs = result_td.get("log_probs", None)
@@ -242,7 +255,7 @@ async def save_weights_for_sampler(engine, named: bool) -> dict:
     return {
         "type": "save_weights_for_sampler",
         "path": None,
-        "sampling_session_id": GLOBAL_SAMPLING_SESSION_ID,
+        "sampling_session_id": None,
     }
 
 
@@ -293,7 +306,9 @@ async def save_state(
     saved_state_paths[uri] = local_dir
     if state_metadata is not None:
         saved_state_metadata[uri] = dict(state_metadata)
-        state_metadata_path(local_dir).write_text(json.dumps(state_metadata) + "\n")
+        metadata_path = state_metadata_path(local_dir)
+        metadata_path.parent.mkdir(parents=True, exist_ok=True)
+        metadata_path.write_text(json.dumps(state_metadata) + "\n")
     logger.info(f"[tinker_router] save_weights uri={uri} -> {local_dir}")
     return {"type": "save_weights", "path": uri}
 
@@ -338,13 +353,16 @@ def _apply_sampling_stop(sampling_params: dict[str, Any], stop: Any) -> None:
 
 async def sample(engine, req) -> dict:
     prompt_ids = list(req.prompt.to_ints())
+    num_samples = int(req.num_samples)
+    if num_samples <= 0:
+        raise ValueError(f"num_samples must be positive, got {num_samples}")
     sp = req.sampling_params
     sampling_params = {
         "max_tokens": sp.max_tokens or 256,
         "temperature": float(sp.temperature),
         "top_p": float(sp.top_p),
         "top_k": int(sp.top_k),
-        "n": int(req.num_samples),
+        "n": 1,
         "logprobs": True,
     }
     _apply_sampling_stop(sampling_params, getattr(sp, "stop", None))
@@ -355,32 +373,39 @@ async def sample(engine, req) -> dict:
     if req.topk_prompt_logprobs:
         sampling_params["prompt_logprobs"] = int(req.topk_prompt_logprobs)
 
-    result = await engine.generate(
-        request_id=uuid.uuid4().hex,
-        prompt_ids=prompt_ids,
-        sampling_params=sampling_params,
-    )
-    token_ids = list(result.token_ids or [])
-    log_probs = list(result.log_probs) if result.log_probs is not None else None
-    tinker_stop_reason = _normalize_tinker_stop_reason(result.stop_reason)
-    sequences = [
-        {
-            "stop_reason": tinker_stop_reason,
-            "tokens": token_ids,
-            "logprobs": log_probs,
-        }
-    ]
+    async def _generate_one(sample_index: int):
+        per_sample_params = dict(sampling_params)
+        if "seed" in per_sample_params:
+            per_sample_params["seed"] += sample_index
+        return await engine.generate(
+            request_id=uuid.uuid4().hex,
+            prompt_ids=prompt_ids,
+            sampling_params=per_sample_params,
+        )
 
-    extras = getattr(result, "extra_fields", None) or {}
+    results = await asyncio.gather(*[_generate_one(i) for i in range(num_samples)])
+    sequences = []
+    for result in results:
+        sequences.append(
+            {
+                "stop_reason": _normalize_tinker_stop_reason(result.stop_reason),
+                "tokens": list(result.token_ids or []),
+                "logprobs": list(result.log_probs) if result.log_probs is not None else None,
+            }
+        )
+
+    extras = getattr(results[0], "extra_fields", None) or {}
     prompt_ids_raw = extras.get("prompt_ids")
     prompt_lp_raw = extras.get("prompt_logprobs")
     prompt_logprobs_out = None
     topk_prompt_logprobs_out = None
     if prompt_lp_raw is not None:
         if req.topk_prompt_logprobs:
-            topk_prompt_logprobs_out = _format_topk_prompt_logprobs(prompt_ids_raw, prompt_lp_raw)
+            formatted = _format_topk_prompt_logprobs(prompt_ids_raw, prompt_lp_raw) or []
+            topk_prompt_logprobs_out = [[]] + formatted[: max(0, len(prompt_ids) - 1)]
         else:
-            prompt_logprobs_out = [(pos[0] if isinstance(pos, list) and pos else None) for pos in prompt_lp_raw]
+            scored = [(pos[0] if isinstance(pos, list) and pos else None) for pos in prompt_lp_raw]
+            prompt_logprobs_out = [None] + scored[: max(0, len(prompt_ids) - 1)]
 
     return {
         "type": "sample",

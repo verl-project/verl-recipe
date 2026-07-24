@@ -15,11 +15,15 @@
 from types import SimpleNamespace
 
 import pytest
+import torch
+from tensordict import TensorDict
 from tinker import AdamParams, SampleResponse
 from verl_tinker.tinker_ops import (
+    forward_backward,
     load_state,
     optim_step,
     sample,
+    save_state,
 )
 
 
@@ -66,8 +70,78 @@ class _LoadStateEngine:
         self.load_calls.append((local_dir, zero_optimizer_grad))
 
 
+class _SaveStateEngine:
+    def __init__(self):
+        self.save_calls = []
+
+    def save_checkpoint(self, local_dir, step):
+        self.save_calls.append((local_dir, step))
+
+
+class _ForwardBackwardEngine:
+    world_size = 1
+
+    def __init__(self, result_td):
+        self.result_td = result_td
+
+    def forward_backward(self, _data):
+        return self.result_td
+
+
+def _cross_entropy_datum(prefix, target_tokens):
+    return SimpleNamespace(
+        model_input=SimpleNamespace(to_ints=lambda: prefix),
+        loss_fn_inputs={
+            "target_tokens": SimpleNamespace(data=target_tokens),
+        },
+    )
+
+
 async def _to_thread_inline(func, /, *args, **kwargs):
     return func(*args, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_forward_backward_returns_verl_model_logprobs_for_cross_entropy(monkeypatch):
+    monkeypatch.setattr("verl_tinker.tinker_ops.asyncio.to_thread", _to_thread_inline)
+    monkeypatch.setattr("verl_tinker.tinker_ops._datums_to_sft_td", lambda *args, **kwargs: object())
+    log_probs = torch.nested.as_nested_tensor(
+        [torch.tensor([-1.0, -2.0, -3.0]), torch.tensor([-4.0, -5.0, -6.0, -7.0])],
+        layout=torch.jagged,
+    )
+    result_td = TensorDict({"log_probs": log_probs}, batch_size=[2])
+    result_td.set_non_tensor("metrics", {"loss": 4.25})
+    datums = [
+        _cross_entropy_datum([10, 11], [11, 12]),
+        _cross_entropy_datum([20, 21, 22], [21, 22, 23]),
+    ]
+
+    result = await forward_backward(_ForwardBackwardEngine(result_td), datums, "cross_entropy")
+
+    assert result["loss_fn_outputs"] == [
+        {"logprobs": {"data": [-1.0, -2.0], "dtype": "float32", "shape": [2]}},
+        {"logprobs": {"data": [-4.0, -5.0, -6.0], "dtype": "float32", "shape": [3]}},
+    ]
+    assert result["metrics"]["loss:mean"] == 4.25
+
+
+@pytest.mark.asyncio
+async def test_forward_backward_zero_fills_missing_cross_entropy_model_logprobs(monkeypatch):
+    monkeypatch.setattr("verl_tinker.tinker_ops.asyncio.to_thread", _to_thread_inline)
+    monkeypatch.setattr("verl_tinker.tinker_ops._datums_to_sft_td", lambda *args, **kwargs: object())
+    result_td = TensorDict({}, batch_size=[])
+    result_td.set_non_tensor("metrics", {"loss": 4.25})
+
+    result = await forward_backward(
+        _ForwardBackwardEngine(result_td),
+        [_cross_entropy_datum([10, 11], [11, 12])],
+        "cross_entropy",
+    )
+
+    assert result["loss_fn_outputs"] == [
+        {"logprobs": {"data": [0.0, 0.0], "dtype": "float32", "shape": [2]}},
+    ]
+    assert result["metrics"]["loss:mean"] == 4.25
 
 
 @pytest.mark.asyncio
@@ -83,7 +157,7 @@ async def test_sample_formats_topk_prompt_logprobs_for_current_tinker_schema():
 
     result = await sample(engine, req)
 
-    expected = [[(11, -1.1), (12, -2.2)], [(13, -3.3)], [(0, 0.0), (0, 0.0)]]
+    expected = [[], [(11, -1.1), (12, -2.2)], [(13, -3.3)]]
     assert result["topk_prompt_logprobs"] == expected
     assert not isinstance(result["topk_prompt_logprobs"], dict)
     assert engine.sampling_params["prompt_logprobs"] == 2
@@ -91,6 +165,48 @@ async def test_sample_formats_topk_prompt_logprobs_for_current_tinker_schema():
     if hasattr(SampleResponse, "model_validate"):
         response = SampleResponse.model_validate(result)
         assert response.topk_prompt_logprobs == expected
+
+
+@pytest.mark.asyncio
+async def test_sample_fans_out_multiple_sequences_and_offsets_seed():
+    req = SimpleNamespace(
+        prompt=_Prompt(),
+        sampling_params=SimpleNamespace(max_tokens=4, temperature=0.7, top_p=0.9, top_k=20, stop=None, seed=10),
+        num_samples=3,
+        prompt_logprobs=False,
+        topk_prompt_logprobs=0,
+    )
+
+    class MultiEngine(_Engine):
+        def __init__(self):
+            super().__init__()
+            self.seeds = []
+
+        async def generate(self, request_id, prompt_ids, sampling_params):
+            self.seeds.append(sampling_params["seed"])
+            seed = sampling_params["seed"]
+            return SimpleNamespace(token_ids=[seed], log_probs=[-0.1], stop_reason="stop", extra_fields={})
+
+    engine = MultiEngine()
+    result = await sample(engine, req)
+
+    assert engine.seeds == [10, 11, 12]
+    assert [sequence["tokens"] for sequence in result["sequences"]] == [[10], [11], [12]]
+
+
+@pytest.mark.asyncio
+async def test_sample_scalar_prompt_logprobs_have_leading_unscored_token():
+    req = SimpleNamespace(
+        prompt=_Prompt(),
+        sampling_params=SimpleNamespace(max_tokens=1, temperature=1, top_p=1, top_k=-1, stop=None, seed=None),
+        num_samples=1,
+        prompt_logprobs=True,
+        topk_prompt_logprobs=0,
+    )
+
+    result = await sample(_Engine(), req)
+
+    assert result["prompt_logprobs"] == [None, -1.1, -3.3]
 
 
 @pytest.mark.asyncio
@@ -253,3 +369,30 @@ async def test_load_state_preserves_loaded_optimizer_by_default(monkeypatch):
     )
 
     assert engine.load_calls == [("/tmp/local-checkpoint", False)]
+
+
+@pytest.mark.asyncio
+async def test_save_state_creates_router_local_directory_for_metadata(monkeypatch, tmp_path):
+    monkeypatch.setattr("verl_tinker.tinker_ops.asyncio.to_thread", _to_thread_inline)
+    engine = _SaveStateEngine()
+    saved_state_paths = {}
+    saved_state_metadata = {}
+    checkpoint_root = tmp_path / "checkpoints"
+
+    result = await save_state(
+        engine,
+        str(checkpoint_root),
+        saved_state_paths,
+        saved_state_metadata,
+        {"epoch": 1},
+        step=3,
+        name="final",
+    )
+
+    uri = "tinker://verl-tinker/state/final"
+    local_dir = checkpoint_root / "final"
+    assert result == {"type": "save_weights", "path": uri}
+    assert engine.save_calls == [(str(local_dir), 3)]
+    assert saved_state_paths == {uri: str(local_dir)}
+    assert saved_state_metadata == {uri: {"epoch": 1}}
+    assert (local_dir / "metadata.json").read_text() == '{"epoch": 1}\n'

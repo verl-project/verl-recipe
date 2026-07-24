@@ -23,6 +23,8 @@ from tinker_cookbook.supervised.types import (
 )
 from tinker_cookbook.tokenizer_utils import get_tokenizer
 
+from ..utils import model_name_slug
+
 DATASET_NAME = "gsm8k"
 
 WANDB_PROJECT = "verl-remote-actor-ci"
@@ -235,6 +237,7 @@ def _print_final_eval_summary(stage_results: Sequence[dict[str, Any]]) -> None:
 
 async def run_math_sft_rl_gsm8k_test(base_url: str, model_name: str, tokenizer_name_or_path: str | None = None):
     tokenizer_name_or_path = tokenizer_name_or_path or model_name
+    model_slug = model_name_slug(model_name)
     renderer_name = model_info.get_recommended_renderer_name(model_name)
     eval_renderer = _build_eval_renderer(renderer_name, tokenizer_name_or_path)
 
@@ -265,7 +268,7 @@ async def run_math_sft_rl_gsm8k_test(base_url: str, model_name: str, tokenizer_n
         save_every=0,
         base_url=base_url,
         wandb_project=WANDB_PROJECT,
-        wandb_name="sft-stage",
+        wandb_name=f"sft-stage-{model_slug}",
     )
 
     cli_utils.check_log_dir(sft_config.log_path, behavior_if_exists="delete")
@@ -303,7 +306,7 @@ async def run_math_sft_rl_gsm8k_test(base_url: str, model_name: str, tokenizer_n
         temperature=0.7,
         kl_penalty_coef=0.0,
         wandb_project=WANDB_PROJECT,
-        wandb_name="rl-1-step",
+        wandb_name=f"rl-1-step-{model_slug}",
         log_path=RL_LOG_PATH,
         eval_every=0,
         save_every=0,
@@ -350,7 +353,7 @@ async def run_math_sft_rl_gsm8k_test(base_url: str, model_name: str, tokenizer_n
                 load_checkpoint_path=sft_checkpoint.state_path,
             ),
             wandb_project=WANDB_PROJECT,
-            wandb_name="rl-stage",
+            wandb_name=f"rl-stage-{model_slug}",
             log_path=RL_LOG_PATH,
             eval_every=0,
             save_every=0,

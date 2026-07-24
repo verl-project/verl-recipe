@@ -1,8 +1,7 @@
-# Note: this config is designed for quick CI funcitonal tests, for more serious training you
-# MOST LIKELY will need to increase the amount of GPU resources and configure this file
-# a bit more
+# Note: this config requires 32 H100 gpus
 
 server:
+  model_name: ${oc.env:TINKER_SERVER_MODEL_NAME,unsloth/gpt-oss-120b-BF16}
   host: ${oc.env:TINKER_SERVER_HOST,0.0.0.0}
   port: ${oc.env:TINKER_SERVER_PORT,8000}
   ray_address: ${oc.env:RAY_ADDRESS,local}
@@ -21,14 +20,23 @@ actor_rollout_ref: # this is the same as verl's config, this field is ALWAYS req
       lr_scheduler_type: constant
       lr: 1.0e-06
     veomni:
-      cross_entropy_loss_implementation: chunk_loss
-
       # Expert parallelism for MoE expert weights
       fsdp_size: -1
-      expert_parallel_size: 32
+      expert_parallel_size: 1
+      # GPT-OSS attention uses sliding windows and learnable sinks, which are
+      # supported by VeOmni's FlashAttention 4 integration.
+      attn_implementation: flash_attention_4
+      # GPT-OSS uses interleaved gate/up projections; use its Quack backend.
+      moe_implementation: fused_quack
     use_dynamic_bsz: true
     ppo_mini_batch_size: 1
     ppo_micro_batch_size_per_gpu: 1
+    # profiler:
+    #   enable: true
+    #   all_ranks: true
+    #   tool_config:
+    #     torch:
+    #       contents: [cuda, cpu, stack]
 
 
   rollout:
@@ -58,7 +66,7 @@ actor_rollout_ref: # this is the same as verl's config, this field is ALWAYS req
     enable: false
 
   model:
-    path: ${oc.env:TINKER_SERVER_MODEL,unsloth/gpt-oss-120b-BF16}
+    path: ${oc.env:TINKER_SERVER_MODEL_PATH,unsloth/gpt-oss-120b-BF16}
     use_remove_padding: true
     enable_gradient_checkpointing: true
 
@@ -78,3 +86,10 @@ trainer:
   experiment_name: tinker_server_gpt_oss_120b_actor_rollout_4nodes
   nnodes: 4
   n_gpus_per_node: 8
+
+# global_profiler:
+#   tool: torch
+#   steps: [2]
+#   profile_continuous_steps: false
+#   save_path: /mnt/hdfs/profiler_output/gpt-oss-120b
+#   all_ranks: true

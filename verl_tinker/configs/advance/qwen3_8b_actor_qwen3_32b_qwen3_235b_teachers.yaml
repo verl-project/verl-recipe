@@ -1,0 +1,122 @@
+# Note: this config requires 16 H100 gpus
+#
+# Two-node, sixteen-GPU multi-teacher on-policy distillation example:
+#   node 1: frozen Qwen3-235B-A22B-Instruct-2507 teacher (one TP8 replica)
+#   node 2: trainable Qwen3-8B actor/rollout (4 GPUs) + frozen Qwen3-32B teacher (one TP4 replica)
+#
+# The actor pool is initialized first. Dedicated teacher pools are then allocated
+# largest-first so the TP8 teacher strictly packs onto the untouched node.
+#
+# Teacher naming designed to match client_examples/tasks/opd/multi_teacher.py,
+# but feel free to change for your custom workflow.
+
+server:
+  model_name: ${oc.env:TINKER_SERVER_MODEL_NAME,Qwen/Qwen3-8B}
+  host: ${oc.env:TINKER_SERVER_HOST,0.0.0.0}
+  port: ${oc.env:TINKER_SERVER_PORT,8000}
+  ray_address: ${oc.env:RAY_ADDRESS,local}
+  checkpoint_dir: ${oc.env:TINKER_CHECKPOINT_DIR,/tmp/tinker-checkpoints}
+  server_max_runtime: ${oc.env:TINKER_SERVER_MAX_RUNTIME,null}
+  max_concurrent_samples: ${oc.env:TINKER_SERVER_MAX_CONCURRENT_SAMPLES,64}
+  enable_offload: true
+  auto_merge_verl_default_config: true
+
+actor_rollout_ref:
+  actor:
+    strategy: veomni
+    use_kl_loss: false
+    ppo_mini_batch_size: 8
+    ppo_micro_batch_size_per_gpu: 1
+    optim:
+      lr_scheduler_type: constant
+      lr: 2.0e-6
+  rollout:
+    name: vllm
+    mode: async
+    tensor_model_parallel_size: 1
+    pipeline_model_parallel_size: 1
+    gpu_memory_utilization: 0.6
+    max_num_seqs: 128
+    max_num_batched_tokens: 8192
+    enable_chunked_prefill: true
+    calculate_log_probs: true
+  ref:
+    enable: false
+  model:
+    path: ${oc.env:TINKER_SERVER_MODEL_PATH,Qwen/Qwen3-8B}
+    use_remove_padding: true
+    enable_gradient_checkpointing: true
+    trust_remote_code: true
+
+distillation:
+  enabled: true
+  # These VeRL fields describe the aggregate twelve-GPU teacher allocation.
+  nnodes: 2
+  n_gpus_per_node: 6
+  # verl_tinker extension: strictly pack each teacher into its own Ray pool.
+  dedicated_resource_pools: true
+  teacher_models:
+    deepmath_teacher:
+      key: deepmath
+      model_name: ${oc.env:TINKER_DEEPMATH_TEACHER_MODEL_NAME,Qwen/Qwen3-32B}
+      model_path: ${oc.env:TINKER_DEEPMATH_TEACHER_MODEL_PATH,Qwen/Qwen3-32B}
+      num_replicas: 1
+      inference:
+        name: vllm
+        tensor_model_parallel_size: 4
+        data_parallel_size: 1
+        pipeline_model_parallel_size: 1
+        gpu_memory_utilization: 0.8
+        prompt_length: 1024
+        response_length: 2048
+        max_model_len: 4096
+        max_num_seqs: 128
+        max_num_batched_tokens: 8192
+        enable_chunked_prefill: true
+        enable_prefix_caching: true
+        engine_kwargs:
+          vllm:
+            max_logprobs: 128
+    tulu3_teacher:
+      key: tulu3
+      model_name: ${oc.env:TINKER_TULU3_TEACHER_MODEL_NAME,Qwen/Qwen3-235B-A22B-Instruct-2507}
+      model_path: ${oc.env:TINKER_TULU3_TEACHER_MODEL_PATH,Qwen/Qwen3-235B-A22B-Instruct-2507}
+      num_replicas: 1
+      inference:
+        name: vllm
+        tensor_model_parallel_size: 8
+        data_parallel_size: 1
+        expert_parallel_size: 8
+        pipeline_model_parallel_size: 1
+        # Leave H100 headroom for the temporary full-vocabulary FP32
+        # prompt-logprob buffer.
+        gpu_memory_utilization: 0.85
+        prompt_length: 1024
+        response_length: 2048
+        max_model_len: 4096
+        max_num_seqs: 128
+        max_num_batched_tokens: 8192
+        enable_chunked_prefill: true
+        enable_prefix_caching: true
+        engine_kwargs:
+          vllm:
+            max_logprobs: 128
+
+algorithm:
+  adv_estimator: grpo
+  use_kl_in_reward: false
+
+data:
+  train_batch_size: 64
+  max_prompt_length: 1024
+  max_response_length: 2048
+
+trainer:
+  logger:
+  - console
+  project_name: verl_tinker_server
+  experiment_name: qwen3_8b_actor_qwen3_32b_qwen3_235b_teachers
+  # Strict-pack the actor onto four GPUs of one node. Teacher initialization
+  # consumes the remaining four GPUs there and all eight GPUs on the other node.
+  nnodes: 1
+  n_gpus_per_node: 4

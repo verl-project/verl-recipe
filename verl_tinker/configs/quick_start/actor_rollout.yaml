@@ -1,4 +1,5 @@
 server:
+  model_name: ${oc.env:TINKER_SERVER_MODEL_NAME,Qwen/Qwen3-1.7B}
   host: ${oc.env:TINKER_SERVER_HOST,0.0.0.0}
   port: ${oc.env:TINKER_SERVER_PORT,8000}
   ray_address: ${oc.env:RAY_ADDRESS,local}
@@ -25,7 +26,7 @@ actor_rollout_ref: # this is the same as verl's config, this field is ALWAYS req
   ref:
     enable: false
   model:
-    path: ${oc.env:TINKER_SERVER_MODEL,Qwen/Qwen3-1.7B}
+    path: ${oc.env:TINKER_SERVER_MODEL_PATH,Qwen/Qwen3-1.7B}
 
 algorithm:
   adv_estimator: sft

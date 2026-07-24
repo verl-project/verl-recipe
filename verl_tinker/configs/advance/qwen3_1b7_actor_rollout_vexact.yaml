@@ -1,6 +1,7 @@
 # WARNING: REQUIRE Hopper GPU
 
 server:
+  model_name: ${oc.env:TINKER_SERVER_MODEL_NAME,Qwen/Qwen3-1.7B}
   host: ${oc.env:TINKER_SERVER_HOST,0.0.0.0}
   port: ${oc.env:TINKER_SERVER_PORT,8000}
   ray_address: ${oc.env:RAY_ADDRESS,local}
@@ -17,7 +18,6 @@ actor_rollout_ref: # this is the same as verl's config, this field is ALWAYS req
     ppo_micro_batch_size_per_gpu: 1
     use_torch_compile: false
     veomni:
-      fsdp_size: 8
       ulysses_parallel_size: 1
       expert_parallel_size: 1
       attn_implementation: flash_attention_3
@@ -47,7 +47,7 @@ actor_rollout_ref: # this is the same as verl's config, this field is ALWAYS req
   ref:
     enable: false
   model:
-    path: ${oc.env:TINKER_SERVER_MODEL,Qwen/Qwen3-1.7B}
+    path: ${oc.env:TINKER_SERVER_MODEL_PATH,Qwen/Qwen3-1.7B}
     use_remove_padding: true
     enable_gradient_checkpointing: true
     external_lib:
@@ -79,4 +79,4 @@ trainer:
   project_name: verl_tinker_server
   experiment_name: tinker_server_qwen3_1b7_actor_rollout_vexact
   nnodes: 1
-  n_gpus_per_node: 8
+  n_gpus_per_node: ${oc.env:TINKER_SERVER_N_GPUS_PER_NODE,8}

@@ -34,7 +34,8 @@ def _minimal_tinker_config():
 def test_tinker_config_merges_verl_defaults_and_keeps_only_tinker_overrides():
     config = process_actor_rollout_ref_config(_minimal_tinker_config())
 
-    assert set(config.keys()) == {"server", "actor_rollout_ref", "algorithm", "data", "trainer"}
+    assert set(config.keys()) == {"server", "actor_rollout_ref", "algorithm", "data", "distillation", "trainer"}
+    assert config.distillation.enabled is False
     assert config.server.host == "0.0.0.0"
     assert config.server.port == 8000
     assert config.server.ray_address == "local"
@@ -42,6 +43,7 @@ def test_tinker_config_merges_verl_defaults_and_keeps_only_tinker_overrides():
     assert config.server.max_concurrent_samples == 32
     assert config.server.enable_offload is True
     assert config.server.auto_merge_verl_default_config is True
+    assert config.server.model_name == "/models/qwen"
     assert config.actor_rollout_ref.actor._target_ == "verl.workers.config.VeOmniActorConfig"
     assert config.actor_rollout_ref.model._target_ == "verl.workers.config.HFModelConfig"
     assert config.actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu == 1
@@ -49,6 +51,34 @@ def test_tinker_config_merges_verl_defaults_and_keeps_only_tinker_overrides():
     assert config.actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu == 1
     assert "hf_model" in config.actor_rollout_ref.actor.checkpoint.save_contents
     assert "hf_model" in config.actor_rollout_ref.actor.checkpoint.load_contents
+
+
+@pytest.mark.parametrize(
+    ("model_name", "model_path", "expected_name", "expected_path"),
+    [
+        ("client-name", None, "client-name", "client-name"),
+        (None, "/models/actor", "/models/actor", "/models/actor"),
+        ("client-name", "/models/actor", "client-name", "/models/actor"),
+    ],
+)
+def test_actor_model_name_and_path_are_normalized(model_name, model_path, expected_name, expected_path):
+    config = _minimal_tinker_config()
+    config.server.model_name = model_name
+    config.actor_rollout_ref.model.path = model_path
+
+    config = process_actor_rollout_ref_config(config)
+
+    assert config.server.model_name == expected_name
+    assert config.actor_rollout_ref.model.path == expected_path
+
+
+def test_actor_model_name_and_path_both_missing_hard_fail():
+    config = _minimal_tinker_config()
+    config.server.model_name = None
+    config.actor_rollout_ref.model.path = None
+
+    with pytest.raises(ValueError, match="at least one of server.model_name or actor_rollout_ref.model.path"):
+        process_config(config)
 
 
 def test_config_utils_cli_validates_and_prints_processed_config(capsys):
@@ -126,17 +156,108 @@ def test_tinker_config_disables_verl_model_offload_flags():
     assert config.actor_rollout_ref.ref.veomni.optimizer_offload is False
 
 
-def test_tinker_config_does_not_keep_unsupported_ppo_sections():
+def test_tinker_config_keeps_distillation_but_not_other_unsupported_ppo_sections():
     config = _minimal_tinker_config()
     config.reward = {"reward_model": {"enable": True}}
     config.critic = {"enable": False}
-    config.distillation = {"enable": True}
+    config.distillation = {"enabled": False}
 
     config = process_actor_rollout_ref_config(config)
 
     assert "reward" not in config
     assert "critic" not in config
-    assert "distillation" not in config
+    assert config.distillation.enabled is False
+
+
+def test_tinker_config_preserves_and_validates_dedicated_teacher_config():
+    config = _minimal_tinker_config()
+    config.trainer.n_gpus_per_node = 4
+    config.distillation = {
+        "enabled": True,
+        "nnodes": 1,
+        "n_gpus_per_node": 4,
+        "teacher_models": {
+            "teacher_model": {
+                "model_name": "Qwen/Qwen3-30B-A3B",
+                "model_path": "Qwen/Qwen3-30B-A3B",
+                "inference": {
+                    "name": "vllm",
+                    "tensor_model_parallel_size": 4,
+                    "engine_kwargs": {"vllm": {"max_logprobs": 128}},
+                },
+            }
+        },
+    }
+
+    processed = process_actor_rollout_ref_config(config)
+    errors = _validate_config(processed)
+
+    assert errors == []
+    assert processed.distillation.enabled is True
+    assert processed.distillation.teacher_models.teacher_model.model_name == "Qwen/Qwen3-30B-A3B"
+    assert processed.distillation.teacher_models.teacher_model.model_path == "Qwen/Qwen3-30B-A3B"
+    assert processed.distillation.teacher_models.teacher_model.inference.tensor_model_parallel_size == 4
+
+
+def test_multi_teacher_config_uses_dedicated_pools_and_validates_gpu_footprints():
+    config = OmegaConf.load(_TINKER_CONFIG_DIR / "advance" / "qwen3_8b_actor_qwen3_32b_qwen3_235b_teachers.yaml")
+
+    processed = process_actor_rollout_ref_config(config)
+    errors = _validate_config(processed)
+
+    assert errors == []
+    assert processed.trainer.nnodes == 1
+    assert processed.trainer.n_gpus_per_node == 4
+    assert processed.distillation.nnodes == 2
+    assert processed.distillation.n_gpus_per_node == 6
+    assert processed.distillation.dedicated_resource_pools is True
+    assert processed.distillation.teacher_models.deepmath_teacher.key == "deepmath"
+    assert processed.distillation.teacher_models.deepmath_teacher.inference.tensor_model_parallel_size == 4
+    assert processed.distillation.teacher_models.tulu3_teacher.key == "tulu3"
+    assert processed.distillation.teacher_models.tulu3_teacher.inference.tensor_model_parallel_size == 8
+
+
+@pytest.mark.parametrize(
+    ("teacher_identifiers", "expected_name", "expected_path"),
+    [
+        ({"model_path": "Qwen/path"}, "Qwen/path", "Qwen/path"),
+        ({"model_name": "Qwen/name"}, "Qwen/name", "Qwen/name"),
+    ],
+)
+def test_teacher_model_name_and_path_default_to_each_other(teacher_identifiers, expected_name, expected_path):
+    config = _minimal_tinker_config()
+    config.trainer.n_gpus_per_node = 1
+    config.distillation = {
+        "enabled": True,
+        "nnodes": 1,
+        "n_gpus_per_node": 1,
+        "teacher_models": {
+            "teacher_model": {
+                **teacher_identifiers,
+                "inference": {"name": "vllm", "tensor_model_parallel_size": 1},
+            }
+        },
+    }
+
+    processed = process_actor_rollout_ref_config(config)
+
+    assert _validate_config(processed) == []
+    assert processed.distillation.teacher_models.teacher_model.model_name == expected_name
+    assert processed.distillation.teacher_models.teacher_model.model_path == expected_path
+
+
+def test_teacher_model_requires_name_or_path():
+    config = _minimal_tinker_config()
+    config.distillation = {
+        "enabled": True,
+        "teacher_models": {"teacher_model": {"inference": {"name": "vllm"}}},
+    }
+
+    processed = process_actor_rollout_ref_config(config)
+
+    assert _validate_config(processed) == [
+        "distillation.teacher_models.teacher_model requires at least one of model_name or model_path"
+    ]
 
 
 def test_tinker_config_preserves_user_values_over_verl_defaults():

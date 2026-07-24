@@ -10,7 +10,8 @@ one active training client at a time, not isolated multi-client sessions.
 
 ## News
 
-- 2026-07-03: Released `verl-tinker` 🚀
+- 2026-07-04: Released `verl-tinker` 🚀
+- 2026-07-24: Add in support for Teacher models to enable OPD workflows 🧑‍🏫
 
 ## Install
 
@@ -57,7 +58,8 @@ Quick-start configs are under `verl_tinker/configs/quick_start/`.
 Common environment overrides:
 
 ```bash
-export TINKER_SERVER_MODEL=Qwen/Qwen3-1.7B
+export TINKER_SERVER_MODEL_NAME=Qwen/Qwen3-1.7B
+export TINKER_SERVER_MODEL_PATH=/mnt/models/Qwen3-1.7B
 export TINKER_SERVER_N_GPUS_PER_NODE=8
 export TINKER_SERVER_PORT=8000
 export TINKER_CHECKPOINT_DIR=/tmp/tinker-checkpoints
@@ -230,7 +232,13 @@ Most long-running operations return a `request_id`. Poll
 
 ## Limitations
 
-- Critic, reward model, and teacher model serving are not supported.
+- Critic and reward model serving are not supported.
+- Frozen teacher models may be configured through VERL's `distillation`
+  section. They run on dedicated GPUs and support sampling and prompt
+  log-probabilities, but not training or checkpoint mutation.
+- Multi-teacher deployments can set `distillation.dedicated_resource_pools=true`
+  to strictly pack each teacher into its own Ray placement group. Teachers are
+  allocated largest-first; each teacher must fit on a single node.
 - LoRA training is not supported. Some LoRA-shaped metadata is returned for
   Tinker Cookbook compatibility, but the backend trains full model weights.
 - Multiple clients are not isolated: they share one model state, optimizer

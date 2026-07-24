@@ -5,7 +5,7 @@ from typing import cast
 
 import datasets
 import tinker
-from tinker_cookbook import checkpoint_utils, cli_utils, model_info, renderers
+from tinker_cookbook import cli_utils, model_info, renderers
 from tinker_cookbook.recipes.chat_sl import chat_datasets
 from tinker_cookbook.renderers import TrainOnWhat
 from tinker_cookbook.supervised import train
@@ -13,6 +13,8 @@ from tinker_cookbook.supervised.common import compute_mean_nll
 from tinker_cookbook.supervised.data import conversation_to_datum
 from tinker_cookbook.supervised.types import ChatDatasetBuilderCommonConfig
 from tinker_cookbook.tokenizer_utils import get_tokenizer
+
+from ..utils import model_name_slug
 
 
 async def run_no_robot_test(base_url, model_name, tokenizer_name_or_path=None):
@@ -22,22 +24,24 @@ async def run_no_robot_test(base_url, model_name, tokenizer_name_or_path=None):
         model_name_for_tokenizer=tokenizer_name_or_path,
         renderer_name=renderer_name,
         max_length=2048,
-        batch_size=8,
+        batch_size=16,
         train_on_what=TrainOnWhat.ALL_ASSISTANT_MESSAGES,
     )
     config = train.Config(
-        log_path="/tmp/cookbook-sl-basic",
+        log_path="/tmp/tinker-sft-norobot-demo",
         model_name=model_name,
         renderer_name=renderer_name,
         dataset_builder=chat_datasets.NoRobotsBuilder(common_config=common),
-        learning_rate=2e-4,
+        learning_rate=1e-5,
         num_epochs=1,
-        eval_every=0,
+        lora_rank=0,
+        max_steps=100,
+        eval_every=25,
         save_every=0,
         base_url=base_url,
         # WandB
         wandb_project="verl-tinker-ci",
-        wandb_name="sft-norobot-qwen3-1.7b",
+        wandb_name=f"sft-norobot-{model_name_slug(model_name)}",
     )
     cli_utils.check_log_dir(config.log_path, behavior_if_exists="delete")
     await train.main(config)
@@ -51,11 +55,11 @@ async def run_no_robot_test(base_url, model_name, tokenizer_name_or_path=None):
 async def run_no_robot_direct_sft_test(base_url, model_name, tokenizer_name_or_path=None):
     tokenizer_name_or_path = tokenizer_name_or_path or model_name
     log_path = os.environ.get("TINKER_NOROBOT_DIRECT_LOG_PATH", "/tmp/direct-sft-norobot")
-    batch_size = int(os.environ.get("TINKER_NOROBOT_DIRECT_BATCH_SIZE", "8"))
-    max_steps = int(os.environ.get("TINKER_NOROBOT_DIRECT_MAX_STEPS", "50"))
+    batch_size = int(os.environ.get("TINKER_NOROBOT_DIRECT_BATCH_SIZE", "16"))
+    max_steps = int(os.environ.get("TINKER_NOROBOT_DIRECT_MAX_STEPS", "100"))
     max_length = int(os.environ.get("TINKER_NOROBOT_DIRECT_MAX_LENGTH", "2048"))
-    learning_rate = float(os.environ.get("TINKER_NOROBOT_DIRECT_LEARNING_RATE", "2e-4"))
-    lora_rank = int(os.environ.get("TINKER_NOROBOT_DIRECT_LORA_RANK", "32"))
+    learning_rate = float(os.environ.get("TINKER_NOROBOT_DIRECT_LEARNING_RATE", "1e-5"))
+    lora_rank = int(os.environ.get("TINKER_NOROBOT_DIRECT_LORA_RANK", "0"))
 
     cli_utils.check_log_dir(log_path, behavior_if_exists="delete")
     Path(log_path).mkdir(parents=True, exist_ok=True)
@@ -116,12 +120,3 @@ async def run_no_robot_direct_sft_test(base_url, model_name, tokenizer_name_or_p
         if optim_result.metrics:
             metrics.update(optim_result.metrics)
         print(f"direct No Robots SFT metrics: {metrics}")
-
-    await checkpoint_utils.save_checkpoint_async(
-        training_client=training_client,
-        name="final",
-        log_path=log_path,
-        loop_state={"batch": num_steps, "final": True},
-        kind="state",
-        ttl_seconds=None,
-    )

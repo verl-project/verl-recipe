@@ -5,6 +5,8 @@ import traceback
 
 from tasks.math_rl.gsm8k import run_math_rl_gsm8k_test
 from tasks.math_sft_rl.gsm8k import run_math_sft_rl_gsm8k_test
+from tasks.opd.deepmath import run_opd_deepmath_test
+from tasks.opd.multi_teacher import run_opd_multi_teacher_test
 from tasks.sdft.single_task import run_sdft_single_task_test
 from tasks.sft.no_robots import run_no_robot_direct_sft_test, run_no_robot_test
 from tasks.sft.tulu3 import run_tulu3_test
@@ -21,6 +23,8 @@ ALL_TESTS = {
     "sdft_single_task": run_sdft_single_task_test,
     "rl_gsm8k": run_math_rl_gsm8k_test,
     "sft_rl_gsm8k": run_math_sft_rl_gsm8k_test,
+    "opd_deepmath": run_opd_deepmath_test,
+    "opd_multi_teacher": run_opd_multi_teacher_test,
 }
 
 
@@ -47,7 +51,6 @@ async def main(
     wait_for_healthz_ready(base_url)
 
     test = ALL_TESTS[test_name]
-
     success = True
     try:
         await test(base_url, model_name=model_name, tokenizer_name_or_path=tokenizer_name_or_path)

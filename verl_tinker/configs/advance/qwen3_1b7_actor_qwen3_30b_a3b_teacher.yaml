@@ -1,0 +1,83 @@
+# One-node, eight-GPU on-policy distillation example:
+#   4 GPUs: trainable Qwen3-1.7B actor + colocated actor rollout
+#   4 GPUs: frozen Qwen3-30B-A3B teacher (one TP4 vLLM replica)
+
+server:
+  model_name: ${oc.env:TINKER_SERVER_MODEL_NAME,Qwen/Qwen3-1.7B}
+  host: ${oc.env:TINKER_SERVER_HOST,0.0.0.0}
+  port: ${oc.env:TINKER_SERVER_PORT,8000}
+  ray_address: ${oc.env:RAY_ADDRESS,local}
+  checkpoint_dir: ${oc.env:TINKER_CHECKPOINT_DIR,/tmp/tinker-checkpoints}
+  server_max_runtime: ${oc.env:TINKER_SERVER_MAX_RUNTIME,null}
+  max_concurrent_samples: ${oc.env:TINKER_SERVER_MAX_CONCURRENT_SAMPLES,32}
+  enable_offload: true
+  auto_merge_verl_default_config: true
+
+actor_rollout_ref:
+  actor:
+    strategy: veomni
+    use_kl_loss: false
+    ppo_mini_batch_size: 8
+    ppo_micro_batch_size_per_gpu: 1
+    optim:
+      lr_scheduler_type: constant
+      lr: 1.0e-6
+  rollout:
+    name: vllm
+    mode: async
+    tensor_model_parallel_size: 1
+    pipeline_model_parallel_size: 1
+    gpu_memory_utilization: 0.6
+    max_num_seqs: 128
+    max_num_batched_tokens: 4096
+    enable_chunked_prefill: true
+    calculate_log_probs: true
+  ref:
+    enable: false
+  model:
+    path: ${oc.env:TINKER_SERVER_MODEL_PATH,Qwen/Qwen3-1.7B}
+    use_remove_padding: true
+    enable_gradient_checkpointing: true
+    trust_remote_code: true
+
+distillation:
+  enabled: true
+  nnodes: 1
+  n_gpus_per_node: 4
+  teacher_models:
+    teacher_model:
+      # the client side can use both names as model input, while the server
+      # side will load the weights from model_path
+      model_name: ${oc.env:TINKER_TEACHER_MODEL_NAME,Qwen/Qwen3-30B-A3B}
+      model_path: ${oc.env:TINKER_TEACHER_MODEL_PATH,Qwen/Qwen3-30B-A3B}
+      inference:
+        name: vllm
+        tensor_model_parallel_size: 4
+        data_parallel_size: 1
+        pipeline_model_parallel_size: 1
+        gpu_memory_utilization: 0.8
+        max_model_len: 16384
+        max_num_seqs: 128
+        max_num_batched_tokens: 4096
+        enable_chunked_prefill: true
+        enable_prefix_caching: true
+        engine_kwargs:
+          vllm:
+            max_logprobs: 128
+
+algorithm:
+  adv_estimator: grpo
+  use_kl_in_reward: false
+
+data:
+  train_batch_size: 64
+  max_prompt_length: 4096
+  max_response_length: 10000
+
+trainer:
+  logger:
+  - console
+  project_name: verl_tinker_server
+  experiment_name: qwen3_1b7_actor_qwen3_30b_a3b_teacher
+  nnodes: 1
+  n_gpus_per_node: 4

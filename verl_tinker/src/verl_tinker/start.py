@@ -65,7 +65,6 @@ def run_server(config) -> int:
     port = server_config.get("port", 8000)
     ray_address = server_config.get("ray_address", "local")
     max_runtime = server_config.get("server_max_runtime", None)
-
     logger.info(
         f"Starting Tinker server: host={host}, port={port}, max runtime:{max_runtime}, ray address: {ray_address}"
     )
