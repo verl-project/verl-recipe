@@ -1,0 +1,6 @@
+# Registers the custom tau2 agent loop with veRL.
+# veRL loads this via actor_rollout_ref.rollout.agent.agent_loop_config_path and
+# uses hydra to instantiate _target_ (which imports the module by name, so the
+# directory holding tau2_agent_loop.py must be on PYTHONPATH).
+- name: tau2_agent
+  _target_: tau2_agent_loop.Tau2AgentLoop
