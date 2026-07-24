@@ -21,7 +21,7 @@ actor_rollout_ref: # this is the same as verl's config, this field is ALWAYS req
     veomni:
       # Expert parallelism for MoE expert weights
       fsdp_size: -1
-      expert_parallel_size: 8
+      expert_parallel_size: 1
       # GPT-OSS attention uses sliding windows and learnable sinks, which are
       # supported by VeOmni's FlashAttention 4 integration.
       attn_implementation: flash_attention_4
@@ -35,7 +35,7 @@ actor_rollout_ref: # this is the same as verl's config, this field is ALWAYS req
       all_ranks: true
       tool_config:
         torch:
-          contents: [cuda, cpu]
+          contents: [cuda, cpu, stack]
 
 
   rollout:
@@ -88,7 +88,7 @@ trainer:
 
 global_profiler:
   tool: torch
-  steps: [1, 3]
+  steps: [2]
   profile_continuous_steps: false
   save_path: /mnt/hdfs/profiler_output/gpt-oss-120b
   all_ranks: true
