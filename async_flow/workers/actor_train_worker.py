@@ -26,12 +26,11 @@ from recipe.async_flow.workers.data_dispatch_strategy import EngineBackend
 from tensordict import TensorDict
 
 from verl import DataProto
-from verl.checkpoint_engine.base import CheckpointEngineRegistry
 from verl.single_controller.base.decorator import Dispatch, register
 from verl.trainer.ppo.metric_utils import compute_data_metrics
 from verl.utils import tensordict_utils
 from verl.utils.config import omega_conf_to_dataclass
-from verl.utils.py_functional import rename_dict
+from verl.utils.py_functional import append_to_dict, rename_dict
 from verl.workers.engine_workers import ActorRolloutRefWorker
 from verl.workers.utils.padding import left_right_2_no_padding
 
@@ -79,9 +78,17 @@ class ActorTrainWorker(ActorRolloutRefWorker, AsyncWorkerMixin):
         ActorRolloutRefWorker.__init__(self, config=config.actor_rollout_ref, role=role, **kwargs)
 
         # metrics
-        self._metrics: list[dict] = []
+        self._metrics = {}
         self._print_version_metrics = True
+        self._dist_barrier = True
         self._last_processed_indexes = None
+
+        checkpoint_engine_config = omega_conf_to_dataclass(self.config.rollout.checkpoint_engine)
+        self.ckpt_backend = checkpoint_engine_config.backend
+        if self.ckpt_backend == "flexfetch":
+            from recipe.async_flow.utils.checkpoint_engine.flexfetch_checkpoint_engine import (  # noqa: F401
+                FlexFetchCheckpointEngine,
+            )
 
         self.staleness = config.async_flow.staleness
         self.n_samples = config.actor_rollout_ref.rollout.n
@@ -106,27 +113,26 @@ class ActorTrainWorker(ActorRolloutRefWorker, AsyncWorkerMixin):
         self.flow_control_queue = flow_control_queue
 
         self.topic = config.async_flow.get("experience_topic", "experience")
-        self.EXTRA_FETCH_KWARGS = {"get_n_samples": True}
+        self.EXTRA_FETCH_KWARGS = {"get_n_samples": False}
         self.init_async_worker(
             tq_client=get_transferqueue_client(),
             topic=self.topic,
             experience_count=self.mini_batch_size,  # Not real value here, should be divided by dp size
             engine_backend=EngineBackend.FSDP,
-            dispatch_strategy_kwargs={"rank": self.rank, "world_size": self.world_size},
+            dispatch_strategy_kwargs={
+                "rank": self.rank,
+                "world_size": self.world_size,
+                "query_usable_count_fn": self._query_usable_count,
+                "needed_count_fn": lambda: int(self._experience_count),
+            },
         )
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_ckpt_engine(self):
-        checkpoint_engine_config = omega_conf_to_dataclass(self.config.rollout.checkpoint_engine)
-        backend = checkpoint_engine_config.backend
-        bucket_size = checkpoint_engine_config.update_weights_bucket_megabytes << 20
-        engine_kwargs = checkpoint_engine_config.engine_kwargs.get(backend, {})
-        checkpoint_engine = CheckpointEngineRegistry.new(
-            backend, is_master=(torch.distributed.get_rank() == 0), bucket_size=bucket_size, **engine_kwargs
-        )
-        from recipe.async_flow.utils.async_flow_checkpoint_engine import AsyncFlowCheckpointEngineWithCache
-
-        self.checkpoint_engine = AsyncFlowCheckpointEngineWithCache(non_cache_engine=checkpoint_engine)
+        if self.checkpoint_engine is None:
+            self.logger.error("ActorTrain Role checkpoint_engine not initialized in init_model function!!!")
+        else:
+            self.logger.info("ActorTrain Role checkpoint_engine initialized in init_model function!!!")
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE, blocking=False)
     def execute_checkpoint_engine(self, method: str, *args, **kwargs):
@@ -149,10 +155,28 @@ class ActorTrainWorker(ActorRolloutRefWorker, AsyncWorkerMixin):
             "experience_count": mini_batch_size_per_gpu,
             "allowed_staleness": self.staleness,
             "latest_version": self._current_version,
-            "get_n_samples": True,
+            "get_n_samples": False,
         }
         params.update(self.EXTRA_FETCH_KWARGS)
         return params
+
+    async def _query_usable_count(self) -> int:
+        """异步查询 TQ 当前 (topic, consumer) 视角下的全局可用样本数。
+
+        get_data_usable_set 只查询不消费，可以反复调用。
+        通过 ray 的 asyncio 接口获取，不阻塞 event loop。
+        """
+        # TODO: 切换到tq_client的接口，而不是通过manager调用
+        count, _ = await self._tq_client.manager.get_data_usable_set.remote(
+            self.topic,
+            self.CONSUMER_NAME,
+            list(self.INPUT_COLUMNS),
+            self.staleness,
+            self._current_version,
+            None,
+            False,
+        )
+        return int(count)
 
     def on_process_begin(self) -> None:
         """等待参数更新"""
@@ -161,9 +185,6 @@ class ActorTrainWorker(ActorRolloutRefWorker, AsyncWorkerMixin):
             while self._mini_batch_iter == 0 and not self.weight_updated:
                 time.sleep(1)
                 update_param_wait_time += 1
-        self.logger.debug(
-            f"[Trainer] wait update time:{update_param_wait_time}, {self._mini_batch_iter=}, {self.weight_updated=}"
-        )
 
     def process_batch(self, payload: dict[str, Any], indexes: list[int]) -> dict[str, Any]:
         """处理一个批次：执行训练更新。
@@ -195,7 +216,7 @@ class ActorTrainWorker(ActorRolloutRefWorker, AsyncWorkerMixin):
             "version": float(self._current_version),
             **metrics,
         }
-        self._metrics.append(summary)
+        append_to_dict(self._metrics, summary)
 
         return {}
 
@@ -292,7 +313,6 @@ class ActorTrainWorker(ActorRolloutRefWorker, AsyncWorkerMixin):
             dataloader_kwargs={"shuffle": self.shuffle},
         )
         # 调用父类的 train_mini_batch 方法
-        torch.distributed.barrier()
         output_proto = self.update_actor(data)
         return output_proto
 
@@ -319,18 +339,22 @@ class ActorTrainWorker(ActorRolloutRefWorker, AsyncWorkerMixin):
         return self._current_version
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def get_metrics(self) -> list[dict]:
+    def get_metrics(self) -> dict:
         """获取当前worker的Metrics。"""
         current_metrics = self._metrics
-        self._metrics = []
+        self._metrics = {}
         return current_metrics
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def update_weights(self, version_id):
         self.logger.debug(f"[ActorTrainWorker] start send weights:{version_id=}, {self.rank=}!!!!!!!!!")
         torch.distributed.barrier()
-        per_tensor_param, _ = self.actor.engine.get_per_tensor_param()
-        await self.checkpoint_engine.send_weights(per_tensor_param)
+        with marked_timer("update_weights", {}):
+            per_tensor_param, _ = self.actor.engine.get_per_tensor_param()
+            if self.ckpt_backend == "flexfetch":
+                await self.checkpoint_engine.send_weights(per_tensor_param, version_id=version_id)
+            else:
+                await self.checkpoint_engine.send_weights(per_tensor_param)
         self._current_version = version_id
         self.weight_updated = True
         torch.distributed.barrier()

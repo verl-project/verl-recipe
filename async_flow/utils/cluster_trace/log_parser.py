@@ -68,8 +68,21 @@ def merge_events(events: list[dict], only_compute: bool = False) -> tuple[dict, 
     e2e_markers = {n for n in all_names if n.startswith("e2e_")}
 
     # 核心计算事件定义
-    legacy_compute = {"rollout", "generate_sequences", "actor_fwd", "reward", "actor_train"}
-    compute_timers = {n for n in all_names if "compute" in n or n in legacy_compute}
+    legacy_compute = {
+        "rollout",
+        "generate_sequences",
+        "actor_fwd",
+        "reward",
+        "actor_train",
+        # ── weight-update / vLLM replica profiling ──────────────────────
+        "vllm_generate",
+        "vllm_pause",
+        "vllm_resume",
+        "recv_weights",
+        "load_weights",
+    }
+    # sync_* 编排子阶段 (driver) 也视为关注事件
+    compute_timers = {n for n in all_names if "compute" in n or n.startswith("sync_") or n in legacy_compute}
 
     by_worker_rank: dict[tuple, list[dict]] = defaultdict(list)
     for event in events:

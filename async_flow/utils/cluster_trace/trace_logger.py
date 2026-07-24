@@ -41,7 +41,11 @@ _ROLE_MAP: dict[str, str] = {
     "RefForwardWorker": "ref",  # Alias
     "RewardAdvWorker": "reward",
     "RewardWorker": "reward",  # Alias
+    "AdvantageWorker": "advantage",
     "ActorTrainWorker": "actor_train",
+    # ── weight-update / vLLM replica profiling ──────────────────────────
+    "AsyncFlowHttpServer": "vllm_engine",
+    "AsyncFlowCheckpointEngineWorker": "rollout_ckpt",
 }
 
 
@@ -126,6 +130,9 @@ class _TraceContext:
         end = time.time_ns()
         dur_us = (end - self._start) // 1_000
         ts_us = self._start // 1_000
+
+        if self._name.startswith("e2e_") or self._name.startswith("wait_"):
+            return
 
         event = {
             "worker": _role,

@@ -12,36 +12,36 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.#
+
+
 def aggregate_metrics_before_reduce(nested_data) -> dict:
     """
-    功能：聚合各个train的metric，数据格式为嵌套字典数据 list[list[dict]]。
-    :param nested_data: 嵌套的字典列表，例如 [[{...}, {...}], [{...}]]
-    :return: 整合后的字典 {version: {key: [values]}}
+    Aggregates training metrics across different ranks or workers.
+    :param nested_data: A nested list of dictionaries containing metric data,
+                        e.g., [{key_rank1: [values]}, {key_rank2: [values]}, ...]
+    :return: A consolidated dictionary grouped by version,
+             e.g., {version: {key: [values]}}
     """
-    # 1. 初始化返回结果
     output = {}
 
-    # 2. 统一输入格式：确保是 list[list[dict]]
-    # 如果传入的是单个 list[dict]，包装成 list[list[dict]] 统一处理
-    if isinstance(nested_data, list) and len(nested_data) > 0:
-        if isinstance(nested_data[0], dict):
-            nested_data = [nested_data]
-    elif not nested_data:
-        return output
+    for data in nested_data:
+        if not isinstance(data, dict):
+            continue
+        item = data.copy()
+        raw_versions = item.pop("version", ["unknown_version"])
+        unique_versions = set(raw_versions)
+        if len(unique_versions) > 1:
+            raise ValueError(f"Inconsistent model versions found in nested_data: {unique_versions}.")
+        version = list(unique_versions)[0]
 
-    # 3. 处理嵌套列表
-    for sub_list in nested_data:
-        for data in sub_list:
-            if not isinstance(data, dict):
-                continue
-            item = data.copy()
-            version = item.pop("version", "unknown_version")
-            if version not in output:
-                output[version] = {}
-
-            for key, value in item.items():
-                if key not in output[version]:
-                    output[version][key] = []
+        if version not in output:
+            output[version] = {}
+        for key, value in item.items():
+            if key not in output[version]:
+                output[version][key] = []
+            if isinstance(value, list):
+                output[version][key].extend(value)
+            else:
                 output[version][key].append(value)
     return output
 
@@ -52,7 +52,7 @@ def reduce_timing_metrics(timing_metrics):
     e2e_time = f"e2e_max_{consumer_name}"
     wait_time = f"wait_max_{consumer_name}"
     compute_time = f"compute_max_{consumer_name}"
-    # 取rank0估算指标
+
     timing_metrics["total_num_tokens"] = sum(timing_metrics["total_num_tokens"])
     timing_metrics[e2e_time] = sum(timing_metrics[e2e_time][:experience_step])
     timing_metrics[wait_time] = sum(timing_metrics[wait_time][:experience_step])

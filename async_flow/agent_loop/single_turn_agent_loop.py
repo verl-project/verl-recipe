@@ -52,7 +52,7 @@ class AsyncFlowSingleTurnAgentLoop(SingleTurnAgentLoop):
         # 3. generate sequences with model_version
         metrics = {}
         with simple_timer("generate_sequences", metrics):
-            output, model_version = await self.server_manager.generate_with_version(
+            output, model_version, abort_stats = await self.server_manager.generate_with_version(
                 request_id=uuid4().hex,
                 prompt_ids=prompt_ids,
                 sampling_params=sampling_params,
@@ -74,5 +74,9 @@ class AsyncFlowSingleTurnAgentLoop(SingleTurnAgentLoop):
             multi_modal_data=multi_modal_data,
             num_turns=2,
             metrics=metrics,
-            extra_fields={"model_version": model_version},
+            extra_fields={
+                "model_version": model_version,
+                "is_partial": abort_stats["is_partial"],
+                "num_aborts": abort_stats["num_aborts"],
+            },
         )

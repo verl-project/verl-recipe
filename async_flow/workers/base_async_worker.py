@@ -29,6 +29,7 @@ from recipe.async_flow.workers.data_dispatch_strategy import (
 )
 
 from verl.single_controller.base.decorator import Dispatch, register
+from verl.utils.py_functional import append_to_dict
 
 
 class AsyncWorkerMixin(ABC):
@@ -78,11 +79,13 @@ class AsyncWorkerMixin(ABC):
         self._experience_count = experience_count
         self._loop_running = False
         self._loop_thread: Optional[threading.Thread] = None
+        self._last_error: Optional[str] = None
         self._stats = {"processed_batches": 0, "processed_samples": 0, "errors": 0}
 
-        # metrics
-        self._timing_metrics: list[dict] = []
+        self.lock = threading.Lock()
 
+        # metrics
+        self._timing_metrics = {}
         # 初始化并行策略
         self._engine_backend = engine_backend
         strategy_kwargs = dispatch_strategy_kwargs or {}
@@ -91,8 +94,6 @@ class AsyncWorkerMixin(ABC):
         self.EXTRA_PUT_KWARGS = dict(getattr(self, "EXTRA_PUT_KWARGS", {}) or {})
 
         self.put_data_counter = 0
-
-        self.lock = threading.Lock()
 
         # ── cluster trace auto-install ───────────────────────────────────
         if os.environ.get("VERL_CLUSTER_TRACE"):
@@ -135,6 +136,8 @@ class AsyncWorkerMixin(ABC):
         if self._loop_running:
             self.logger.warning(f"[{self.CONSUMER_NAME}] Loop is already running")
             return
+        self._last_error = None
+        self._loop_running = True
         self._loop_thread = threading.Thread(target=self._run_loop, daemon=True)
         self._loop_thread.start()
         self.logger.info(f"[{self.CONSUMER_NAME}] Loop thread started")
@@ -154,6 +157,8 @@ class AsyncWorkerMixin(ABC):
         return {
             "consumer_name": self.CONSUMER_NAME,
             "running": self._loop_running,
+            "errors": self._stats["errors"],
+            "last_error": self._last_error,
             **self._stats,
         }
 
@@ -169,13 +174,19 @@ class AsyncWorkerMixin(ABC):
 
     def _run_loop(self) -> None:
         """在新线程中运行异步循环（设置设备上下文）。"""
-        self._setup_device_context()
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
         try:
-            loop.run_until_complete(self._async_loop())
-        finally:
-            loop.close()
+            self._setup_device_context()
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(self._async_loop())
+            finally:
+                loop.close()
+        except Exception as e:
+            self._loop_running = False
+            self._last_error = f"{type(e).__name__}: {str(e)}"
+            self._stats["errors"] += 1
+            self.logger.exception(f"[{self.CONSUMER_NAME}] Fatal error in _run_loop: {e}")
 
     def _setup_device_context(self) -> None:
         """设置线程的设备上下文（NPU/CUDA 设备上下文是线程本地的）。"""
@@ -217,54 +228,66 @@ class AsyncWorkerMixin(ABC):
 
         e2e_start = time.perf_counter()
         while self._loop_running:
-            # metrics define
-            timing_raw = {}
-            e2e_time = f"e2e_max_{self.CONSUMER_NAME}"
-            wait_time = f"wait_max_{self.CONSUMER_NAME}"
-            compute_time = f"compute_max_{self.CONSUMER_NAME}"
-            with marked_timer(e2e_time, timing_raw):
-                time.sleep(1)
-                with self.lock:
-                    self.on_process_begin()
-                    with marked_timer(wait_time, timing_raw):
-                        payload, indexes = await self._dispatch_strategy.dispatch_data(
-                            tq_client=self._tq_client,
-                            fetch_params=self._build_fetch_params(),
-                        )
-                        if payload is None or indexes is None or not indexes:
-                            continue
-                    timing_raw[wait_time] = time.perf_counter() - e2e_start
-                    self.logger.debug(
-                        f"[{self.CONSUMER_NAME}] fetch data cost time: {timing_raw[wait_time]} "
-                        f"fetch count:{len(indexes)}"
-                    )
-
-                    # 处理批次
-                    with marked_timer(compute_time, timing_raw):
-                        output_data = self.process_batch(payload, indexes)
-                    self.logger.debug(f"[{self.CONSUMER_NAME}] batch compute cost time: {timing_raw[compute_time]}")
-
-                    # 使用并行策略进行 collect
-                    if output_data:
-                        version = output_data.pop("_version", None)
-                        with marked_timer("put_data", timing_raw):
-                            await self._dispatch_strategy.collect_data(
+            try:
+                # metrics define
+                timing_raw = {}
+                e2e_time = f"e2e_max_{self.CONSUMER_NAME}"
+                wait_time = f"wait_max_{self.CONSUMER_NAME}"
+                compute_time = f"compute_max_{self.CONSUMER_NAME}"
+                with marked_timer(e2e_time, timing_raw):
+                    time.sleep(0.1)
+                    with self.lock:
+                        self.on_process_begin()
+                        with marked_timer(wait_time, timing_raw):
+                            payload, indexes = await self._dispatch_strategy.dispatch_data(
                                 tq_client=self._tq_client,
-                                put_params=self._build_put_params(output_data, indexes, version),
+                                fetch_params=self._build_fetch_params(),
                             )
-                            self.put_data_counter += len(indexes)
+                            if payload is None or indexes is None or not indexes:
+                                continue
+                        timing_raw[wait_time] = time.perf_counter() - e2e_start
                         self.logger.debug(
-                            f"[{self.CONSUMER_NAME}] put data cost time: {timing_raw['put_data']}"
-                            f"put count:{len(indexes)}, total put count:{self.put_data_counter}"
+                            f"[{self.CONSUMER_NAME}] fetch data cost time: {timing_raw[wait_time]} "
+                            f"fetch count:{len(indexes)}"
                         )
-            timing_raw[e2e_time] = time.perf_counter() - e2e_start
-            self._collect_timing_metrics(payload, timing_raw)
-            # 更新统计
-            self._stats["processed_batches"] += 1
-            self._stats["processed_samples"] += len(indexes)
 
-            self.on_process_end()
-            e2e_start = time.perf_counter()
+                        if getattr(self, "_dist_barrier", False):
+                            barrier_time = f"max_barrier_{self.CONSUMER_NAME}"
+                            with marked_timer(barrier_time, timing_raw):
+                                torch.distributed.barrier()
+
+                        # 处理批次
+                        with marked_timer(compute_time, timing_raw):
+                            output_data = self.process_batch(payload, indexes)
+                        self.logger.debug(f"[{self.CONSUMER_NAME}] batch compute cost time: {timing_raw[compute_time]}")
+
+                        # 使用并行策略进行 collect
+                        if output_data:
+                            version = output_data.pop("_version", None)
+                            with marked_timer("put_data", timing_raw):
+                                await self._dispatch_strategy.collect_data(
+                                    tq_client=self._tq_client,
+                                    put_params=self._build_put_params(output_data, indexes, version),
+                                )
+                                self.put_data_counter += len(indexes)
+                            self.logger.debug(
+                                f"[{self.CONSUMER_NAME}] put data cost time: {timing_raw['put_data']}"
+                                f"put count:{len(indexes)}, total put count:{self.put_data_counter}"
+                            )
+                timing_raw[e2e_time] = time.perf_counter() - e2e_start
+                self._collect_timing_metrics(payload, timing_raw)
+                # 更新统计
+                self._stats["processed_batches"] += 1
+                self._stats["processed_samples"] += len(indexes)
+
+                self.on_process_end()
+                e2e_start = time.perf_counter()
+            except Exception as e:
+                self._loop_running = False
+                self._last_error = f"{type(e).__name__}: {str(e)}"
+                self._stats["errors"] += 1
+                self.logger.exception(f"[{self.CONSUMER_NAME}] Fatal error: {e}")
+                break
 
         self.logger.info(
             f"[{self.CONSUMER_NAME}] Async loop stopped (processed {self._stats['processed_samples']} samples)"
@@ -308,11 +331,11 @@ class AsyncWorkerMixin(ABC):
             "experience_step": experience_step,
             **mini_step_metrics,
         }
-        self._timing_metrics.append(summary)
+        append_to_dict(self._timing_metrics, summary)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def get_timing_metrics(self) -> list[dict]:
+    def get_timing_metrics(self) -> dict:
         """获取当前worker的Metrics。"""
         current_metrics = self._timing_metrics
-        self._timing_metrics = []
+        self._timing_metrics = {}
         return current_metrics
