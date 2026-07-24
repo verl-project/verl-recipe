@@ -216,6 +216,10 @@ class Tau2Bridge:
         requires), and returns ``[{"content": str, "error": bool}, ...]`` for the
         loop to tokenize as (masked) tool responses.
         """
+        if not calls:
+            # tau2 forbids an assistant message with neither text nor tool calls;
+            # recording one here would poison the evaluator's message history.
+            return []
         tool_calls: list[ToolCall] = []
         for c in calls:
             tool_calls.append(

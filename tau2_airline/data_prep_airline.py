@@ -59,9 +59,13 @@ def main():
 
     os.makedirs(args.out_dir, exist_ok=True)
     # Deterministic split: first N as val, rest as train (small dataset).
-    n_val = min(args.n_val, len(rows))
-    val_rows = rows[:n_val] if n_val > 0 else rows
-    train_rows = rows[n_val:] if n_val > 0 and n_val < len(rows) else rows
+    # Disjoint by construction; refuse to write an empty split rather than
+    # silently duplicating tasks across train and test.
+    n_val = max(0, min(args.n_val, len(rows)))
+    val_rows = rows[:n_val]
+    train_rows = rows[n_val:]
+    if not val_rows or not train_rows:
+        raise SystemExit(f"--n_val={args.n_val} leaves an empty split ({len(rows)} tasks total)")
 
     for name, r in (("train", train_rows), ("test", val_rows)):
         df = pd.DataFrame(r)

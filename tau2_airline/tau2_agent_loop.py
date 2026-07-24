@@ -172,7 +172,7 @@ class Tau2AgentLoop(ToolAgentLoop):
             eos = self.tokenizer.eos_token_id or 0
             agent_data.prompt_ids.append(eos)
             agent_data.response_mask.append(1)
-            if agent_data.response_logprobs is not None and agent_data.response_logprobs:
+            if agent_data.extra_fields.get("logprobs_enabled"):
                 agent_data.response_logprobs.append(0.0)
 
         # Score the trajectory (pure function of messages+task) off-loop.
@@ -237,8 +237,12 @@ class Tau2AgentLoop(ToolAgentLoop):
         agent_data.response_ids = output.token_ids
         agent_data.prompt_ids += agent_data.response_ids
         agent_data.response_mask += [1] * len(agent_data.response_ids)  # policy tokens: trained
-        if output.log_probs:
+        if output.log_probs is not None:
+            # `is not None`, not truthiness: a zero-token generation still marks
+            # logprobs as enabled, so masked turns below keep their 0.0 fillers
+            # aligned with response_mask.
             agent_data.response_logprobs += output.log_probs
+            agent_data.extra_fields["logprobs_enabled"] = True
 
         # Length / turn caps -> stop (leaves termination_reason = MAX_STEPS).
         if len(agent_data.response_mask) >= self.response_length:
@@ -267,7 +271,11 @@ class Tau2AgentLoop(ToolAgentLoop):
         calls: list[dict] = []
         for fc in agent_data.tool_calls[: self.max_parallel_calls]:
             try:
-                args = json.loads(fc.arguments) if fc.arguments else {}
+                # Some veRL tool parsers hand over pre-parsed dicts, not JSON strings.
+                if isinstance(fc.arguments, dict):
+                    args = fc.arguments
+                else:
+                    args = json.loads(fc.arguments) if fc.arguments else {}
                 if not isinstance(args, dict):
                     args = {}
             except (json.JSONDecodeError, TypeError):
@@ -294,7 +302,7 @@ class Tau2AgentLoop(ToolAgentLoop):
             return Tau2State.TERMINATED
         agent_data.prompt_ids += response_ids
         agent_data.response_mask += [0] * len(response_ids)  # tool tokens: not trained
-        if agent_data.response_logprobs:
+        if agent_data.extra_fields.get("logprobs_enabled"):
             agent_data.response_logprobs += [0.0] * len(response_ids)
         agent_data.messages.extend(add_messages)
 
@@ -323,7 +331,7 @@ class Tau2AgentLoop(ToolAgentLoop):
             return Tau2State.TERMINATED
         agent_data.prompt_ids += response_ids
         agent_data.response_mask += [0] * len(response_ids)  # user tokens: not trained
-        if agent_data.response_logprobs:
+        if agent_data.extra_fields.get("logprobs_enabled"):
             agent_data.response_logprobs += [0.0] * len(response_ids)
         agent_data.messages.append(user_msg)
         agent_data.user_turns += 1
