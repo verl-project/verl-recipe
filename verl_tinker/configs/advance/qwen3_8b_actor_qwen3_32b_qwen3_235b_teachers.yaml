@@ -77,6 +77,7 @@ distillation:
         engine_kwargs:
           vllm:
             max_logprobs: 128
+            disable_custom_all_reduce: true
     tulu3_teacher:
       key: tulu3
       model_name: ${oc.env:TINKER_TULU3_TEACHER_MODEL_NAME,Qwen/Qwen3-235B-A22B-Instruct-2507}
