@@ -115,6 +115,8 @@ def process_actor_rollout_ref_config(config: DictConfig) -> DictConfig:
     user_set_actor_profiler_save_path = has_path(config, "actor_rollout_ref.actor.profiler.save_path")
     user_set_actor_profiler_all_ranks = has_path(config, "actor_rollout_ref.actor.profiler.all_ranks")
     user_set_actor_profiler_ranks = has_path(config, "actor_rollout_ref.actor.profiler.ranks")
+    user_set_actor_checkpoint_save_contents = has_path(config, "actor_rollout_ref.actor.checkpoint.save_contents")
+    user_set_actor_checkpoint_load_contents = has_path(config, "actor_rollout_ref.actor.checkpoint.load_contents")
     if auto_merge_verl_defaults:
         default_config = _load_verl_section_defaults(resolved_strategy)
         user_config = _extract_supported_config_sections(config)
@@ -130,6 +132,8 @@ def process_actor_rollout_ref_config(config: DictConfig) -> DictConfig:
         user_set_actor_profiler_save_path=user_set_actor_profiler_save_path,
         user_set_actor_profiler_all_ranks=user_set_actor_profiler_all_ranks,
         user_set_actor_profiler_ranks=user_set_actor_profiler_ranks,
+        user_set_actor_checkpoint_save_contents=user_set_actor_checkpoint_save_contents,
+        user_set_actor_checkpoint_load_contents=user_set_actor_checkpoint_load_contents,
     )
     _normalize_actor_model_identifiers(config)
     _normalize_teacher_model_identifiers(config)
@@ -144,6 +148,8 @@ def apply_tinker_server_overrides(
     user_set_actor_profiler_save_path: bool = False,
     user_set_actor_profiler_all_ranks: bool = False,
     user_set_actor_profiler_ranks: bool = False,
+    user_set_actor_checkpoint_save_contents: bool = False,
+    user_set_actor_checkpoint_load_contents: bool = False,
 ) -> None:
     """Apply only Tinker-server-specific config adjustments."""
 
@@ -170,7 +176,11 @@ def apply_tinker_server_overrides(
         micro_batch_key="log_prob_micro_batch_size",
         micro_batch_per_gpu_key="log_prob_micro_batch_size_per_gpu",
     )
-    _set_actor_checkpoint_contents(config)
+    _set_actor_checkpoint_contents(
+        config,
+        user_set_save_contents=user_set_actor_checkpoint_save_contents,
+        user_set_load_contents=user_set_actor_checkpoint_load_contents,
+    )
     _configure_actor_profiler_from_global_config(
         config,
         user_set_actor_profiler_enable=user_set_actor_profiler_enable,
@@ -273,13 +283,28 @@ def _apply_micro_batch_default(
         )
 
 
-def _set_actor_checkpoint_contents(config: DictConfig) -> None:
-    # The Tinker server owns checkpoint recovery and must save everything needed
-    # to recreate the complete actor after a load_state. Override both lists instead
-    # of honoring a partial Verl checkpoint configuration that cannot be resumed.
-    for key in ("save_contents", "load_contents"):
-        path = f"actor_rollout_ref.actor.checkpoint.{key}"
-        OmegaConf.update(config, path, list(_ACTOR_CHECKPOINT_CONTENTS), merge=True)
+def _set_actor_checkpoint_contents(
+    config: DictConfig,
+    *,
+    user_set_save_contents: bool,
+    user_set_load_contents: bool,
+) -> None:
+    # A complete checkpoint is the safe Tinker default. Explicit user choices
+    # are retained so callers can trade resumability for lower disk usage.
+    if not user_set_save_contents:
+        OmegaConf.update(
+            config,
+            "actor_rollout_ref.actor.checkpoint.save_contents",
+            list(_ACTOR_CHECKPOINT_CONTENTS),
+            merge=True,
+        )
+    if not user_set_load_contents:
+        OmegaConf.update(
+            config,
+            "actor_rollout_ref.actor.checkpoint.load_contents",
+            list(_ACTOR_CHECKPOINT_CONTENTS),
+            merge=True,
+        )
 
 
 def _configure_actor_profiler_from_global_config(

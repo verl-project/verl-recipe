@@ -49,8 +49,18 @@ def test_tinker_config_merges_verl_defaults_and_keeps_only_tinker_overrides():
     assert config.actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu == 1
     assert config.actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu == 1
     assert config.actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu == 1
-    assert "hf_model" in config.actor_rollout_ref.actor.checkpoint.save_contents
-    assert "hf_model" in config.actor_rollout_ref.actor.checkpoint.load_contents
+    assert list(config.actor_rollout_ref.actor.checkpoint.save_contents) == [
+        "model",
+        "optimizer",
+        "extra",
+        "hf_model",
+    ]
+    assert list(config.actor_rollout_ref.actor.checkpoint.load_contents) == [
+        "model",
+        "optimizer",
+        "extra",
+        "hf_model",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -129,18 +139,40 @@ def test_disabling_verl_default_merge_still_applies_tinker_server_overrides():
     assert config.imported_verl_section.sentinel is True
     assert "_target_" not in config.actor_rollout_ref.actor
     assert config.actor_rollout_ref.actor.veomni.param_offload is False
-    assert list(config.actor_rollout_ref.actor.checkpoint.save_contents) == [
-        "model",
-        "optimizer",
-        "extra",
-        "hf_model",
-    ]
+    assert list(config.actor_rollout_ref.actor.checkpoint.save_contents) == ["model"]
+    assert list(config.actor_rollout_ref.actor.checkpoint.load_contents) == ["model"]
+
+
+def test_tinker_config_only_defaults_checkpoint_contents_not_set_by_user():
+    config = _minimal_tinker_config()
+    config.actor_rollout_ref.actor.checkpoint = {"save_contents": ["model"]}
+
+    config = process_actor_rollout_ref_config(config)
+
+    assert list(config.actor_rollout_ref.actor.checkpoint.save_contents) == ["model"]
     assert list(config.actor_rollout_ref.actor.checkpoint.load_contents) == [
         "model",
         "optimizer",
         "extra",
         "hf_model",
     ]
+
+
+def test_120b_checkpoint_contents_can_be_overridden_by_environment(monkeypatch):
+    config_path = _TINKER_CONFIG_DIR / "advance" / "gpt_oss_120b_actor_rollout.yaml"
+
+    config = OmegaConf.load(config_path)
+    assert OmegaConf.to_container(config.actor_rollout_ref.actor.checkpoint, resolve=True) == {
+        "save_contents": ["model", "optimizer", "extra", "hf_model"],
+        "load_contents": ["model", "optimizer", "extra", "hf_model"],
+    }
+
+    monkeypatch.setenv("TINKER_ACTOR_CHECKPOINT_SAVE_CONTENTS", "[model]")
+    config = OmegaConf.load(config_path)
+    assert OmegaConf.to_container(config.actor_rollout_ref.actor.checkpoint, resolve=True) == {
+        "save_contents": ["model"],
+        "load_contents": ["model"],
+    }
 
 
 def test_tinker_config_disables_verl_model_offload_flags():
