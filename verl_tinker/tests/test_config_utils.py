@@ -161,15 +161,18 @@ def test_tinker_config_only_defaults_checkpoint_contents_not_set_by_user():
 def test_120b_checkpoint_contents_can_be_overridden_by_environment(monkeypatch):
     config_path = _TINKER_CONFIG_DIR / "advance" / "gpt_oss_120b_actor_rollout.yaml"
 
+    monkeypatch.delenv("TINKER_ACTOR_CHECKPOINT_SAVE_CONTENTS", raising=False)
     config = OmegaConf.load(config_path)
-    assert OmegaConf.to_container(config.actor_rollout_ref.actor.checkpoint, resolve=True) == {
+    OmegaConf.resolve(config)
+    assert OmegaConf.to_container(config.actor_rollout_ref.actor.checkpoint) == {
         "save_contents": ["model", "optimizer", "extra", "hf_model"],
         "load_contents": ["model", "optimizer", "extra", "hf_model"],
     }
 
     monkeypatch.setenv("TINKER_ACTOR_CHECKPOINT_SAVE_CONTENTS", "[model]")
     config = OmegaConf.load(config_path)
-    assert OmegaConf.to_container(config.actor_rollout_ref.actor.checkpoint, resolve=True) == {
+    OmegaConf.resolve(config)
+    assert OmegaConf.to_container(config.actor_rollout_ref.actor.checkpoint) == {
         "save_contents": ["model"],
         "load_contents": ["model"],
     }

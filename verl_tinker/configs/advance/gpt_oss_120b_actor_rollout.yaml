@@ -18,8 +18,8 @@ actor_rollout_ref: # this is the same as verl's config, this field is ALWAYS req
     use_kl_loss: false
     checkpoint:
       # you can remove optimizer from save contents if you are running low on disk space and do not need to reload checkpoint.
-      save_contents: ${oc.decode:${oc.env:TINKER_ACTOR_CHECKPOINT_SAVE_CONTENTS,'[model, optimizer, extra, hf_model]'}}
-      load_contents: ${oc.decode:${oc.env:TINKER_ACTOR_CHECKPOINT_SAVE_CONTENTS,'[model, optimizer, extra, hf_model]'}}
+      save_contents: ${oc.create:${oc.env:TINKER_ACTOR_CHECKPOINT_SAVE_CONTENTS,'[model, optimizer, extra, hf_model]'}}
+      load_contents: ${oc.create:${oc.env:TINKER_ACTOR_CHECKPOINT_SAVE_CONTENTS,'[model, optimizer, extra, hf_model]'}}
     optim:
       lr_scheduler_type: constant
       lr: 1.0e-06
