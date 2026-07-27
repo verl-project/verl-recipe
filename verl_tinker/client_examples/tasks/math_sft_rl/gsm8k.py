@@ -130,11 +130,17 @@ async def _create_sampling_client(
     base_url: str,
     *,
     model_name: str,
-    model_path: str | None = None,
+    sampler_path: str | None = None,
 ) -> tinker.SamplingClient:
+    """Create a client whose requests use a server-issued sampling session ID.
+
+    ``create_sampling_client_async`` resolves the selected base model or sampler
+    checkpoint exactly once.  The returned client then puts the resulting
+    ``sampling_session_id`` on every sampling request.
+    """
     service_client = tinker.ServiceClient(base_url=base_url)
-    if model_path is not None:
-        return await service_client.create_sampling_client_async(model_path=model_path)
+    if sampler_path is not None:
+        return await service_client.create_sampling_client_async(model_path=sampler_path)
     return await service_client.create_sampling_client_async(base_model=model_name)
 
 
@@ -147,7 +153,7 @@ def _metrics_from_benchmark_result(
     stage: str,
     result: BenchmarkResult,
     *,
-    model_path: str | None,
+    sampler_path: str | None,
     save_dir: Path,
 ) -> dict[str, Any]:
     num_examples = result.num_examples
@@ -168,7 +174,9 @@ def _metrics_from_benchmark_result(
         "num_truncated": result.num_truncated,
         "truncated_rate": truncated_rate,
         "time_seconds": result.time_seconds,
-        "model_path": model_path,
+        # Keep the existing summary schema; this value is specifically a
+        # sampler checkpoint path, never a training-state checkpoint path.
+        "model_path": sampler_path,
         "benchmark_save_dir": str(save_dir),
         "test_metrics_path": str(save_dir / "gsm8k" / "result.json"),
         "test_trajectories_path": str(save_dir / "gsm8k" / "trajectories.jsonl"),
@@ -192,9 +200,13 @@ async def _evaluate_stage(
     base_url: str,
     model_name: str,
     renderer: renderers.Renderer,
-    model_path: str | None = None,
+    sampler_path: str | None = None,
 ) -> dict[str, Any]:
-    sampling_client = await _create_sampling_client(base_url, model_name=model_name, model_path=model_path)
+    sampling_client = await _create_sampling_client(
+        base_url,
+        model_name=model_name,
+        sampler_path=sampler_path,
+    )
     save_dir = EVAL_LOG_PATH / stage
     result = await run_benchmark(
         "gsm8k",
@@ -209,7 +221,7 @@ async def _evaluate_stage(
         ),
     )
 
-    metrics = _metrics_from_benchmark_result(stage, result, model_path=model_path, save_dir=save_dir)
+    metrics = _metrics_from_benchmark_result(stage, result, sampler_path=sampler_path, save_dir=save_dir)
     _print_eval_metrics(metrics)
     return {"metrics": metrics}
 
@@ -279,7 +291,7 @@ async def run_math_sft_rl_gsm8k_test(base_url: str, model_name: str, tokenizer_n
         base_url=base_url,
         model_name=model_name,
         renderer=eval_renderer,
-        model_path=sft_checkpoint.sampler_path,
+        sampler_path=sft_checkpoint.sampler_path,
     )
 
     rl_renderer_name = await checkpoint_utils.resolve_renderer_name_from_checkpoint_or_default_async(
@@ -327,7 +339,7 @@ async def run_math_sft_rl_gsm8k_test(base_url: str, model_name: str, tokenizer_n
         base_url=base_url,
         model_name=model_name,
         renderer=eval_renderer,
-        model_path=rl_warmup_checkpoint.sampler_path,
+        sampler_path=rl_warmup_checkpoint.sampler_path,
     )
 
     if RL_MAX_STEPS > 1:
@@ -347,11 +359,12 @@ async def run_math_sft_rl_gsm8k_test(base_url: str, model_name: str, tokenizer_n
             learning_rate=RL_LEARNING_RATE,
             max_tokens=RL_MAX_TOKENS,
             temperature=0.7,
+            # Tinker Cookbook computes the KL penalty client-side and folds it
+            # into the advantages. The base-model sampling session stays bound
+            # to actor version 0, which verl_tinker serves from the frozen
+            # reference worker after the trainable actor advances.
             kl_penalty_coef=0.01,
-            kl_reference_config=rl_train.KLReferenceConfig(
-                base_model=model_name,
-                load_checkpoint_path=sft_checkpoint.state_path,
-            ),
+            kl_reference_config=rl_train.KLReferenceConfig(base_model=model_name),
             wandb_project=WANDB_PROJECT,
             wandb_name=f"rl-stage-{model_slug}",
             log_path=RL_LOG_PATH,
@@ -373,7 +386,7 @@ async def run_math_sft_rl_gsm8k_test(base_url: str, model_name: str, tokenizer_n
             base_url=base_url,
             model_name=model_name,
             renderer=eval_renderer,
-            model_path=rl_checkpoint.sampler_path,
+            sampler_path=rl_checkpoint.sampler_path,
         )
         stage_results = [base_eval, after_sft_eval, after_rl_1_eval, after_rl_eval]
     else:

@@ -47,6 +47,7 @@ from .backends.teacher import TeacherInferenceBackend
 from .schemas import StatusResponse
 from .state_tracker import (
     ModelStateTracker,
+    SamplingResource,
     StaleSamplerError,
     StateTrackerError,
     UnknownSamplerError,
@@ -72,6 +73,9 @@ from .tinker_ops import (
 )
 from .tinker_ops import (
     sample as tinker_sample,
+)
+from .tinker_ops import (
+    sample_prompt_logprobs as tinker_sample_prompt_logprobs,
 )
 from .tinker_ops import (
     save_weights_for_sampler as tinker_save_weights_for_sampler,
@@ -387,7 +391,7 @@ class TinkerServer:
         self._state_tracker.register_actor_sampler(
             sampler_id,
             base_model=self._state_tracker.actor_base_model,
-            legal_rollout_ids={rollout_id},
+            actor_id=rollout_id,
         )
         result["sampling_session_id"] = sampler_id
         return result
@@ -395,6 +399,10 @@ class TinkerServer:
     def _init_engine(self):
         try:
             self._engine = ColocatedBackend(self.config)
+            self._state_tracker.configure_resources(
+                rollout_enabled=not self._engine.no_rollout_deployment,
+                reference_enabled=self._engine.capabilities.use_reference_policy,
+            )
             if TeacherInferenceBackend.is_enabled(self.config):
                 self._teacher_backend = TeacherInferenceBackend(self.config)
                 self._state_tracker.configure_teacher_models(self._teacher_backend.sampling_targets)
@@ -724,22 +732,38 @@ class TinkerServer:
         except StateTrackerError as exc:
             raise HTTPException(HTTPStatus.BAD_REQUEST, str(exc)) from exc
 
-        if binding.is_teacher:
-            sampling_engine = self._teacher_backend.get_client(binding.teacher_model_path)
-        else:
-            sampling_engine = self._get_engine()
+        scalar_prompt_logprobs = (
+            int(getattr(req, "num_samples", 1)) == 1
+            and getattr(getattr(req, "sampling_params", None), "max_tokens", None) == 1
+            and getattr(req, "prompt_logprobs", None) is True
+            and int(getattr(req, "topk_prompt_logprobs", 0)) == 0
+        )
 
-        async def _sample_with_permission():
+        async def _sample_with_late_binding():
             try:
-                self._state_tracker.require_binding_permission(binding)
+                resource = self._state_tracker.resolve_resource(
+                    binding,
+                    scalar_prompt_logprobs=scalar_prompt_logprobs,
+                )
             except StaleSamplerError as exc:
                 raise HTTPException(HTTPStatus.CONFLICT, str(exc)) from exc
-            return await tinker_sample(sampling_engine, req)
+
+            if resource is SamplingResource.TEACHER:
+                if self._teacher_backend is None or binding.teacher_model_path is None:
+                    raise RuntimeError("Teacher sampler binding has no initialized teacher backend")
+                return await tinker_sample(self._teacher_backend.get_client(binding.teacher_model_path), req)
+            if resource is SamplingResource.ROLLOUT:
+                return await tinker_sample(self._get_engine(), req)
+            if resource is SamplingResource.ACTOR:
+                return await tinker_sample_prompt_logprobs(self._get_engine(), req, reference=False)
+            if resource is SamplingResource.REFERENCE:
+                return await tinker_sample_prompt_logprobs(self._get_engine(), req, reference=True)
+            raise RuntimeError(f"Unsupported sampling resource: {resource!r}")
 
         request_id = uuid.uuid4().hex
         self._schedule(
             request_id,
-            _sample_with_permission(),
+            _sample_with_late_binding(),
             ScheduledOpKind.SAMPLE,
         )
         return self._future_envelope(request_id, model_id=None)

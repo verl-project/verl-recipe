@@ -16,7 +16,7 @@ import asyncio
 import threading
 from http import HTTPStatus
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
@@ -58,6 +58,17 @@ def _init_state_tracker(server, actor_model="actor", actor_identifiers=None, tea
     )
 
 
+def _sample_request(sampling_session_id: str, *, prompt_logprobs: bool, topk_prompt_logprobs: int = 0):
+    return SimpleNamespace(
+        sampling_session_id=sampling_session_id,
+        prompt=SimpleNamespace(to_ints=lambda: [1, 2]),
+        sampling_params=SimpleNamespace(max_tokens=1, temperature=1, top_p=1, top_k=-1, stop=None, seed=None),
+        num_samples=1,
+        prompt_logprobs=prompt_logprobs,
+        topk_prompt_logprobs=topk_prompt_logprobs,
+    )
+
+
 def test_critic_routes_are_not_registered():
     paths = {route.path for route in app.routes}
 
@@ -88,7 +99,7 @@ async def test_get_sampler_uses_tracker_without_actor_engine():
     server = object.__new__(_router_class())
     server._status = ServerStatus.INITIALIZED
     _init_state_tracker(server)
-    server._state_tracker.register_actor_sampler("actor", base_model="actor", legal_rollout_ids={0})
+    server._state_tracker.register_actor_sampler("actor", base_model="actor", actor_id=0)
 
     assert await server.get_sampler("actor") == {
         "sampler_id": "actor",
@@ -102,10 +113,10 @@ async def test_get_session_returns_only_currently_valid_samplers():
     server = object.__new__(_router_class())
     server._status = ServerStatus.INITIALIZED
     _init_state_tracker(server)
-    server._state_tracker.register_actor_sampler("stale", base_model="actor", legal_rollout_ids={0})
+    server._state_tracker.register_actor_sampler("stale", base_model="actor", actor_id=0)
     server._state_tracker.actor_updated()
     server._state_tracker.rollout_synchronized()
-    server._state_tracker.register_actor_sampler("current", base_model="actor", legal_rollout_ids={1})
+    server._state_tracker.register_actor_sampler("current", base_model="actor", actor_id=1)
 
     response = await server.get_session("session")
 
@@ -202,7 +213,7 @@ async def test_create_sampling_session_routes_exact_teacher_model_to_unique_samp
 
 
 @pytest.mark.asyncio
-async def test_create_sampling_session_rejects_teacher_checkpoint_path():
+async def test_create_sampling_session_does_not_use_teacher_alias_when_model_path_is_unknown():
     server = object.__new__(_router_class())
     server._shutdown_started = False
     server._status = ServerStatus.INITIALIZED
@@ -227,7 +238,7 @@ async def test_create_sampling_session_rejects_teacher_checkpoint_path():
         )
 
     assert exc_info.value.status_code == HTTPStatus.BAD_REQUEST
-    assert "frozen" in exc_info.value.detail
+    assert "Sampler checkpoint base_model" in exc_info.value.detail
 
 
 @pytest.mark.asyncio
@@ -275,6 +286,88 @@ async def test_asample_routes_teacher_sampler_to_teacher_client():
 
     assert teacher_client.calls[0][0] == [1, 2]
     assert server._futures[response["request_id"]]["sequences"][0]["tokens"] == [3]
+
+
+@pytest.mark.asyncio
+async def test_asample_falls_back_to_actor_for_scalar_prompt_logprobs(monkeypatch):
+    server = object.__new__(_router_class())
+    server._shutdown_started = False
+    server._status = ServerStatus.INITIALIZED
+    server._engine = MagicMock()
+    server._teacher_backend = None
+    server._op_gate = FifoReadWriteGate()
+    _init_future_tracking(server)
+    _init_state_tracker(server)
+    server._state_tracker.configure_resources(rollout_enabled=False, reference_enabled=False)
+    server._state_tracker.register_actor_sampler("training", base_model="actor", actor_id=0)
+    prompt_logprobs = AsyncMock(return_value={"type": "sample", "prompt_logprobs": [None, -0.5]})
+    monkeypatch.setitem(server.asample.__globals__, "tinker_sample_prompt_logprobs", prompt_logprobs)
+
+    response = await server.asample(_sample_request("training", prompt_logprobs=True))
+    await asyncio.gather(*server._pending.values())
+
+    assert server._futures[response["request_id"]]["prompt_logprobs"] == [None, -0.5]
+    prompt_logprobs.assert_awaited_once_with(server._engine, ANY, reference=False)
+
+
+@pytest.mark.asyncio
+async def test_asample_falls_back_to_reference_for_initial_weights(monkeypatch):
+    server = object.__new__(_router_class())
+    server._shutdown_started = False
+    server._status = ServerStatus.INITIALIZED
+    server._engine = MagicMock()
+    server._teacher_backend = None
+    server._op_gate = FifoReadWriteGate()
+    _init_future_tracking(server)
+    _init_state_tracker(server)
+    server._state_tracker.register_actor_sampler("initial", base_model="actor", actor_id=0)
+    server._state_tracker.actor_updated()
+    server._state_tracker.rollout_synchronized()
+    server._state_tracker.configure_resources(rollout_enabled=True, reference_enabled=True)
+    prompt_logprobs = AsyncMock(return_value={"type": "sample", "prompt_logprobs": [None, -0.7]})
+    monkeypatch.setitem(server.asample.__globals__, "tinker_sample_prompt_logprobs", prompt_logprobs)
+
+    response = await server.asample(_sample_request("initial", prompt_logprobs=True))
+    await asyncio.gather(*server._pending.values())
+
+    assert server._futures[response["request_id"]]["prompt_logprobs"] == [None, -0.7]
+    prompt_logprobs.assert_awaited_once_with(server._engine, ANY, reference=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("prompt_logprobs", "topk_prompt_logprobs"),
+    [(False, 0), (True, 2)],
+)
+async def test_asample_rejects_generation_and_topk_when_only_reference_matches(
+    prompt_logprobs,
+    topk_prompt_logprobs,
+):
+    server = object.__new__(_router_class())
+    server._shutdown_started = False
+    server._status = ServerStatus.INITIALIZED
+    server._engine = MagicMock()
+    server._teacher_backend = None
+    server._op_gate = FifoReadWriteGate()
+    _init_future_tracking(server)
+    _init_state_tracker(server)
+    server._state_tracker.register_actor_sampler("initial", base_model="actor", actor_id=0)
+    server._state_tracker.actor_updated()
+    server._state_tracker.rollout_synchronized()
+    server._state_tracker.configure_resources(rollout_enabled=True, reference_enabled=True)
+
+    response = await server.asample(
+        _sample_request(
+            "initial",
+            prompt_logprobs=prompt_logprobs,
+            topk_prompt_logprobs=topk_prompt_logprobs,
+        )
+    )
+    await asyncio.gather(*server._pending.values())
+
+    request_id = response["request_id"]
+    assert server._request_status[request_id] is RequestStatus.ERROR
+    assert "409" in server._errors[request_id]
 
 
 @pytest.mark.asyncio
@@ -350,7 +443,7 @@ async def test_asample_rejects_actor_sampler_after_rollout_diverges():
     server._state_tracker.register_actor_sampler(
         "actor-sampler",
         base_model="actor",
-        legal_rollout_ids={0},
+        actor_id=0,
     )
     server._state_tracker.actor_updated()
     server._state_tracker.rollout_synchronized()
@@ -361,7 +454,7 @@ async def test_asample_rejects_actor_sampler_after_rollout_diverges():
     request_id = response["request_id"]
     assert server._request_status[request_id] is RequestStatus.ERROR
     assert "409" in server._errors[request_id]
-    assert "no longer resident" in server._errors[request_id]
+    assert "cannot be served" in server._errors[request_id]
 
 
 @pytest.mark.asyncio
@@ -400,7 +493,7 @@ async def test_named_sampler_save_binds_path_to_current_rollout(monkeypatch):
     assert server._state_tracker.rollout_id == 1
     binding = server._state_tracker.get_sampler(response.sampling_session_id)
     assert binding.model_path == saved_path
-    assert binding.legal_rollout_ids == frozenset({1})
+    assert binding.actor_id == 1
 
 
 @pytest.mark.asyncio
@@ -453,7 +546,7 @@ async def test_unnamed_sampler_saves_return_distinct_sampler_ids(monkeypatch):
     assert first["sampling_session_id"] == "verl-remote-actor:sample:2"
     assert second["sampling_session_id"] == "verl-remote-actor:sample:3"
     assert first["sampling_session_id"] != second["sampling_session_id"]
-    assert server._state_tracker.get_sampler(first["sampling_session_id"]).legal_rollout_ids == frozenset({0})
+    assert server._state_tracker.get_sampler(first["sampling_session_id"]).actor_id == 0
 
 
 @pytest.mark.asyncio

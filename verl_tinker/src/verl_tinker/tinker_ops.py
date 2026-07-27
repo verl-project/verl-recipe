@@ -23,6 +23,8 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from tinker.types import Datum, ModelInput
+
 from verl.workers.engine_workers_tinker import OptimStepParams
 
 from .data.datum_processing import (
@@ -412,4 +414,46 @@ async def sample(engine, req) -> dict:
         "sequences": sequences,
         "prompt_logprobs": prompt_logprobs_out,
         "topk_prompt_logprobs": topk_prompt_logprobs_out,
+    }
+
+
+async def sample_prompt_logprobs(engine, req, *, reference: bool) -> dict:
+    """Serve ``SamplingClient.compute_logprobs`` from actor/reference weights.
+
+    Tinker's public client expresses prompt-logprob computation as a one-token
+    sampling request. The training and reference models cannot decode, so this
+    path runs their forward-only APIs and returns an empty generated sequence.
+    """
+    prompt_ids = list(req.prompt.to_ints())
+    if not prompt_ids:
+        raise ValueError("Prompt logprobs require at least one prompt token")
+
+    prompt_logprobs: list[float | None] = [None]
+    if len(prompt_ids) > 1:
+        datum = Datum(
+            model_input=ModelInput.from_ints(prompt_ids[:-1]),
+            loss_fn_inputs={"target_tokens": [prompt_ids[-1]]},
+        )
+        td = _datums_to_forward_td([datum], pad_to_multiple=engine.world_size)
+        compute = engine.compute_ref_log_prob if reference else engine.compute_log_prob
+        result_td = await asyncio.to_thread(compute, td)
+        output_keys = ("ref_log_prob", "log_probs") if reference else ("log_probs",)
+        output_key = next((key for key in output_keys if result_td.get(key) is not None), None)
+        log_probs = result_td.get(output_key) if output_key is not None else None
+        if log_probs is None:
+            raise RuntimeError(f"{compute.__name__} returned none of {output_keys!r}")
+
+        first = log_probs.unbind()[0] if log_probs.is_nested else log_probs[0]
+        first = first.detach().float().cpu()
+        if first.numel() != len(prompt_ids):
+            raise RuntimeError(
+                f"{compute.__name__} returned {first.numel()} log-probs for a {len(prompt_ids)}-token prompt"
+            )
+        prompt_logprobs.extend(first[:-1].tolist())
+
+    return {
+        "type": "sample",
+        "sequences": [{"stop_reason": "length", "tokens": [], "logprobs": []}],
+        "prompt_logprobs": prompt_logprobs,
+        "topk_prompt_logprobs": None,
     }

@@ -23,6 +23,7 @@ from verl_tinker.tinker_ops import (
     load_state,
     optim_step,
     sample,
+    sample_prompt_logprobs,
     save_state,
 )
 
@@ -86,6 +87,30 @@ class _ForwardBackwardEngine:
 
     def forward_backward(self, _data):
         return self.result_td
+
+
+class _PromptLogprobEngine:
+    world_size = 2
+
+    def __init__(self, output_key):
+        self.output_key = output_key
+        self.actor_calls = 0
+        self.reference_calls = 0
+
+    def _result(self):
+        values = torch.nested.as_nested_tensor(
+            [torch.tensor([-1.0, -2.0, -9.0])],
+            layout=torch.jagged,
+        )
+        return TensorDict({self.output_key: values}, batch_size=[1])
+
+    def compute_log_prob(self, _data):
+        self.actor_calls += 1
+        return self._result()
+
+    def compute_ref_log_prob(self, _data):
+        self.reference_calls += 1
+        return self._result()
 
 
 def _cross_entropy_datum(prefix, target_tokens):
@@ -207,6 +232,54 @@ async def test_sample_scalar_prompt_logprobs_have_leading_unscored_token():
     result = await sample(_Engine(), req)
 
     assert result["prompt_logprobs"] == [None, -1.1, -3.3]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reference", "output_key"),
+    [(False, "log_probs"), (True, "ref_log_prob"), (True, "log_probs")],
+)
+async def test_sample_prompt_logprobs_uses_actor_or_reference_forward(
+    monkeypatch,
+    reference,
+    output_key,
+):
+    monkeypatch.setattr("verl_tinker.tinker_ops.asyncio.to_thread", _to_thread_inline)
+    converted = {}
+
+    def convert(datums, pad_to_multiple):
+        converted["prefix"] = list(datums[0].model_input.to_ints())
+        converted["target"] = list(datums[0].loss_fn_inputs["target_tokens"].data)
+        converted["pad_to_multiple"] = pad_to_multiple
+        return object()
+
+    monkeypatch.setattr("verl_tinker.tinker_ops._datums_to_forward_td", convert)
+    engine = _PromptLogprobEngine(output_key)
+    req = SimpleNamespace(prompt=_Prompt())
+
+    result = await sample_prompt_logprobs(engine, req, reference=reference)
+
+    assert converted == {"prefix": [101, 102], "target": [103], "pad_to_multiple": 2}
+    assert result == {
+        "type": "sample",
+        "sequences": [{"stop_reason": "length", "tokens": [], "logprobs": []}],
+        "prompt_logprobs": [None, -1.0, -2.0],
+        "topk_prompt_logprobs": None,
+    }
+    assert engine.actor_calls == (0 if reference else 1)
+    assert engine.reference_calls == (1 if reference else 0)
+
+
+@pytest.mark.asyncio
+async def test_sample_prompt_logprobs_single_token_does_not_run_forward():
+    engine = _PromptLogprobEngine("log_probs")
+    req = SimpleNamespace(prompt=SimpleNamespace(to_ints=lambda: [101]))
+
+    result = await sample_prompt_logprobs(engine, req, reference=False)
+
+    assert result["prompt_logprobs"] == [None]
+    assert engine.actor_calls == 0
+    assert engine.reference_calls == 0
 
 
 @pytest.mark.asyncio

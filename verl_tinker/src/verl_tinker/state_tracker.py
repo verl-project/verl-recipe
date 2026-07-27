@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from enum import Enum
 
 
 class StateTrackerError(ValueError):
@@ -33,18 +34,27 @@ class UnknownSamplerPathError(StateTrackerError):
 
 
 class StaleSamplerError(StateTrackerError):
-    """Raised when the mutable rollout no longer matches a sampler binding."""
+    """Raised when no configured resource contains the requested weights."""
+
+
+class SamplingResource(str, Enum):
+    """Physical resource selected when a sampling request is executed."""
+
+    TEACHER = "teacher"
+    ROLLOUT = "rollout"
+    ACTOR = "actor"
+    REFERENCE = "reference"
 
 
 @dataclass(frozen=True)
 class SamplerBinding:
-    """The immutable target selected when a sampling session is created."""
+    """The immutable weight identity selected when a session is created."""
 
     sampler_id: str | None
     base_model: str
     model_path: str | None = None
     teacher_model_path: str | None = None
-    legal_rollout_ids: frozenset[int] = frozenset()
+    actor_id: int | None = None
 
     @property
     def is_teacher(self) -> bool:
@@ -75,10 +85,19 @@ class ModelStateTracker:
         self.actor_id = 0
         self.rollout_id: int | None = 0
         self._next_actor_id = 1
+        self._rollout_enabled = True
+        self._reference_enabled = False
 
         self._state_path_to_actor_id: dict[str, int] = {}
         self._sampler_path_to_actor_id: dict[str, int] = {}
         self._samplers: dict[str, SamplerBinding] = {}
+
+    def configure_resources(self, *, rollout_enabled: bool, reference_enabled: bool) -> None:
+        """Record which late-bound inference resources exist on this server."""
+        self._rollout_enabled = bool(rollout_enabled)
+        self._reference_enabled = bool(reference_enabled)
+        if not self._rollout_enabled:
+            self.rollout_id = None
 
     def configure_teacher_models(self, teacher_models: Iterable[tuple[str, str]]) -> None:
         """Register public teacher identifiers against their loaded model paths."""
@@ -108,6 +127,8 @@ class ModelStateTracker:
         return self.actor_id
 
     def rollout_synchronized(self) -> int:
+        if not self._rollout_enabled:
+            raise StateTrackerError("Cannot synchronize rollout weights when rollout is disabled")
         self.rollout_id = self.actor_id
         return self.rollout_id
 
@@ -154,16 +175,14 @@ class ModelStateTracker:
         sampler_id: str,
         *,
         base_model: str,
-        legal_rollout_ids: set[int] | frozenset[int],
+        actor_id: int,
         model_path: str | None = None,
     ) -> SamplerBinding:
-        if not legal_rollout_ids:
-            raise StateTrackerError("Actor sampler must have at least one legal rollout ID")
         binding = SamplerBinding(
             sampler_id=sampler_id,
             base_model=base_model,
             model_path=model_path,
-            legal_rollout_ids=frozenset(legal_rollout_ids),
+            actor_id=int(actor_id),
         )
         return self._register_sampler(binding)
 
@@ -189,18 +208,15 @@ class ModelStateTracker:
         model_path: str | None,
         sampler_id: str | None = None,
     ) -> SamplerBinding:
-        """Resolve actor/teacher intent, optionally registering a sampling session."""
-        if base_model in self._teacher_model_paths:
-            if model_path is not None:
-                raise StateTrackerError(
-                    "Teacher models are frozen and do not support checkpoint paths: "
-                    f"base_model={base_model!r}, model_path={model_path!r}"
-                )
+        """Resolve teacher intent or bind a training session to an actor ID."""
+        target = model_path if model_path is not None else base_model
+        teacher_model_path = self._teacher_model_paths.get(target) if target is not None else None
+        if teacher_model_path is not None:
             binding = SamplerBinding(
                 sampler_id=sampler_id,
-                teacher_model_path=self._teacher_model_paths[base_model],
-                base_model=base_model,
-                model_path=self._teacher_model_paths[base_model],
+                teacher_model_path=teacher_model_path,
+                base_model=base_model or target,
+                model_path=teacher_model_path,
             )
         elif model_path is not None:
             if self.is_state_path(model_path):
@@ -210,18 +226,18 @@ class ModelStateTracker:
                     f"Sampler checkpoint base_model must be one of "
                     f"{sorted(self.actor_model_identifiers)!r}, got {base_model!r}"
                 )
-            actor_id = self.actor_id_for_sampler_path(model_path)
+            actor_id = 0 if model_path in self.actor_model_identifiers else self.actor_id_for_sampler_path(model_path)
             binding = SamplerBinding(
                 sampler_id=sampler_id,
                 base_model=base_model or self.actor_base_model,
                 model_path=model_path,
-                legal_rollout_ids=frozenset({actor_id}),
+                actor_id=actor_id,
             )
         elif base_model in self.actor_model_identifiers:
             binding = SamplerBinding(
                 sampler_id=sampler_id,
                 base_model=self.actor_base_model,
-                legal_rollout_ids=frozenset({0}),
+                actor_id=0,
             )
         else:
             raise StateTrackerError(f"Unknown sampling model: base_model={base_model!r}, model_path={model_path!r}")
@@ -257,21 +273,27 @@ class ModelStateTracker:
         except KeyError as exc:
             raise UnknownSamplerError(f"Unknown sampling session: {sampler_id}") from exc
 
-    def require_sample_permission(self, sampler_id: str) -> SamplerBinding:
-        binding = self.get_sampler(sampler_id)
-        self.require_binding_permission(binding)
-        return binding
-
-    def require_binding_permission(self, binding: SamplerBinding) -> None:
+    def resolve_resource(self, binding: SamplerBinding, *, scalar_prompt_logprobs: bool) -> SamplingResource:
+        """Late-bind a session's weights to a resource that can fulfill the request."""
         if binding.is_teacher:
-            return
-        if self.rollout_id not in binding.legal_rollout_ids:
-            legal = sorted(binding.legal_rollout_ids)
-            raise StaleSamplerError(
-                f"Sampling session {binding.sampler_id!r} requires rollout IDs {legal}, "
-                f"but the current rollout ID is {self.rollout_id!r}; the requested "
-                "rollout weights are no longer resident"
-            )
+            return SamplingResource.TEACHER
+
+        if binding.actor_id is None:
+            raise StateTrackerError(f"Training sampling session {binding.sampler_id!r} has no actor ID")
+        if self._rollout_enabled and self.rollout_id == binding.actor_id:
+            return SamplingResource.ROLLOUT
+        if scalar_prompt_logprobs and self.actor_id == binding.actor_id:
+            return SamplingResource.ACTOR
+        if scalar_prompt_logprobs and binding.actor_id == 0 and self._reference_enabled:
+            return SamplingResource.REFERENCE
+
+        operation = "scalar prompt logprobs" if scalar_prompt_logprobs else "autoregressive sampling"
+        raise StaleSamplerError(
+            f"Sampling session {binding.sampler_id!r} is bound to actor ID {binding.actor_id}, "
+            f"but {operation} cannot be served by the configured resources "
+            f"(actor_id={self.actor_id}, rollout_id={self.rollout_id}, "
+            f"rollout_enabled={self._rollout_enabled}, reference_enabled={self._reference_enabled})"
+        )
 
     def sampler_ids(self) -> list[str]:
         return list(self._samplers)
@@ -280,5 +302,13 @@ class ModelStateTracker:
         return [
             sampler_id
             for sampler_id, binding in self._samplers.items()
-            if binding.is_teacher or self.rollout_id in binding.legal_rollout_ids
+            if binding.is_teacher
+            or (
+                binding.actor_id is not None
+                and (
+                    (self._rollout_enabled and self.rollout_id == binding.actor_id)
+                    or self.actor_id == binding.actor_id
+                    or (binding.actor_id == 0 and self._reference_enabled)
+                )
+            )
         ]

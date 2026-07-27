@@ -5,6 +5,7 @@
 import pytest
 from verl_tinker.state_tracker import (
     ModelStateTracker,
+    SamplingResource,
     StaleSamplerError,
     StateTrackerError,
     UnknownSamplerError,
@@ -50,18 +51,18 @@ def test_matching_state_path_skips_and_untracked_load_gets_identity():
 
 def test_sampler_binding_becomes_stale_after_new_rollout_sync():
     tracker = _tracker()
-    tracker.register_actor_sampler("v0", base_model="actor", legal_rollout_ids={0})
+    v0 = tracker.register_actor_sampler("v0", base_model="actor", actor_id=0)
     tracker.actor_updated()
 
     # Actor changed, but rollout still contains v0.
-    tracker.require_sample_permission("v0")
+    assert tracker.resolve_resource(v0, scalar_prompt_logprobs=False) is SamplingResource.ROLLOUT
 
     tracker.rollout_synchronized()
-    with pytest.raises(StaleSamplerError, match="current rollout ID is 1"):
-        tracker.require_sample_permission("v0")
+    with pytest.raises(StaleSamplerError, match="bound to actor ID 0"):
+        tracker.resolve_resource(v0, scalar_prompt_logprobs=False)
 
-    tracker.register_actor_sampler("v1", base_model="actor", legal_rollout_ids={1})
-    tracker.require_sample_permission("v1")
+    v1 = tracker.register_actor_sampler("v1", base_model="actor", actor_id=1)
+    assert tracker.resolve_resource(v1, scalar_prompt_logprobs=False) is SamplingResource.ROLLOUT
 
 
 def test_sampler_path_and_teacher_bindings():
@@ -81,26 +82,28 @@ def test_sampler_path_and_teacher_bindings():
     )
     tracker.actor_updated()
     tracker.rollout_synchronized()
-    assert tracker.require_sample_permission("teacher").teacher_model_path == "/models/teacher"
+    teacher = tracker.get_sampler("teacher")
+    assert tracker.resolve_resource(teacher, scalar_prompt_logprobs=False) is SamplingResource.TEACHER
 
 
 def test_sampler_registration_is_idempotent_but_cannot_retarget():
     tracker = _tracker()
-    first = tracker.register_actor_sampler("same", base_model="actor", legal_rollout_ids={0})
-    second = tracker.register_actor_sampler("same", base_model="actor", legal_rollout_ids={0})
+    first = tracker.register_actor_sampler("same", base_model="actor", actor_id=0)
+    second = tracker.register_actor_sampler("same", base_model="actor", actor_id=0)
 
     assert first == second
     with pytest.raises(StateTrackerError, match="reused for a different target"):
-        tracker.register_actor_sampler("same", base_model="actor", legal_rollout_ids={1})
+        tracker.register_actor_sampler("same", base_model="actor", actor_id=1)
 
 
 def test_failed_rollout_sync_makes_all_actor_samplers_stale():
     tracker = _tracker()
-    tracker.register_actor_sampler("initial", base_model="actor", legal_rollout_ids={0})
+    initial = tracker.register_actor_sampler("initial", base_model="actor", actor_id=0)
     tracker.rollout_synchronization_failed()
 
-    with pytest.raises(StaleSamplerError, match="current rollout ID is None"):
-        tracker.require_sample_permission("initial")
+    with pytest.raises(StaleSamplerError, match="rollout_id=None"):
+        tracker.resolve_resource(initial, scalar_prompt_logprobs=False)
+    assert tracker.resolve_resource(initial, scalar_prompt_logprobs=True) is SamplingResource.ACTOR
 
 
 def test_sampler_target_resolution_prefers_teacher_then_actor_aliases():
@@ -115,7 +118,7 @@ def test_sampler_target_resolution_prefers_teacher_then_actor_aliases():
     assert teacher.is_teacher
     assert teacher.teacher_model_path == "/models/teacher"
     assert not actor.is_teacher
-    assert actor.legal_rollout_ids == frozenset({0})
+    assert actor.actor_id == 0
 
 
 def test_duplicate_teacher_alias_for_different_paths_is_rejected():
@@ -137,12 +140,24 @@ def test_direct_sampling_target_uses_known_sampler_path():
     )
 
     assert binding.sampler_id is None
-    assert binding.legal_rollout_ids == frozenset({0})
+    assert binding.actor_id == 0
+
+
+def test_actor_model_path_binds_to_initial_actor_id():
+    tracker = _tracker()
+
+    binding = tracker.resolve_sampler_target(
+        base_model="actor",
+        model_path="/models/actor",
+    )
+
+    assert not binding.is_teacher
+    assert binding.actor_id == 0
 
 
 def test_sampling_session_id_is_resolved_without_direct_target_fallback():
     tracker = _tracker()
-    expected = tracker.register_actor_sampler("known", base_model="actor", legal_rollout_ids={0})
+    expected = tracker.register_actor_sampler("known", base_model="actor", actor_id=0)
 
     assert (
         tracker.resolve_sampling_request(
@@ -162,7 +177,7 @@ def test_sampling_session_id_is_resolved_without_direct_target_fallback():
 
 def test_valid_sampler_ids_excludes_stale_actor_bindings():
     tracker = _tracker()
-    tracker.register_actor_sampler("actor-v0", base_model="actor", legal_rollout_ids={0})
+    tracker.register_actor_sampler("actor-v0", base_model="actor", actor_id=0)
     tracker.register_teacher_sampler(
         "teacher",
         teacher_model_path="/models/teacher",
@@ -170,6 +185,64 @@ def test_valid_sampler_ids_excludes_stale_actor_bindings():
     )
     tracker.actor_updated()
     tracker.rollout_synchronized()
-    tracker.register_actor_sampler("actor-v1", base_model="actor", legal_rollout_ids={1})
+    tracker.register_actor_sampler("actor-v1", base_model="actor", actor_id=1)
 
     assert tracker.valid_sampler_ids() == ["teacher", "actor-v1"]
+
+
+def test_late_binding_prefers_rollout_then_actor_then_reference():
+    tracker = _tracker()
+    v0 = tracker.register_actor_sampler("v0", base_model="actor", actor_id=0)
+
+    assert tracker.resolve_resource(v0, scalar_prompt_logprobs=True) is SamplingResource.ROLLOUT
+
+    tracker.actor_updated()
+    assert tracker.resolve_resource(v0, scalar_prompt_logprobs=True) is SamplingResource.ROLLOUT
+
+    tracker.rollout_synchronized()
+    current = tracker.register_actor_sampler("current", base_model="actor", actor_id=1)
+    assert tracker.resolve_resource(current, scalar_prompt_logprobs=True) is SamplingResource.ROLLOUT
+
+    tracker.rollout_synchronization_failed()
+    assert tracker.resolve_resource(current, scalar_prompt_logprobs=True) is SamplingResource.ACTOR
+
+    tracker.configure_resources(rollout_enabled=True, reference_enabled=True)
+    assert tracker.resolve_resource(v0, scalar_prompt_logprobs=True) is SamplingResource.REFERENCE
+
+
+def test_actor_and_reference_fallback_require_scalar_prompt_logprobs():
+    tracker = _tracker()
+    v0 = tracker.register_actor_sampler("v0", base_model="actor", actor_id=0)
+    tracker.actor_updated()
+    tracker.rollout_synchronized()
+    tracker.configure_resources(rollout_enabled=True, reference_enabled=True)
+
+    with pytest.raises(StaleSamplerError, match="autoregressive sampling"):
+        tracker.resolve_resource(v0, scalar_prompt_logprobs=False)
+    assert tracker.resolve_resource(v0, scalar_prompt_logprobs=True) is SamplingResource.REFERENCE
+
+
+def test_no_rollout_server_uses_actor_for_logprobs_only():
+    tracker = _tracker()
+    tracker.configure_resources(rollout_enabled=False, reference_enabled=False)
+    initial = tracker.resolve_sampler_target(base_model="actor", model_path=None)
+
+    assert tracker.rollout_id is None
+    assert tracker.resolve_resource(initial, scalar_prompt_logprobs=True) is SamplingResource.ACTOR
+    with pytest.raises(StaleSamplerError, match="autoregressive sampling"):
+        tracker.resolve_resource(initial, scalar_prompt_logprobs=False)
+
+
+def test_teacher_model_path_takes_precedence_over_actor_base_model():
+    tracker = ModelStateTracker(
+        actor_model_identifiers=("shared", "/models/actor"),
+        teacher_models=(("/models/teacher", "/models/teacher"),),
+    )
+
+    binding = tracker.resolve_sampler_target(
+        base_model="shared",
+        model_path="/models/teacher",
+    )
+
+    assert binding.is_teacher
+    assert binding.teacher_model_path == "/models/teacher"

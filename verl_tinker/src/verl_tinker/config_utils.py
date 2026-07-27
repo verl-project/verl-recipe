@@ -343,6 +343,13 @@ def _validate_config(config) -> list[str]:
     if bool(config.get("critic", {}).get("enable", False)):
         errors.append("critic support has been removed from the Tinker server; set critic.enable=false")
 
+    if bool(config.get("actor_rollout_ref", {}).get("actor", {}).get("use_kl_loss", False)):
+        errors.append(
+            "actor_rollout_ref.actor.use_kl_loss must be false: "
+            "Tinker expects KL to be incorporated into client-computed advantages"
+        )
+        return errors
+
     if bool(config.get("distillation", {}).get("enabled", False)):
         teacher_identifier_errors = _normalize_teacher_model_identifiers(config)
         errors.extend(teacher_identifier_errors)

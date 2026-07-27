@@ -392,3 +392,26 @@ def test_tinker_config_rejects_enabled_critic_without_keeping_disabled_critic():
     errors = _validate_config(config)
 
     assert errors == ["critic support has been removed from the Tinker server; set critic.enable=false"]
+
+
+def test_tinker_config_rejects_server_side_kl_loss():
+    config = process_actor_rollout_ref_config(_minimal_tinker_config())
+    config.actor_rollout_ref.actor.use_kl_loss = True
+
+    with patch("verl_tinker.config_utils._validate_supported_verl_config") as mock_validate:
+        errors = _validate_config(config)
+
+    mock_validate.assert_not_called()
+    assert errors == [
+        "actor_rollout_ref.actor.use_kl_loss must be false: "
+        "Tinker expects KL to be incorporated into client-computed advantages"
+    ]
+
+
+def test_actor_rollout_ref_quick_start_uses_client_side_kl_and_keeps_reference_worker():
+    config = OmegaConf.load(_TINKER_CONFIG_DIR / "quick_start" / "actor_rollout_ref.yaml")
+
+    assert config.actor_rollout_ref.actor.use_kl_loss is False
+    assert config.algorithm.use_kl_in_reward is True
+    assert "kl_loss_coef" not in config.actor_rollout_ref.actor
+    assert "kl_loss_type" not in config.actor_rollout_ref.actor
