@@ -53,20 +53,18 @@ from .state_tracker import (
     UnknownSamplerError,
 )
 from .tinker_ops import (
-    GLOBAL_MODEL_ID,
-    GLOBAL_SESSION_ID,
+    forward as tinker_forward,
+)
+from .tinker_ops import (
+    forward_backward as tinker_forward_backward,
+)
+from .tinker_ops import (
     get_configured_model_name,
     get_supported_models,
     load_state,
     load_state_metadata,
     save_state,
     state_path_to_local,
-)
-from .tinker_ops import (
-    forward as tinker_forward,
-)
-from .tinker_ops import (
-    forward_backward as tinker_forward_backward,
 )
 from .tinker_ops import (
     optim_step as tinker_optim_step,
@@ -291,10 +289,13 @@ class TinkerServer:
             "lora_rank": None,
         }
 
-    def _current_model_metadata(self) -> dict[str, Any]:
-        metadata = self._model_metadata.get(GLOBAL_MODEL_ID)
+    def _current_model_metadata(self, model_id: str) -> dict[str, Any]:
+        metadata = self._model_metadata.get(model_id)
         if metadata is None:
-            raise HTTPException(HTTPStatus.CONFLICT, "No model metadata available; create_model must run first")
+            raise HTTPException(
+                HTTPStatus.CONFLICT,
+                f"No metadata for model {model_id!r}; create_model must run first",
+            )
         return metadata
 
     def _weights_info_compat_metadata(self, metadata: dict[str, Any]) -> dict[str, Any]:
@@ -327,7 +328,7 @@ class TinkerServer:
             self._checkpoint_root,
             self._saved_state_paths,
             self._saved_state_metadata,
-            self._current_model_metadata(),
+            self._current_model_metadata(req.get("model_id", "")),
             self._step_counter,
             req.get("path"),
         )
@@ -370,11 +371,14 @@ class TinkerServer:
 
     async def _run_save_weights_for_sampler(self, req: SaveWeightsForSamplerRequest) -> dict:
         named = req.path is not None
+        session_id: str | None = None
         if not named and req.sampling_session_seq_id is None:
             raise HTTPException(
                 HTTPStatus.BAD_REQUEST,
                 "Unnamed save_weights_for_sampler requires sampling_session_seq_id",
             )
+        if not named:
+            session_id = self._state_tracker.session_id_for_model(str(req.model_id))
 
         try:
             result = await tinker_save_weights_for_sampler(self._get_engine(), named=named)
@@ -387,7 +391,8 @@ class TinkerServer:
             self._state_tracker.sampler_path_saved(result["path"])
             return result
 
-        sampler_id = self._state_tracker.sampler_id(GLOBAL_SESSION_ID, req.sampling_session_seq_id)
+        assert session_id is not None
+        sampler_id = self._state_tracker.sampler_id(session_id, req.sampling_session_seq_id)
         self._state_tracker.register_actor_sampler(
             sampler_id,
             base_model=self._state_tracker.actor_base_model,
@@ -576,7 +581,7 @@ class TinkerServer:
         return {
             "type": "get_info",
             "model_data": {"arch": None, "model_name": model_name, "tokenizer_id": model_name},
-            "model_id": GLOBAL_MODEL_ID,
+            "model_id": req.model_id,
             "is_lora": False,
             "lora_rank": None,
             "model_name": model_name,
@@ -585,10 +590,9 @@ class TinkerServer:
     @app.post("/api/v1/create_session")
     async def create_session(self, _: dict = None):
         self._require_ready()
-        # dummy endpoint mostly for compatibility
         return {
             "type": "create_session",
-            "session_id": GLOBAL_SESSION_ID,
+            "session_id": self._state_tracker.create_session(),
             "info_message": None,
             "warning_message": None,
             "error_message": None,
@@ -597,30 +601,37 @@ class TinkerServer:
     @app.get("/api/v1/sessions/{session_id}")
     async def get_session(self, session_id: str):
         self._require_ready()
-        return {
-            "training_run_ids": [GLOBAL_MODEL_ID],
-            "sampler_ids": self._state_tracker.valid_sampler_ids(),
-        }
+        try:
+            return {
+                "training_run_ids": self._state_tracker.model_ids_for_session(session_id),
+                "sampler_ids": self._state_tracker.valid_sampler_ids_for_session(session_id),
+            }
+        except StateTrackerError as exc:
+            raise HTTPException(HTTPStatus.NOT_FOUND, str(exc)) from exc
 
     @app.post("/api/v1/sessions")
     async def list_sessions(self):
         self._require_ready()
-        return {"sessions": [GLOBAL_SESSION_ID]}
+        return {"sessions": self._state_tracker.session_ids()}
 
     @app.post("/api/v1/create_model")
     async def create_model(self, req: CreateModelRequest):
         self._require_ready()
+        try:
+            model_id = self._state_tracker.register_model(req.session_id, req.model_seq_id)
+        except StateTrackerError as exc:
+            raise HTTPException(HTTPStatus.BAD_REQUEST, str(exc)) from exc
         if req.base_model:
-            self._model_to_base_model[GLOBAL_MODEL_ID] = req.base_model
-        self._model_metadata[GLOBAL_MODEL_ID] = self._metadata_from_create_model(req)
-        request_id = self._stash({"type": "create_model", "model_id": GLOBAL_MODEL_ID})
-        return self._future_envelope(request_id, model_id=GLOBAL_MODEL_ID)
+            self._model_to_base_model[model_id] = req.base_model
+        self._model_metadata[model_id] = self._metadata_from_create_model(req)
+        request_id = self._stash({"type": "create_model", "model_id": model_id})
+        return self._future_envelope(request_id, model_id=model_id)
 
     @app.post("/api/v1/create_sampling_session", response_model=CreateSamplingSessionResponse)
     async def create_sampling_session(self, req: CreateSamplingSessionRequest):
         self._require_ready()
-        sampler_id = self._state_tracker.sampler_id(req.session_id, req.sampling_session_seq_id)
         try:
+            sampler_id = self._state_tracker.sampler_id(req.session_id, req.sampling_session_seq_id)
             self._state_tracker.resolve_sampler_target(
                 sampler_id=sampler_id,
                 base_model=req.base_model,

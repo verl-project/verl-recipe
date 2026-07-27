@@ -25,6 +25,37 @@ def test_initial_actor_and_rollout_are_version_zero():
     assert tracker.sampler_ids() == []
 
 
+def test_sessions_models_and_samplers_have_distinct_retry_stable_ids():
+    tracker = _tracker()
+
+    first_session = tracker.create_session()
+    second_session = tracker.create_session()
+    first_model = tracker.register_model(first_session, 0)
+    second_model = tracker.register_model(second_session, 0)
+    first_sampler = tracker.sampler_id(first_session, 0)
+    second_sampler = tracker.sampler_id(second_session, 0)
+
+    assert first_session == "verl-tinker-session:0"
+    assert second_session == "verl-tinker-session:1"
+    assert first_model == "verl-tinker-session:0:train:0"
+    assert second_model == "verl-tinker-session:1:train:0"
+    assert tracker.register_model(first_session, 0) == first_model
+    assert tracker.session_id_for_model(first_model) == first_session
+    assert first_sampler == "verl-tinker-session:0:sample:0"
+    assert second_sampler == "verl-tinker-session:1:sample:0"
+
+
+def test_unknown_session_and_model_are_rejected():
+    tracker = _tracker()
+
+    with pytest.raises(StateTrackerError, match="Unknown Tinker session"):
+        tracker.register_model("missing", 0)
+    with pytest.raises(StateTrackerError, match="Unknown Tinker session"):
+        tracker.sampler_id("missing", 0)
+    with pytest.raises(StateTrackerError, match="Unknown training model"):
+        tracker.session_id_for_model("missing")
+
+
 def test_loading_old_actor_id_does_not_reuse_allocated_ids():
     tracker = _tracker()
     tracker.state_saved("tinker://state/base")

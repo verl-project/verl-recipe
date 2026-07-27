@@ -12,7 +12,53 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""In-memory actor, rollout, checkpoint, and sampler version tracking."""
+"""In-memory identity and availability tracking for the Tinker-compatible API.
+
+The server exposes Tinker's logical resource model while owning only one mutable
+VeRL actor and, optionally, one rollout replica, one reference policy, and a set
+of immutable teacher models.  This tracker keeps those logical API identities
+separate from the physical models that can currently serve them.
+
+The tracked concepts are:
+
+* Tinker sessions: every SDK ``ServiceClient`` receives a distinct session ID
+  from ``create_session``.  The ID is generated from a process-local monotonic
+  counter (``verl-tinker-session:<n>``) and provides the namespace in which the
+  SDK's model and sampling sequence numbers are unique.  Session state is
+  intentionally in memory and starts over with a new server process.
+* Logical training models: ``create_model`` registers the retry-stable ID
+  ``<session>:train:<model_seq_id>``.  These IDs all route to the server's one
+  physical actor; they do not represent additional loaded model copies.  The
+  reverse ``model_id -> session_id`` mapping is required because the SDK's
+  unnamed ``save_weights_for_sampler`` request includes a model ID but omits its
+  session ID.
+* Actor versions: ``actor_id`` identifies the weights currently held by the
+  mutable actor.  It starts at zero and receives a fresh monotonically allocated
+  value after every optimizer step, potentially partial optimizer failure, or
+  previously unknown state load.  IDs describe weight identity, not step count.
+* Rollout versions: ``rollout_id`` identifies the actor version currently held
+  by the rollout engine.  A successful weight synchronization sets it equal to
+  ``actor_id``.  A failed synchronization, or a server without rollout, sets it
+  to ``None`` so stale rollout weights cannot be selected accidentally.
+* Checkpoint paths: training-state paths and sampler-weight paths are associated
+  with the actor version they contain.  The former lets the router recognize an
+  already-loaded actor state; the latter lets a later ``tinker://`` sampling
+  request bind to the exact saved weight identity.
+* Sampling sessions: sampler IDs use the retry-stable form
+  ``<session>:sample:<sampling_session_seq_id>``.  Each ID is immutably bound to
+  either a teacher model or an actor version.  Replaying the same binding is
+  accepted, while attempting to retarget an existing ID is rejected.
+* Physical sampling resources: at request time, an actor-version binding is
+  late-bound to a resource that actually contains those weights.  Autoregressive
+  decoding requires the matching rollout.  Scalar prompt-logprob requests may
+  instead use the matching actor, or the reference policy for initial version
+  zero.  Teacher bindings always use their configured teacher backend.
+
+Optimizer, gradient, and broader training-state equivalence are deliberately not
+modeled.  In particular, actor-version equality means only that the tracked model
+weights are equivalent; optimizer-state behavior remains the router/backend's
+responsibility.
+"""
 
 from __future__ import annotations
 
@@ -91,6 +137,46 @@ class ModelStateTracker:
         self._state_path_to_actor_id: dict[str, int] = {}
         self._sampler_path_to_actor_id: dict[str, int] = {}
         self._samplers: dict[str, SamplerBinding] = {}
+        self._next_session_id = 0
+        self._session_model_ids: dict[str, dict[str, None]] = {}
+        self._session_sampler_ids: dict[str, dict[str, None]] = {}
+        self._model_to_session_id: dict[str, str] = {}
+
+    def create_session(self) -> str:
+        """Allocate a distinct namespace for one Tinker SDK ServiceClient."""
+        session_id = f"verl-tinker-session:{self._next_session_id}"
+        self._next_session_id += 1
+        self._session_model_ids[session_id] = {}
+        self._session_sampler_ids[session_id] = {}
+        return session_id
+
+    def session_ids(self) -> list[str]:
+        return list(self._session_model_ids)
+
+    def _require_session(self, session_id: str) -> None:
+        if session_id not in self._session_model_ids:
+            raise StateTrackerError(f"Unknown Tinker session: {session_id!r}")
+
+    def register_model(self, session_id: str, model_seq_id: int) -> str:
+        """Register a retry-stable logical training model within a session."""
+        self._require_session(session_id)
+        model_id = f"{session_id}:train:{int(model_seq_id)}"
+        previous_session_id = self._model_to_session_id.get(model_id)
+        if previous_session_id is not None and previous_session_id != session_id:
+            raise StateTrackerError(f"Model ID {model_id!r} was reused by a different session")
+        self._model_to_session_id[model_id] = session_id
+        self._session_model_ids[session_id][model_id] = None
+        return model_id
+
+    def session_id_for_model(self, model_id: str) -> str:
+        try:
+            return self._model_to_session_id[model_id]
+        except KeyError as exc:
+            raise StateTrackerError(f"Unknown training model: {model_id!r}") from exc
+
+    def model_ids_for_session(self, session_id: str) -> list[str]:
+        self._require_session(session_id)
+        return list(self._session_model_ids[session_id])
 
     def configure_resources(self, *, rollout_enabled: bool, reference_enabled: bool) -> None:
         """Record which late-bound inference resources exist on this server."""
@@ -111,10 +197,12 @@ class ModelStateTracker:
                 )
             self._teacher_model_paths[identifier] = model_path
 
-    @staticmethod
-    def sampler_id(session_id: str, sampling_session_seq_id: int) -> str:
+    def sampler_id(self, session_id: str, sampling_session_seq_id: int) -> str:
         """Build the retry-stable ID shape used by the Tinker SDK."""
-        return f"{session_id}:sample:{int(sampling_session_seq_id)}"
+        self._require_session(session_id)
+        sampler_id = f"{session_id}:sample:{int(sampling_session_seq_id)}"
+        self._session_sampler_ids[session_id][sampler_id] = None
+        return sampler_id
 
     def _allocate_actor_id(self) -> int:
         actor_id = self._next_actor_id
@@ -312,3 +400,8 @@ class ModelStateTracker:
                 )
             )
         ]
+
+    def valid_sampler_ids_for_session(self, session_id: str) -> list[str]:
+        self._require_session(session_id)
+        valid_sampler_ids = set(self.valid_sampler_ids())
+        return [sampler_id for sampler_id in self._session_sampler_ids[session_id] if sampler_id in valid_sampler_ids]
