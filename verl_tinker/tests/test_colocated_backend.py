@@ -430,18 +430,32 @@ class TestReplicaLifecycle:
         backend.actor_rollout_wg.to_actor.assert_any_call(device="device", model=True, optimizer=True, grad=True)
         assert backend._lifecycle.awake_roles == {ModelRole.ACTOR}
 
-    def test_update_weights_sleeps_then_updates_then_marks_awake(self):
-        """update_weights() does: sleep → update → mark awake."""
+    def test_update_weights_releases_optimizer_before_sync_then_marks_rollout_awake(self):
+        """Offload mode releases training-only memory before waking rollout weights."""
         backend = self._make_lifecycle_backend()
 
         call_order = []
         backend.checkpoint_manager.sleep_replicas.side_effect = lambda: call_order.append("sleep")
+        backend.actor_rollout_wg.prepare_actor_for_weight_sync.side_effect = lambda: call_order.append(
+            "release_optimizer"
+        )
         backend.checkpoint_manager.update_weights.side_effect = lambda: call_order.append("update")
 
         backend.update_weights()
 
-        assert call_order == ["sleep", "update"]
+        assert call_order == ["sleep", "release_optimizer", "update"]
         assert backend._lifecycle.awake_roles == {ModelRole.ROLLOUT}
+
+    def test_update_weights_keeps_optimizer_resident_when_server_offload_disabled(self):
+        backend = self._make_lifecycle_backend()
+        backend._enable_offload = False
+        backend._lifecycle.enable_offload = False
+
+        backend.update_weights()
+
+        backend.actor_rollout_wg.prepare_actor_for_weight_sync.assert_not_called()
+        backend.actor_rollout_wg.to_actor.assert_not_called()
+        backend.checkpoint_manager.update_weights.assert_called_once_with()
 
     def test_compute_log_prob_sleeps_first(self):
         """compute_log_prob() sleeps replicas before running FSDP forward."""
@@ -786,3 +800,14 @@ class TestNoRolloutDeployment:
 
         worker.actor.to.assert_called_once_with(device="device", model=True, optimizer=True, grad=True)
         worker.ref.to.assert_called_once_with(device="device", model=True, optimizer=False, grad=False)
+
+    def test_tinker_worker_prepares_actor_for_weight_sync(self):
+        worker = object.__new__(TinkerServerActorRolloutRefWorker)
+        worker.actor = MagicMock()
+
+        with patch(f"{_BACKEND_MODULE}.aggressive_empty_cache") as mock_empty_cache:
+            worker.prepare_actor_for_weight_sync()
+
+        worker.actor.optimizer_zero_grad.assert_not_called()
+        worker.actor.to.assert_called_once_with(device="cpu", model=False, optimizer=True, grad=False)
+        mock_empty_cache.assert_called_once_with(force_sync=True)

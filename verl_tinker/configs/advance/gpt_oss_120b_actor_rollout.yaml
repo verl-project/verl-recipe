@@ -53,16 +53,16 @@ actor_rollout_ref: # this is the same as verl's config, this field is ALWAYS req
     quantization: null
     load_format: safetensors
     mode: async
-    prompt_length: 4096
-    response_length: 10000
-    max_model_len: 16384
+    prompt_length: 2048
+    response_length: 2048
+    max_model_len: 4096
     calculate_log_probs: true
     log_prob_use_dynamic_bsz: true
-    log_prob_max_token_len_per_gpu: 16384
+    log_prob_max_token_len_per_gpu: 4096
     log_prob_micro_batch_size_per_gpu: 1
     enable_chunked_prefill: true
     max_num_seqs: 4
-    max_num_batched_tokens: 8192
+    max_num_batched_tokens: 4096
     free_cache_engine: true
     enforce_eager: false
 
@@ -80,8 +80,8 @@ algorithm:
 
 data:
   train_batch_size: 64
-  max_prompt_length: 4096
-  max_response_length: 10000
+  max_prompt_length: 2048
+  max_response_length: 2048
 
 trainer:
   logger:

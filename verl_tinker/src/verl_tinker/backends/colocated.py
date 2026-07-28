@@ -40,6 +40,7 @@ from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.ppo.utils import Role, need_reference_policy
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.import_utils import import_external_libs
+from verl.utils.memory_utils import aggressive_empty_cache
 from verl.workers.engine_workers_tinker import TinkerActorRolloutRefWorker
 from verl.workers.rollout.llm_server import LLMServerClient
 from verl.workers.rollout.replica import TokenOutput, get_rollout_replica_class
@@ -63,6 +64,20 @@ class TinkerServerActorRolloutRefWorker(TinkerActorRolloutRefWorker):
         if self.ref is None:
             return
         self.ref.to(device=device, model=model, optimizer=optimizer, grad=grad)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def prepare_actor_for_weight_sync(self):
+        """Release actor training-only memory before waking rollout weights.
+
+        The naive checkpoint engine still needs actor parameters on GPU as the
+        source of the transfer. Move only optimizer state to CPU and leave both
+        parameters and gradients untouched so a caller's gradient-accumulation
+        state is preserved. Optimizer CPU copies are non-blocking on some
+        backends, so synchronize and clear the allocator cache before vLLM
+        attempts to remap its weight allocation.
+        """
+        self.actor.to(device="cpu", model=False, optimizer=True, grad=False)
+        aggressive_empty_cache(force_sync=True)
 
 
 class NoRolloutWorker(TinkerServerActorRolloutRefWorker):
@@ -587,6 +602,8 @@ class ColocatedBackend:
         For the naive backend, checkpoint_manager.update_weights() internally
         does: resume(weights) → push FSDP params → resume(kv_cache), which
         requires replicas to be in the slept state and leaves them awake.
+        When server offload is enabled, release actor optimizer memory before
+        that sequence while keeping actor parameters and gradients resident.
 
         Raises RuntimeError in no_rollout_deployment mode (no rollout replicas to sync).
         """
@@ -594,6 +611,9 @@ class ColocatedBackend:
             if self._no_rollout_deployment:
                 raise RuntimeError("update_weights is not available in no_rollout_deployment mode")
             self._prepare_model_roles({ModelRole.ACTOR}, reason="update_weights")
+            if self._enable_offload:
+                logger.info("[engine] offloading actor optimizer before rollout weight sync")
+                self.actor_rollout_wg.prepare_actor_for_weight_sync()
             self.checkpoint_manager.update_weights()
             if self._enable_offload:
                 self._move_actor("cpu", reason="after update_weights")
