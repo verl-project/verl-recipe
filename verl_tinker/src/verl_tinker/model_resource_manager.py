@@ -328,7 +328,9 @@ class ModelResourceManager:
                 actor_id=0,
             )
         else:
-            raise ModelResourceManagerError(f"Unknown sampling model: base_model={base_model!r}, model_path={model_path!r}")
+            raise ModelResourceManagerError(
+                f"Unknown sampling model: base_model={base_model!r}, model_path={model_path!r}"
+            )
 
         if sampler_id is not None:
             return self._register_sampler(binding)
