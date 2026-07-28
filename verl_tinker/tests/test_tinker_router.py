@@ -22,7 +22,7 @@ import pytest
 from fastapi import HTTPException
 from omegaconf import OmegaConf
 from verl_tinker.config_utils import _validate_config
-from verl_tinker.state_tracker import ModelStateTracker
+from verl_tinker.model_resource_manager import ModelResourceManager
 from verl_tinker.tinker_router import (
     TINKER_COOKBOOK_COMPAT_LORA_RANK,
     FifoReadWriteGate,
@@ -51,8 +51,8 @@ def _init_future_tracking(server):
     server._retrieved_request_status_archive = {}
 
 
-def _init_state_tracker(server, actor_model="actor", actor_identifiers=None, teacher_models=()):
-    server._state_tracker = ModelStateTracker(
+def _init_model_resource_manager(server, actor_model="actor", actor_identifiers=None, teacher_models=()):
+    server._model_resource_manager = ModelResourceManager(
         actor_model_identifiers=actor_identifiers or (actor_model,),
         teacher_models=teacher_models,
     )
@@ -85,7 +85,7 @@ def test_critic_routes_are_not_registered():
 async def test_normal_endpoints_require_fully_initialized_server(status):
     server = object.__new__(_router_class())
     server._status = status
-    _init_state_tracker(server)
+    _init_model_resource_manager(server)
 
     with pytest.raises(HTTPException) as exc_info:
         await server.get_sampler("missing")
@@ -98,8 +98,8 @@ async def test_normal_endpoints_require_fully_initialized_server(status):
 async def test_get_sampler_uses_tracker_without_actor_engine():
     server = object.__new__(_router_class())
     server._status = ServerStatus.INITIALIZED
-    _init_state_tracker(server)
-    server._state_tracker.register_actor_sampler("actor", base_model="actor", actor_id=0)
+    _init_model_resource_manager(server)
+    server._model_resource_manager.register_actor_sampler("actor", base_model="actor", actor_id=0)
 
     assert await server.get_sampler("actor") == {
         "sampler_id": "actor",
@@ -112,7 +112,7 @@ async def test_get_sampler_uses_tracker_without_actor_engine():
 async def test_create_session_allocates_distinct_sdk_namespaces():
     server = object.__new__(_router_class())
     server._status = ServerStatus.INITIALIZED
-    _init_state_tracker(server)
+    _init_model_resource_manager(server)
 
     first = await server.create_session()
     second = await server.create_session()
@@ -129,8 +129,8 @@ async def test_create_model_links_logical_model_to_originating_session():
     server._model_to_base_model = {}
     server._model_metadata = {}
     _init_future_tracking(server)
-    _init_state_tracker(server)
-    session_id = server._state_tracker.create_session()
+    _init_model_resource_manager(server)
+    session_id = server._model_resource_manager.create_session()
 
     response = await server.create_model(
         SimpleNamespace(
@@ -143,7 +143,7 @@ async def test_create_model_links_logical_model_to_originating_session():
 
     model_id = response["model_id"]
     assert model_id == f"{session_id}:train:0"
-    assert server._state_tracker.session_id_for_model(model_id) == session_id
+    assert server._model_resource_manager.session_id_for_model(model_id) == session_id
     assert (await server.get_session(session_id))["training_run_ids"] == [model_id]
 
 
@@ -151,14 +151,14 @@ async def test_create_model_links_logical_model_to_originating_session():
 async def test_get_session_returns_only_currently_valid_samplers():
     server = object.__new__(_router_class())
     server._status = ServerStatus.INITIALIZED
-    _init_state_tracker(server)
-    session_id = server._state_tracker.create_session()
-    stale_sampler_id = server._state_tracker.sampler_id(session_id, 0)
-    current_sampler_id = server._state_tracker.sampler_id(session_id, 1)
-    server._state_tracker.register_actor_sampler(stale_sampler_id, base_model="actor", actor_id=0)
-    server._state_tracker.actor_updated()
-    server._state_tracker.rollout_synchronized()
-    server._state_tracker.register_actor_sampler(current_sampler_id, base_model="actor", actor_id=1)
+    _init_model_resource_manager(server)
+    session_id = server._model_resource_manager.create_session()
+    stale_sampler_id = server._model_resource_manager.sampler_id(session_id, 0)
+    current_sampler_id = server._model_resource_manager.sampler_id(session_id, 1)
+    server._model_resource_manager.register_actor_sampler(stale_sampler_id, base_model="actor", actor_id=0)
+    server._model_resource_manager.actor_updated()
+    server._model_resource_manager.rollout_synchronized()
+    server._model_resource_manager.register_actor_sampler(current_sampler_id, base_model="actor", actor_id=1)
 
     response = await server.get_session(session_id)
 
@@ -235,8 +235,8 @@ async def test_create_sampling_session_routes_exact_teacher_model_to_unique_samp
         resolve=lambda *values: "teacher" if "teacher-model" in values else None,
         get_model_path=lambda key: "teacher-model",
     )
-    _init_state_tracker(server, teacher_models=(("teacher-model", "teacher-model"),))
-    session_id = server._state_tracker.create_session()
+    _init_model_resource_manager(server, teacher_models=(("teacher-model", "teacher-model"),))
+    session_id = server._model_resource_manager.create_session()
 
     response = await server.create_sampling_session(
         SimpleNamespace(
@@ -249,7 +249,7 @@ async def test_create_sampling_session_routes_exact_teacher_model_to_unique_samp
 
     sampler_id = response.sampling_session_id
     assert sampler_id == f"{session_id}:sample:3"
-    binding = server._state_tracker.get_sampler(sampler_id)
+    binding = server._model_resource_manager.get_sampler(sampler_id)
     assert binding.teacher_model_path == "teacher-model"
     assert binding.base_model == "teacher-model"
     assert binding.model_path == "teacher-model"
@@ -268,8 +268,8 @@ async def test_create_sampling_session_does_not_use_teacher_alias_when_model_pat
         resolve=lambda *values: next((aliases[value] for value in values if value in aliases), None),
         get_model_path=lambda key: "/models/teacher",
     )
-    _init_state_tracker(server, teacher_models=(("teacher-name", "/models/teacher"),))
-    session_id = server._state_tracker.create_session()
+    _init_model_resource_manager(server, teacher_models=(("teacher-name", "/models/teacher"),))
+    session_id = server._model_resource_manager.create_session()
 
     with pytest.raises(HTTPException) as exc_info:
         await server.create_sampling_session(
@@ -310,8 +310,8 @@ async def test_asample_routes_teacher_sampler_to_teacher_client():
     server._teacher_backend = SimpleNamespace(
         get_client=lambda key: teacher_client,
     )
-    _init_state_tracker(server)
-    server._state_tracker.register_teacher_sampler(
+    _init_model_resource_manager(server)
+    server._model_resource_manager.register_teacher_sampler(
         "teacher-sampler",
         teacher_model_path="teacher-model",
         base_model="teacher-model",
@@ -341,9 +341,9 @@ async def test_asample_falls_back_to_actor_for_scalar_prompt_logprobs(monkeypatc
     server._teacher_backend = None
     server._op_gate = FifoReadWriteGate()
     _init_future_tracking(server)
-    _init_state_tracker(server)
-    server._state_tracker.configure_resources(rollout_enabled=False, reference_enabled=False)
-    server._state_tracker.register_actor_sampler("training", base_model="actor", actor_id=0)
+    _init_model_resource_manager(server)
+    server._model_resource_manager.configure_resources(rollout_enabled=False, reference_enabled=False)
+    server._model_resource_manager.register_actor_sampler("training", base_model="actor", actor_id=0)
     prompt_logprobs = AsyncMock(return_value={"type": "sample", "prompt_logprobs": [None, -0.5]})
     monkeypatch.setitem(server.asample.__globals__, "tinker_sample_prompt_logprobs", prompt_logprobs)
 
@@ -363,11 +363,11 @@ async def test_asample_falls_back_to_reference_for_initial_weights(monkeypatch):
     server._teacher_backend = None
     server._op_gate = FifoReadWriteGate()
     _init_future_tracking(server)
-    _init_state_tracker(server)
-    server._state_tracker.register_actor_sampler("initial", base_model="actor", actor_id=0)
-    server._state_tracker.actor_updated()
-    server._state_tracker.rollout_synchronized()
-    server._state_tracker.configure_resources(rollout_enabled=True, reference_enabled=True)
+    _init_model_resource_manager(server)
+    server._model_resource_manager.register_actor_sampler("initial", base_model="actor", actor_id=0)
+    server._model_resource_manager.actor_updated()
+    server._model_resource_manager.rollout_synchronized()
+    server._model_resource_manager.configure_resources(rollout_enabled=True, reference_enabled=True)
     prompt_logprobs = AsyncMock(return_value={"type": "sample", "prompt_logprobs": [None, -0.7]})
     monkeypatch.setitem(server.asample.__globals__, "tinker_sample_prompt_logprobs", prompt_logprobs)
 
@@ -394,11 +394,11 @@ async def test_asample_rejects_generation_and_topk_when_only_reference_matches(
     server._teacher_backend = None
     server._op_gate = FifoReadWriteGate()
     _init_future_tracking(server)
-    _init_state_tracker(server)
-    server._state_tracker.register_actor_sampler("initial", base_model="actor", actor_id=0)
-    server._state_tracker.actor_updated()
-    server._state_tracker.rollout_synchronized()
-    server._state_tracker.configure_resources(rollout_enabled=True, reference_enabled=True)
+    _init_model_resource_manager(server)
+    server._model_resource_manager.register_actor_sampler("initial", base_model="actor", actor_id=0)
+    server._model_resource_manager.actor_updated()
+    server._model_resource_manager.rollout_synchronized()
+    server._model_resource_manager.configure_resources(rollout_enabled=True, reference_enabled=True)
 
     response = await server.asample(
         _sample_request(
@@ -420,7 +420,7 @@ async def test_asample_rejects_unknown_non_actor_sampler():
     server._shutdown_started = False
     server._status = ServerStatus.INITIALIZED
     server._teacher_backend = None
-    _init_state_tracker(server)
+    _init_model_resource_manager(server)
 
     with pytest.raises(HTTPException) as exc_info:
         await server.asample(SimpleNamespace(sampling_session_id="unknown"))
@@ -437,7 +437,7 @@ async def test_asample_without_session_resolves_direct_actor(monkeypatch):
     server._teacher_backend = None
     server._op_gate = FifoReadWriteGate()
     _init_future_tracking(server)
-    _init_state_tracker(server)
+    _init_model_resource_manager(server)
     sample = AsyncMock(return_value={"type": "sample", "sequences": []})
     monkeypatch.setitem(server.asample.__globals__, "tinker_sample", sample)
 
@@ -460,7 +460,7 @@ async def test_asample_without_session_rejects_unknown_direct_model():
     server._shutdown_started = False
     server._status = ServerStatus.INITIALIZED
     server._teacher_backend = None
-    _init_state_tracker(server)
+    _init_model_resource_manager(server)
 
     with pytest.raises(HTTPException) as exc_info:
         await server.asample(
@@ -483,14 +483,14 @@ async def test_asample_rejects_actor_sampler_after_rollout_diverges():
     server._teacher_backend = None
     server._op_gate = FifoReadWriteGate()
     _init_future_tracking(server)
-    _init_state_tracker(server)
-    server._state_tracker.register_actor_sampler(
+    _init_model_resource_manager(server)
+    server._model_resource_manager.register_actor_sampler(
         "actor-sampler",
         base_model="actor",
         actor_id=0,
     )
-    server._state_tracker.actor_updated()
-    server._state_tracker.rollout_synchronized()
+    server._model_resource_manager.actor_updated()
+    server._model_resource_manager.rollout_synchronized()
 
     response = await server.asample(SimpleNamespace(sampling_session_id="actor-sampler"))
     await asyncio.gather(*server._pending.values())
@@ -507,8 +507,8 @@ async def test_named_sampler_save_binds_path_to_current_rollout(monkeypatch):
     server._shutdown_started = False
     server._status = ServerStatus.INITIALIZED
     server._engine = MagicMock()
-    _init_state_tracker(server)
-    server._state_tracker.actor_updated()
+    _init_model_resource_manager(server)
+    server._model_resource_manager.actor_updated()
     saved_path = "tinker://verl-tinker/weights/saved"
     update_weights = AsyncMock(
         return_value={
@@ -524,7 +524,7 @@ async def test_named_sampler_save_binds_path_to_current_rollout(monkeypatch):
     )
 
     result = await server._run_save_weights_for_sampler(SimpleNamespace(path="saved", sampling_session_seq_id=None))
-    session_id = server._state_tracker.create_session()
+    session_id = server._model_resource_manager.create_session()
     response = await server.create_sampling_session(
         SimpleNamespace(
             session_id=session_id,
@@ -535,8 +535,8 @@ async def test_named_sampler_save_binds_path_to_current_rollout(monkeypatch):
     )
 
     assert result["path"] == saved_path
-    assert server._state_tracker.rollout_id == 1
-    binding = server._state_tracker.get_sampler(response.sampling_session_id)
+    assert server._model_resource_manager.rollout_id == 1
+    binding = server._model_resource_manager.get_sampler(response.sampling_session_id)
     assert binding.model_path == saved_path
     assert binding.actor_id == 1
 
@@ -547,12 +547,12 @@ async def test_create_sampling_session_accepts_actor_name_or_load_path():
     server._shutdown_started = False
     server._status = ServerStatus.INITIALIZED
     server._teacher_backend = None
-    _init_state_tracker(
+    _init_model_resource_manager(
         server,
         actor_model="client-name",
         actor_identifiers=("client-name", "/models/actor"),
     )
-    session_id = server._state_tracker.create_session()
+    session_id = server._model_resource_manager.create_session()
 
     for sequence_id, base_model in enumerate(("client-name", "/models/actor")):
         response = await server.create_sampling_session(
@@ -563,7 +563,7 @@ async def test_create_sampling_session_accepts_actor_name_or_load_path():
                 model_path=None,
             )
         )
-        binding = server._state_tracker.get_sampler(response.sampling_session_id)
+        binding = server._model_resource_manager.get_sampler(response.sampling_session_id)
         assert binding.base_model == "client-name"
 
 
@@ -573,7 +573,7 @@ async def test_unnamed_sampler_saves_return_distinct_sampler_ids(monkeypatch):
     server._shutdown_started = False
     server._status = ServerStatus.INITIALIZED
     server._engine = MagicMock()
-    _init_state_tracker(server)
+    _init_model_resource_manager(server)
     update_weights = AsyncMock(
         side_effect=[
             {"type": "save_weights_for_sampler", "path": None, "sampling_session_id": "legacy"},
@@ -585,8 +585,8 @@ async def test_unnamed_sampler_saves_return_distinct_sampler_ids(monkeypatch):
         "tinker_save_weights_for_sampler",
         update_weights,
     )
-    session_id = server._state_tracker.create_session()
-    model_id = server._state_tracker.register_model(session_id, 0)
+    session_id = server._model_resource_manager.create_session()
+    model_id = server._model_resource_manager.register_model(session_id, 0)
 
     first = await server._run_save_weights_for_sampler(
         SimpleNamespace(model_id=model_id, path=None, sampling_session_seq_id=2)
@@ -598,19 +598,19 @@ async def test_unnamed_sampler_saves_return_distinct_sampler_ids(monkeypatch):
     assert first["sampling_session_id"] == f"{session_id}:sample:2"
     assert second["sampling_session_id"] == f"{session_id}:sample:3"
     assert first["sampling_session_id"] != second["sampling_session_id"]
-    assert server._state_tracker.get_sampler(first["sampling_session_id"]).actor_id == 0
+    assert server._model_resource_manager.get_sampler(first["sampling_session_id"]).actor_id == 0
 
 
 @pytest.mark.asyncio
 async def test_load_skips_engine_when_checkpoint_actor_is_already_loaded(tmp_path, monkeypatch):
     server = object.__new__(_router_class())
-    _init_state_tracker(server)
+    _init_model_resource_manager(server)
     uri = "tinker://verl-tinker/state/already-loaded"
     local_dir = tmp_path / "already-loaded"
     local_dir.mkdir()
     server._checkpoint_root = str(tmp_path)
     server._saved_state_paths = {uri: str(local_dir)}
-    server._state_tracker.state_saved(uri)
+    server._model_resource_manager.state_saved(uri)
     engine_load = AsyncMock()
     monkeypatch.setitem(server._run_load_state.__globals__, "load_state", engine_load)
 
@@ -626,7 +626,7 @@ async def test_load_failure_marks_actor_unknown_without_shutting_down(tmp_path, 
     server._shutdown_started = False
     server._status = ServerStatus.INITIALIZED
     server._engine = MagicMock()
-    _init_state_tracker(server)
+    _init_model_resource_manager(server)
     uri = "tinker://verl-tinker/state/broken"
     local_dir = tmp_path / "broken"
     local_dir.mkdir()
@@ -641,8 +641,8 @@ async def test_load_failure_marks_actor_unknown_without_shutting_down(tmp_path, 
     with pytest.raises(RuntimeError, match="load exploded"):
         await server._run_load_state({"path": uri, "optimizer": True})
 
-    assert server._state_tracker.actor_id == 1
-    assert server._state_tracker.rollout_id == 0
+    assert server._model_resource_manager.actor_id == 1
+    assert server._model_resource_manager.rollout_id == 0
     assert server._status is ServerStatus.INITIALIZED
     assert server._shutdown_started is False
 
@@ -653,9 +653,9 @@ async def test_rollout_sync_failure_marks_rollout_unknown_without_shutting_down(
     server._shutdown_started = False
     server._status = ServerStatus.INITIALIZED
     server._engine = MagicMock()
-    _init_state_tracker(server)
-    session_id = server._state_tracker.create_session()
-    model_id = server._state_tracker.register_model(session_id, 0)
+    _init_model_resource_manager(server)
+    session_id = server._model_resource_manager.create_session()
+    model_id = server._model_resource_manager.register_model(session_id, 0)
     monkeypatch.setitem(
         server._run_save_weights_for_sampler.__globals__,
         "tinker_save_weights_for_sampler",
@@ -667,7 +667,7 @@ async def test_rollout_sync_failure_marks_rollout_unknown_without_shutting_down(
             SimpleNamespace(model_id=model_id, path=None, sampling_session_seq_id=9)
         )
 
-    assert server._state_tracker.rollout_id is None
+    assert server._model_resource_manager.rollout_id is None
     assert server._status is ServerStatus.INITIALIZED
     assert server._shutdown_started is False
 

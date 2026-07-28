@@ -3,18 +3,18 @@
 # Licensed under the Apache License, Version 2.0 (the "License");
 
 import pytest
-from verl_tinker.state_tracker import (
-    ModelStateTracker,
+from verl_tinker.model_resource_manager import (
+    ModelResourceManager,
     SamplingResource,
     StaleSamplerError,
-    StateTrackerError,
+    ModelResourceManagerError,
     UnknownSamplerError,
     UnknownSamplerPathError,
 )
 
 
-def _tracker() -> ModelStateTracker:
-    return ModelStateTracker(actor_model_identifiers=("actor", "/models/actor"))
+def _tracker() -> ModelResourceManager:
+    return ModelResourceManager(actor_model_identifiers=("actor", "/models/actor"))
 
 
 def test_initial_actor_and_rollout_are_version_zero():
@@ -48,11 +48,11 @@ def test_sessions_models_and_samplers_have_distinct_retry_stable_ids():
 def test_unknown_session_and_model_are_rejected():
     tracker = _tracker()
 
-    with pytest.raises(StateTrackerError, match="Unknown Tinker session"):
+    with pytest.raises(ModelResourceManagerError, match="Unknown Tinker session"):
         tracker.register_model("missing", 0)
-    with pytest.raises(StateTrackerError, match="Unknown Tinker session"):
+    with pytest.raises(ModelResourceManagerError, match="Unknown Tinker session"):
         tracker.sampler_id("missing", 0)
-    with pytest.raises(StateTrackerError, match="Unknown training model"):
+    with pytest.raises(ModelResourceManagerError, match="Unknown training model"):
         tracker.session_id_for_model("missing")
 
 
@@ -123,7 +123,7 @@ def test_sampler_registration_is_idempotent_but_cannot_retarget():
     second = tracker.register_actor_sampler("same", base_model="actor", actor_id=0)
 
     assert first == second
-    with pytest.raises(StateTrackerError, match="reused for a different target"):
+    with pytest.raises(ModelResourceManagerError, match="reused for a different target"):
         tracker.register_actor_sampler("same", base_model="actor", actor_id=1)
 
 
@@ -138,7 +138,7 @@ def test_failed_rollout_sync_makes_all_actor_samplers_stale():
 
 
 def test_sampler_target_resolution_prefers_teacher_then_actor_aliases():
-    tracker = ModelStateTracker(
+    tracker = ModelResourceManager(
         actor_model_identifiers=("shared", "/models/actor"),
         teacher_models=(("shared", "/models/teacher"), ("/models/teacher", "/models/teacher")),
     )
@@ -153,8 +153,8 @@ def test_sampler_target_resolution_prefers_teacher_then_actor_aliases():
 
 
 def test_duplicate_teacher_alias_for_different_paths_is_rejected():
-    with pytest.raises(StateTrackerError, match="ambiguous"):
-        ModelStateTracker(
+    with pytest.raises(ModelResourceManagerError, match="ambiguous"):
+        ModelResourceManager(
             actor_model_identifiers=("actor",),
             teacher_models=(("teacher", "/models/one"), ("teacher", "/models/two")),
         )
@@ -265,7 +265,7 @@ def test_no_rollout_server_uses_actor_for_logprobs_only():
 
 
 def test_teacher_model_path_takes_precedence_over_actor_base_model():
-    tracker = ModelStateTracker(
+    tracker = ModelResourceManager(
         actor_model_identifiers=("shared", "/models/actor"),
         teacher_models=(("/models/teacher", "/models/teacher"),),
     )

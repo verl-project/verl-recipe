@@ -44,14 +44,14 @@ from tinker.types import (
 
 from .backends.colocated import ColocatedBackend
 from .backends.teacher import TeacherInferenceBackend
-from .schemas import StatusResponse
-from .state_tracker import (
-    ModelStateTracker,
+from .model_resource_manager import (
+    ModelResourceManager,
+    ModelResourceManagerError,
     SamplingResource,
     StaleSamplerError,
-    StateTrackerError,
     UnknownSamplerError,
 )
+from .schemas import StatusResponse
 from .tinker_ops import (
     forward as tinker_forward,
 )
@@ -232,7 +232,7 @@ class TinkerServer:
 
         actor_base_model = str(config["server"]["model_name"])
         actor_model_path = str(config["actor_rollout_ref"]["model"]["path"])
-        self._state_tracker = ModelStateTracker(
+        self._model_resource_manager = ModelResourceManager(
             actor_model_identifiers=(actor_base_model, actor_model_path),
         )
 
@@ -317,9 +317,9 @@ class TinkerServer:
         except BaseException:
             # An optimizer failure may have partially changed weights. Give that
             # state a fresh identity so it can never compare equal to rollout.
-            self._state_tracker.actor_updated()
+            self._model_resource_manager.actor_updated()
             raise
-        self._state_tracker.actor_updated()
+        self._model_resource_manager.actor_updated()
         return result
 
     async def _run_save_state(self, req: dict) -> dict:
@@ -332,7 +332,7 @@ class TinkerServer:
             self._step_counter,
             req.get("path"),
         )
-        self._state_tracker.state_saved(result["path"])
+        self._model_resource_manager.state_saved(result["path"])
         return result
 
     def _resolve_load_path(self, uri: str) -> str:
@@ -346,11 +346,11 @@ class TinkerServer:
     async def _run_load_state(self, req: dict) -> dict:
         uri = req.get("path", "")
         self._resolve_load_path(uri)
-        if self._state_tracker.should_skip_state_load(uri):
+        if self._model_resource_manager.should_skip_state_load(uri):
             logger.info(
-                "[state_tracker] skipping load path=%s actor_id=%s reason=already_loaded",
+                "[model_resource_manager] skipping load path=%s actor_id=%s reason=already_loaded",
                 uri,
-                self._state_tracker.actor_id,
+                self._model_resource_manager.actor_id,
             )
             return {"type": "load_weights", "path": uri}
 
@@ -363,10 +363,10 @@ class TinkerServer:
                 load_optimizer=req.get("optimizer", True),
             )
         except BaseException:
-            self._state_tracker.state_load_failed()
+            self._model_resource_manager.state_load_failed()
             raise
 
-        self._state_tracker.state_loaded(uri)
+        self._model_resource_manager.state_loaded(uri)
         return result
 
     async def _run_save_weights_for_sampler(self, req: SaveWeightsForSamplerRequest) -> dict:
@@ -378,24 +378,24 @@ class TinkerServer:
                 "Unnamed save_weights_for_sampler requires sampling_session_seq_id",
             )
         if not named:
-            session_id = self._state_tracker.session_id_for_model(str(req.model_id))
+            session_id = self._model_resource_manager.session_id_for_model(str(req.model_id))
 
         try:
             result = await tinker_save_weights_for_sampler(self._get_engine(), named=named)
         except BaseException:
-            self._state_tracker.rollout_synchronization_failed()
+            self._model_resource_manager.rollout_synchronization_failed()
             raise
 
-        rollout_id = self._state_tracker.rollout_synchronized()
+        rollout_id = self._model_resource_manager.rollout_synchronized()
         if named:
-            self._state_tracker.sampler_path_saved(result["path"])
+            self._model_resource_manager.sampler_path_saved(result["path"])
             return result
 
         assert session_id is not None
-        sampler_id = self._state_tracker.sampler_id(session_id, req.sampling_session_seq_id)
-        self._state_tracker.register_actor_sampler(
+        sampler_id = self._model_resource_manager.sampler_id(session_id, req.sampling_session_seq_id)
+        self._model_resource_manager.register_actor_sampler(
             sampler_id,
-            base_model=self._state_tracker.actor_base_model,
+            base_model=self._model_resource_manager.actor_base_model,
             actor_id=rollout_id,
         )
         result["sampling_session_id"] = sampler_id
@@ -404,13 +404,13 @@ class TinkerServer:
     def _init_engine(self):
         try:
             self._engine = ColocatedBackend(self.config)
-            self._state_tracker.configure_resources(
+            self._model_resource_manager.configure_resources(
                 rollout_enabled=not self._engine.no_rollout_deployment,
                 reference_enabled=self._engine.capabilities.use_reference_policy,
             )
             if TeacherInferenceBackend.is_enabled(self.config):
                 self._teacher_backend = TeacherInferenceBackend(self.config)
-                self._state_tracker.configure_teacher_models(self._teacher_backend.sampling_targets)
+                self._model_resource_manager.configure_teacher_models(self._teacher_backend.sampling_targets)
             if self._shutdown_started:
                 logger.info("Tinker server initialization complete after shutdown was requested")
             else:
@@ -592,7 +592,7 @@ class TinkerServer:
         self._require_ready()
         return {
             "type": "create_session",
-            "session_id": self._state_tracker.create_session(),
+            "session_id": self._model_resource_manager.create_session(),
             "info_message": None,
             "warning_message": None,
             "error_message": None,
@@ -603,23 +603,23 @@ class TinkerServer:
         self._require_ready()
         try:
             return {
-                "training_run_ids": self._state_tracker.model_ids_for_session(session_id),
-                "sampler_ids": self._state_tracker.valid_sampler_ids_for_session(session_id),
+                "training_run_ids": self._model_resource_manager.model_ids_for_session(session_id),
+                "sampler_ids": self._model_resource_manager.valid_sampler_ids_for_session(session_id),
             }
-        except StateTrackerError as exc:
+        except ModelResourceManagerError as exc:
             raise HTTPException(HTTPStatus.NOT_FOUND, str(exc)) from exc
 
     @app.post("/api/v1/sessions")
     async def list_sessions(self):
         self._require_ready()
-        return {"sessions": self._state_tracker.session_ids()}
+        return {"sessions": self._model_resource_manager.session_ids()}
 
     @app.post("/api/v1/create_model")
     async def create_model(self, req: CreateModelRequest):
         self._require_ready()
         try:
-            model_id = self._state_tracker.register_model(req.session_id, req.model_seq_id)
-        except StateTrackerError as exc:
+            model_id = self._model_resource_manager.register_model(req.session_id, req.model_seq_id)
+        except ModelResourceManagerError as exc:
             raise HTTPException(HTTPStatus.BAD_REQUEST, str(exc)) from exc
         if req.base_model:
             self._model_to_base_model[model_id] = req.base_model
@@ -631,13 +631,13 @@ class TinkerServer:
     async def create_sampling_session(self, req: CreateSamplingSessionRequest):
         self._require_ready()
         try:
-            sampler_id = self._state_tracker.sampler_id(req.session_id, req.sampling_session_seq_id)
-            self._state_tracker.resolve_sampler_target(
+            sampler_id = self._model_resource_manager.sampler_id(req.session_id, req.sampling_session_seq_id)
+            self._model_resource_manager.resolve_sampler_target(
                 sampler_id=sampler_id,
                 base_model=req.base_model,
                 model_path=req.model_path,
             )
-        except StateTrackerError as exc:
+        except ModelResourceManagerError as exc:
             raise HTTPException(HTTPStatus.BAD_REQUEST, str(exc)) from exc
         return CreateSamplingSessionResponse(
             type="create_sampling_session",
@@ -648,7 +648,7 @@ class TinkerServer:
     async def get_sampler(self, sampler_id: str):
         self._require_ready()
         try:
-            binding = self._state_tracker.get_sampler(sampler_id)
+            binding = self._model_resource_manager.get_sampler(sampler_id)
         except UnknownSamplerError as exc:
             raise HTTPException(HTTPStatus.NOT_FOUND, str(exc)) from exc
         return {
@@ -733,14 +733,14 @@ class TinkerServer:
     async def asample(self, req: SampleRequest):
         self._require_ready()
         try:
-            binding = self._state_tracker.resolve_sampling_request(
+            binding = self._model_resource_manager.resolve_sampling_request(
                 sampling_session_id=req.sampling_session_id,
                 base_model=getattr(req, "base_model", None),
                 model_path=getattr(req, "model_path", None),
             )
         except UnknownSamplerError as exc:
             raise HTTPException(HTTPStatus.NOT_FOUND, str(exc)) from exc
-        except StateTrackerError as exc:
+        except ModelResourceManagerError as exc:
             raise HTTPException(HTTPStatus.BAD_REQUEST, str(exc)) from exc
 
         scalar_prompt_logprobs = (
@@ -752,7 +752,7 @@ class TinkerServer:
 
         async def _sample_with_late_binding():
             try:
-                resource = self._state_tracker.resolve_resource(
+                resource = self._model_resource_manager.resolve_resource(
                     binding,
                     scalar_prompt_logprobs=scalar_prompt_logprobs,
                 )

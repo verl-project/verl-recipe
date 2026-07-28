@@ -67,19 +67,19 @@ from dataclasses import dataclass
 from enum import Enum
 
 
-class StateTrackerError(ValueError):
-    """Base class for invalid or unavailable tracked state."""
+class ModelResourceManagerError(ValueError):
+    """Base class for invalid identities, bindings, or resource availability."""
 
 
-class UnknownSamplerError(StateTrackerError):
+class UnknownSamplerError(ModelResourceManagerError):
     """Raised when a sampling session is not registered."""
 
 
-class UnknownSamplerPathError(StateTrackerError):
+class UnknownSamplerPathError(ModelResourceManagerError):
     """Raised when a sampler checkpoint path is not registered."""
 
 
-class StaleSamplerError(StateTrackerError):
+class StaleSamplerError(ModelResourceManagerError):
     """Raised when no configured resource contains the requested weights."""
 
 
@@ -107,11 +107,11 @@ class SamplerBinding:
         return self.teacher_model_path is not None
 
 
-class ModelStateTracker:
+class ModelResourceManager:
     """Tracks which actor weights are resident in the single mutable rollout.
 
     IDs describe weight identity only. Optimizer and gradient state are deliberately
-    outside this tracker; callers may therefore choose to skip a state load whenever
+    outside this manager; callers may therefore choose to skip a state load whenever
     the saved actor ID already matches the current actor ID.
     """
 
@@ -123,7 +123,7 @@ class ModelStateTracker:
     ):
         actor_identifiers = tuple(dict.fromkeys(str(value) for value in actor_model_identifiers if value))
         if not actor_identifiers:
-            raise StateTrackerError("At least one actor model identifier is required")
+            raise ModelResourceManagerError("At least one actor model identifier is required")
         self.actor_base_model = actor_identifiers[0]
         self.actor_model_identifiers = frozenset(actor_identifiers)
         self._teacher_model_paths: dict[str, str] = {}
@@ -155,7 +155,7 @@ class ModelStateTracker:
 
     def _require_session(self, session_id: str) -> None:
         if session_id not in self._session_model_ids:
-            raise StateTrackerError(f"Unknown Tinker session: {session_id!r}")
+            raise ModelResourceManagerError(f"Unknown Tinker session: {session_id!r}")
 
     def register_model(self, session_id: str, model_seq_id: int) -> str:
         """Register a retry-stable logical training model within a session."""
@@ -163,7 +163,7 @@ class ModelStateTracker:
         model_id = f"{session_id}:train:{int(model_seq_id)}"
         previous_session_id = self._model_to_session_id.get(model_id)
         if previous_session_id is not None and previous_session_id != session_id:
-            raise StateTrackerError(f"Model ID {model_id!r} was reused by a different session")
+            raise ModelResourceManagerError(f"Model ID {model_id!r} was reused by a different session")
         self._model_to_session_id[model_id] = session_id
         self._session_model_ids[session_id][model_id] = None
         return model_id
@@ -172,7 +172,7 @@ class ModelStateTracker:
         try:
             return self._model_to_session_id[model_id]
         except KeyError as exc:
-            raise StateTrackerError(f"Unknown training model: {model_id!r}") from exc
+            raise ModelResourceManagerError(f"Unknown training model: {model_id!r}") from exc
 
     def model_ids_for_session(self, session_id: str) -> list[str]:
         self._require_session(session_id)
@@ -192,7 +192,7 @@ class ModelStateTracker:
             model_path = str(model_path)
             previous = self._teacher_model_paths.get(identifier)
             if previous is not None and previous != model_path:
-                raise StateTrackerError(
+                raise ModelResourceManagerError(
                     f"Teacher identifier {identifier!r} is ambiguous between {previous!r} and {model_path!r}"
                 )
             self._teacher_model_paths[identifier] = model_path
@@ -216,7 +216,7 @@ class ModelStateTracker:
 
     def rollout_synchronized(self) -> int:
         if not self._rollout_enabled:
-            raise StateTrackerError("Cannot synchronize rollout weights when rollout is disabled")
+            raise ModelResourceManagerError("Cannot synchronize rollout weights when rollout is disabled")
         self.rollout_id = self.actor_id
         return self.rollout_id
 
@@ -248,7 +248,7 @@ class ModelStateTracker:
 
     def sampler_path_saved(self, path: str) -> int:
         if self.rollout_id is None:
-            raise StateTrackerError("Cannot register sampler path while rollout state is unknown")
+            raise ModelResourceManagerError("Cannot register sampler path while rollout state is unknown")
         self._sampler_path_to_actor_id[path] = self.rollout_id
         return self.rollout_id
 
@@ -308,9 +308,9 @@ class ModelStateTracker:
             )
         elif model_path is not None:
             if self.is_state_path(model_path):
-                raise StateTrackerError(f"Training-state checkpoint cannot be sampled: {model_path}")
+                raise ModelResourceManagerError(f"Training-state checkpoint cannot be sampled: {model_path}")
             if base_model is not None and base_model not in self.actor_model_identifiers:
-                raise StateTrackerError(
+                raise ModelResourceManagerError(
                     f"Sampler checkpoint base_model must be one of "
                     f"{sorted(self.actor_model_identifiers)!r}, got {base_model!r}"
                 )
@@ -328,7 +328,7 @@ class ModelStateTracker:
                 actor_id=0,
             )
         else:
-            raise StateTrackerError(f"Unknown sampling model: base_model={base_model!r}, model_path={model_path!r}")
+            raise ModelResourceManagerError(f"Unknown sampling model: base_model={base_model!r}, model_path={model_path!r}")
 
         if sampler_id is not None:
             return self._register_sampler(binding)
@@ -348,10 +348,10 @@ class ModelStateTracker:
 
     def _register_sampler(self, binding: SamplerBinding) -> SamplerBinding:
         if binding.sampler_id is None:
-            raise StateTrackerError("Cannot register a sampler without a sampler ID")
+            raise ModelResourceManagerError("Cannot register a sampler without a sampler ID")
         previous = self._samplers.get(binding.sampler_id)
         if previous is not None and previous != binding:
-            raise StateTrackerError(f"Sampler ID {binding.sampler_id!r} was reused for a different target")
+            raise ModelResourceManagerError(f"Sampler ID {binding.sampler_id!r} was reused for a different target")
         self._samplers[binding.sampler_id] = binding
         return binding
 
@@ -367,7 +367,7 @@ class ModelStateTracker:
             return SamplingResource.TEACHER
 
         if binding.actor_id is None:
-            raise StateTrackerError(f"Training sampling session {binding.sampler_id!r} has no actor ID")
+            raise ModelResourceManagerError(f"Training sampling session {binding.sampler_id!r} has no actor ID")
         if self._rollout_enabled and self.rollout_id == binding.actor_id:
             return SamplingResource.ROLLOUT
         if scalar_prompt_logprobs and self.actor_id == binding.actor_id:
