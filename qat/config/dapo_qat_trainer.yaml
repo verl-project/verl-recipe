@@ -3,6 +3,7 @@
 #
 # QAT Modes:
 #   - w4a16: Weight-only 4-bit quantization (NVFP4)
+#   - w4a8:  Weight 4-bit + activation FP8 simulation (FSDP; dense and standard vLLM Marlin MoE)
 #   - w4a4:  Weight + Activation 4-bit quantization (NVFP4)
 #
 # Usage:
@@ -53,7 +54,7 @@ actor_rollout_ref:
       qat:
         # Enable QAT
         enable: true
-        # Quantization mode: "w4a16" (weight-only) or "w4a4" (weight + activation)
+        # Quantization mode: "w4a16" (weight-only), "w4a8" (FSDP dense/standard Marlin MoE), or "w4a4"
         mode: "w4a16"
         # Quantization group size (NVFP4 requires 16)
         group_size: 16
@@ -66,5 +67,6 @@ actor_rollout_ref:
         activation_observer: "static_minmax"
         # vLLM quantization config JSON path (relative to project root)
         # W4A16: recipe/qat/config/nvfp4_w4a16.json
+        # W4A8 simulation: recipe/qat/config/nvfp4_w4a16.json (intentional weight-format reuse)
         # W4A4:  recipe/qat/config/nvfp4_w4a4.json
         quantization_config_path: recipe/qat/config/nvfp4_w4a16.json  # Specify in run script
