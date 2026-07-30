@@ -1,0 +1,167 @@
+# Copyright 2026 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from types import SimpleNamespace
+
+import pytest
+import torch
+from omegaconf import OmegaConf
+from tensordict import TensorDict
+
+from verl.utils import tensordict_utils as tu
+from verl_tinker.backends._loss import make_branching_loss, normalize_tinker_loss_spec
+from verl_tinker.data.datum_processing import _datums_to_update_actor_td
+
+
+@pytest.mark.parametrize(
+    ("name", "wire_config", "expected"),
+    [
+        ("cross_entropy", None, {"name": "cross_entropy"}),
+        ("importance_sampling", None, {"name": "importance_sampling"}),
+        ("ppo", None, {"name": "ppo", "clip_ratio_low": 0.2, "clip_ratio_high": 0.2}),
+        (
+            "ppo",
+            {"clip_low_threshold": 0.9, "clip_high_threshold": 1.1},
+            {"name": "ppo", "clip_ratio_low": 0.1, "clip_ratio_high": 0.1},
+        ),
+        ("cispo", None, {"name": "cispo", "clip_ratio_low": 1.0, "clip_ratio_high": 3.0}),
+        ("dro", {"beta": 0.05}, {"name": "dro", "dro_beta": 0.05}),
+    ],
+)
+def test_normalize_tinker_loss_spec(name, wire_config, expected):
+    actual = normalize_tinker_loss_spec(name, wire_config)
+    assert actual["name"] == expected["name"]
+    for key, value in expected.items():
+        if key != "name":
+            assert actual[key] == pytest.approx(value)
+
+
+@pytest.mark.parametrize(
+    ("name", "config", "match"),
+    [
+        ("unknown", None, "Unsupported Tinker loss"),
+        ("importance_sampling", {"beta": 0.1}, "does not accept"),
+        ("ppo", {"clip_low_threshold": 1.1}, "requires 0 <="),
+        ("cispo", {"clip_high_threshold": 0.9}, "requires 0 <="),
+        ("dro", None, "requires a positive"),
+        ("dro", {"beta": 0.0}, "requires a positive"),
+    ],
+)
+def test_normalize_tinker_loss_spec_rejects_invalid_requests(name, config, match):
+    with pytest.raises(ValueError, match=match):
+        normalize_tinker_loss_spec(name, config)
+
+
+def _branching_config():
+    return OmegaConf.create(
+        {
+            "actor_rollout_ref": {
+                "actor": {
+                    "_target_": "verl.workers.config.actor.FSDPActorConfig",
+                    "strategy": "fsdp",
+                    "rollout_n": 1,
+                    "ppo_micro_batch_size_per_gpu": 1,
+                    "loss_agg_mode": "token-mean",
+                    "entropy_coeff": 0.25,
+                    "use_kl_loss": True,
+                    "policy_loss": {
+                        "_target_": "verl.workers.config.actor.PolicyLossConfig",
+                        "loss_mode": "vanilla",
+                    },
+                }
+            }
+        }
+    )
+
+
+def test_branching_loss_uses_isolated_request_configs(monkeypatch):
+    captured = []
+
+    def fake_ppo_loss(*, config, model_output, data, dp_group=None):
+        captured.append(config)
+        return torch.tensor(2.0), {}
+
+    monkeypatch.setattr("verl_tinker.backends._loss.ppo_loss", fake_ppo_loss)
+    startup = _branching_config()
+    loss_fn = make_branching_loss(startup)
+
+    for spec in (
+        normalize_tinker_loss_spec("ppo", {"clip_low_threshold": 0.9, "clip_high_threshold": 1.1}),
+        normalize_tinker_loss_spec("dro", {"beta": 0.05}),
+    ):
+        data = TensorDict({}, batch_size=[])
+        tu.assign_non_tensor_data(data, "__tinker_loss_spec__", spec)
+        loss_fn(model_output={}, data=data)
+
+    assert captured[0] is not captured[1]
+    assert captured[0].policy_loss is not captured[1].policy_loss
+    assert captured[0].global_batch_info is not captured[1].global_batch_info
+    assert captured[0].policy_loss.loss_mode == "vanilla"
+    assert captured[0].clip_ratio_low == pytest.approx(0.1)
+    assert captured[0].clip_ratio_high == pytest.approx(0.1)
+    assert captured[0].clip_ratio_c is None
+    assert captured[1].policy_loss.loss_mode == "dro"
+    assert captured[1].policy_loss.dro_beta == pytest.approx(0.05)
+    assert all(cfg.loss_agg_mode == "token-sum" for cfg in captured)
+    assert all(cfg.entropy_coeff == 0 and not cfg.use_kl_loss for cfg in captured)
+    assert startup.actor_rollout_ref.actor.loss_agg_mode == "token-mean"
+    assert startup.actor_rollout_ref.actor.entropy_coeff == pytest.approx(0.25)
+    assert startup.actor_rollout_ref.actor.use_kl_loss is True
+
+
+def test_cross_entropy_token_sum_preserves_signed_custom_loss_weights():
+    loss_fn = make_branching_loss(_branching_config())
+    data = TensorDict(
+        {
+            "loss_mask": torch.nested.as_nested_tensor(
+                [torch.tensor([0.0, 2.0, -3.0])], layout=torch.jagged
+            ),
+        },
+        batch_size=[1],
+    )
+    tu.assign_non_tensor_data(data, "dp_size", 2)
+    tu.assign_non_tensor_data(data, "batch_num_tokens", -1.0)
+    tu.assign_non_tensor_data(data, "__loss_mode__", "sft")
+    model_output = {
+        "log_probs": torch.nested.as_nested_tensor(
+            [torch.tensor([-1.0, -2.0, -3.0])], layout=torch.jagged
+        )
+    }
+
+    loss, metrics = loss_fn(model_output=model_output, data=data)
+
+    # Rolled weights are [2, -3, 0], so local weighted NLL is
+    # 1*2 + 2*(-3) = -4; dp_size compensates FSDP's mean reduction.
+    assert loss.item() == pytest.approx(-8.0)
+    assert metrics["loss"].aggregate() == pytest.approx(-8.0)
+
+
+def _tensor_data(data, dtype="float32"):
+    return SimpleNamespace(data=data, dtype=dtype, shape=[len(data)])
+
+
+def test_rl_translation_preserves_wire_advantages():
+    datum = SimpleNamespace(
+        model_input=SimpleNamespace(to_ints=lambda: [10, 11, 12]),
+        loss_fn_inputs={
+            "target_tokens": _tensor_data([11, 12, 13], dtype="int64"),
+            "logprobs": _tensor_data([0.0, -0.2, -0.3]),
+            "advantages": _tensor_data([0.0, 0.25, 0.25]),
+            "response_mask": _tensor_data([0.0, 1.0, 1.0]),
+        },
+    )
+
+    td = _datums_to_update_actor_td([datum], mini_batch_size=1)
+
+    torch.testing.assert_close(td["advantages"], torch.tensor([[0.25, 0.25]]))

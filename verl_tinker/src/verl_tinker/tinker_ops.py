@@ -27,6 +27,7 @@ from tinker.types import Datum, ModelInput
 
 from verl.workers.engine_workers_tinker import OptimStepParams
 
+from .backends._loss import normalize_tinker_loss_spec
 from .data.datum_processing import (
     _coerce_verl_metrics_to_floats,
     _datums_to_forward_td,
@@ -186,19 +187,34 @@ async def forward(engine, datums) -> dict:
     }
 
 
-async def forward_backward(engine, datums, loss_fn_name: str) -> dict:
+async def forward_backward(engine, datums, loss_fn_name: str, loss_fn_config: dict[str, float] | None = None) -> dict:
+    try:
+        loss_spec = normalize_tinker_loss_spec(loss_fn_name, loss_fn_config)
+    except ValueError as exc:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     if loss_fn_name == "cross_entropy":
         td = _datums_to_sft_td(datums, mini_batch_size=len(datums), pad_to_multiple=engine.world_size)
     else:
         td = _datums_to_update_actor_td(datums, mini_batch_size=len(datums), pad_to_multiple=engine.world_size)
 
-    result_td = await asyncio.to_thread(engine.forward_backward, td)
     from verl.utils import tensordict_utils as tu
+
+    tu.assign_non_tensor_data(td, "__tinker_loss_spec__", loss_spec)
+
+    result_td = await asyncio.to_thread(engine.forward_backward, td)
 
     raw_metrics = tu.get(result_td, "metrics", {}) if result_td is not None else {}
     metrics = _coerce_verl_metrics_to_floats(raw_metrics or {})
-    if not any(k.startswith("loss:") for k in metrics):
-        metrics["loss:mean"] = 0.0
+    if "loss:sum" not in metrics:
+        for candidate in ("actor/pg_loss:sum", "distillation/loss:sum"):
+            if candidate in metrics:
+                metrics["loss:sum"] = metrics[candidate]
+                break
+    if "loss:sum" not in metrics:
+        raise RuntimeError("VERL forward_backward did not return the required loss:sum metric")
 
     # Tinker computes mean_nll_loss client-side from loss_fn_outputs.logprobs.
     # Prefer the engine's model_output when the VeRL worker returns it. Keep the

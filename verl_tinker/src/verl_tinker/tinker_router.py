@@ -696,6 +696,7 @@ class TinkerServer:
                 self._get_engine(),
                 req.forward_backward_input.data,
                 req.forward_backward_input.loss_fn,
+                req.forward_backward_input.loss_fn_config,
             ),
         )
         return self._future_envelope(request_id, model_id=req.model_id)

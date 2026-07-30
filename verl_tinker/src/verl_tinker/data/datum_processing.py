@@ -30,6 +30,13 @@ def _coerce_one_metric_value(v) -> Optional[float]:
       - Python int / float                  → ``float(v)``
       - ``None`` / non-numeric strings      → ``None``
     """
+    # Aggregate VERL Metric objects before unwrapping generic wrappers.
+    if hasattr(v, "aggregate") and callable(v.aggregate):
+        try:
+            return float(v.aggregate())
+        except Exception:
+            return None
+
     # Unwrap Metric / NonTensorData wrappers (use ``.value`` / ``.data``).
     if hasattr(v, "value"):
         v = v.value
@@ -85,35 +92,39 @@ def _coerce_verl_metrics_to_floats(raw_metrics) -> dict[str, float]:
     A bare ``float(list_of_things)`` raises, so the original shim silently
     dropped everything except literal scalars. Two things this helper does:
 
-    1. Take the mean of each list (or unwrap a singleton) so the cookbook
-       sees real numbers.
+    1. Honor VERL ``Metric`` SUM/MEAN semantics when wrappers are still
+       present, otherwise coerce the already-aggregated scalar/list.
     2. Append the Tinker SDK's required ``:<reduction>`` suffix
        (``chunked_fwdbwd_helpers.py:108`` does ``name, reduction =
-       key.split(":")`` and raises on missing suffix). All verl metrics
-       are already chunk-aggregated (mean of micro-batches × DP), so the
-       cross-chunk reduction is also ``:mean`` for every key.
+       key.split(":")`` and raises on missing suffix). Objective values use
+       ``:sum`` so SDK-side request chunking preserves token-sum semantics;
+       ordinary diagnostics use ``:mean``.
     """
     out: dict[str, float] = {}
     for k, v in (raw_metrics or {}).items():
         try:
+            key = str(k)
+            objective_metric = key in {"loss", "actor/pg_loss", "distillation/loss"}
+            reduction = "sum" if objective_metric else "mean"
             if isinstance(v, (list, tuple)):
                 if len(v) == 0:
                     continue
+                first_aggregation = getattr(v[0], "aggregation", None)
+                if first_aggregation is not None:
+                    reduction = getattr(first_aggregation, "value", str(first_aggregation)).lower()
                 vals = [fv for fv in (_coerce_one_metric_value(item) for item in v) if fv is not None]
                 if not vals:
                     continue
-                value: Optional[float] = sum(vals) / len(vals)
+                value: Optional[float] = sum(vals) if reduction == "sum" else sum(vals) / len(vals)
             else:
+                aggregation = getattr(v, "aggregation", None)
+                if aggregation is not None:
+                    reduction = getattr(aggregation, "value", str(aggregation)).lower()
                 value = _coerce_one_metric_value(v)
             if value is None:
                 continue
-            key = str(k)
             if ":" not in key:
-                # Tinker SDK requires a ``:<reduction>`` suffix on every
-                # metric key (chunked_fwdbwd_helpers.py:108). verl emits
-                # raw names — chunk-aggregated metrics combine via mean,
-                # which matches Tinker's :mean reducer semantics.
-                key = f"{key}:mean"
+                key = f"{key}:{reduction}"
             out[key] = value
         except Exception:
             # Last-resort guard — keep extraction loop forward-compatible
@@ -143,9 +154,10 @@ def _datums_to_update_actor_td(
       - ``loss_mask``     : == response_mask (used by forward_backward_batch
                             to compute ``batch_num_tokens``)
       - ``old_log_probs`` : rectangular (B, max_resp)
-      - ``advantages``    : rectangular (B, max_resp) — denormalised from the
-                            wire (Tinker divides by response_len for SUM
-                            aggregation; verl wants the raw per-sample value).
+      - ``advantages``    : rectangular (B, max_resp), preserving the wire
+                            values verbatim. Tinker losses use token-sum
+                            aggregation, so any sequence-length normalization
+                            belongs to the client-provided advantage tensor.
 
     Reconstruction rules:
       - full_tokens = ModelInput.to_ints() + [target_tokens[-1]]   (= tokens[:-1] + tokens[-1])
@@ -228,19 +240,16 @@ def _datums_to_update_actor_td(
         # the loss. The denormalised advantages/logprobs are taken from the
         # same extended slice, preserving the on-wire values verbatim.
         target_len = padded_mask.numel()
-        response_len_in_mask = int(mask_positions.numel())
         response_len = target_len - response_start_in_target  # extend to end of target
         response_start_full = response_start_in_target + 1
         prompt_len = response_start_full
 
         prompt_tokens = full_tokens[:prompt_len]
         response_tokens = full_tokens[response_start_full : response_start_full + response_len]
-        # Slice + denormalise (wire-side advantages are divided by response_len
-        # for SUM aggregation in Tinker; verl wants the raw value).
+        # Slice wire values without rescaling. The dynamic Tinker loss paths use
+        # token-sum aggregation, matching the API contract directly.
         old_log_probs = padded_logp[response_start_in_target : response_start_in_target + response_len]
-        advantages = (
-            padded_adv[response_start_in_target : response_start_in_target + response_len] * response_len_in_mask
-        )
+        advantages = padded_adv[response_start_in_target : response_start_in_target + response_len]
         resp_mask = padded_mask[response_start_in_target : response_start_in_target + response_len]
 
         # Optional client-supplied importance-sampling correction. verl's
