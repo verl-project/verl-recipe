@@ -33,6 +33,12 @@ __all__ = ["is_ref_in_actor", "make_branching_loss", "normalize_tinker_loss_spec
 
 _TINKER_LOSSES = frozenset({"cross_entropy", "importance_sampling", "ppo", "cispo", "dro"})
 
+# VERL clamps PPO's log-ratio to 20 before exponentiating, so the largest
+# ratio that can reach the dual-clip branch is exp(20) ~= 4.85e8. Tinker PPO
+# has no third/dual clip; a finite value above that bound disables it while
+# satisfying VERL's ``clip_ratio_c > 1`` validation.
+_TINKER_PPO_DUAL_CLIP_C = 1e9
+
 
 def normalize_tinker_loss_spec(loss_name: str, loss_config: dict[str, float] | None = None) -> dict:
     """Validate Tinker's wire config and translate it to VERL-native values."""
@@ -136,11 +142,30 @@ def make_branching_loss(config: DictConfig):
     def actor_config_for(spec: dict):
         """Build an isolated request config; ppo_loss mutates global_batch_info."""
         loss_name = spec["name"]
-        loss_mode = "vanilla" if loss_name == "ppo" else loss_name
+        loss_mode = {
+            "ppo": "vanilla",
+            # Tinker's ``logprobs`` are behavior/rollout-policy log probs and
+            # are translated to ``old_log_probs``. That is already VERL's
+            # bypass-mode input contract, so compute token-TIS in the loss.
+            "importance_sampling": "bypass_mode",
+        }.get(loss_name, loss_name)
+        rollout_correction = replace(actor_cfg.policy_loss.rollout_correction)
+        if loss_name == "importance_sampling":
+            rollout_correction = replace(
+                rollout_correction,
+                rollout_is="token",
+                rollout_is_threshold=2.0,
+                rollout_is_batch_normalize=False,
+                rollout_rs=None,
+                rollout_rs_threshold=None,
+                bypass_mode=True,
+                loss_type="reinforce",
+            )
         policy_loss = replace(
             actor_cfg.policy_loss,
             loss_mode=loss_mode,
             dro_beta=spec.get("dro_beta", actor_cfg.policy_loss.dro_beta),
+            rollout_correction=rollout_correction,
         )
         overrides = {
             "policy_loss": policy_loss,
@@ -153,7 +178,7 @@ def make_branching_loss(config: DictConfig):
             overrides["clip_ratio_low"] = spec["clip_ratio_low"]
             overrides["clip_ratio_high"] = spec["clip_ratio_high"]
         if loss_name == "ppo":
-            overrides["clip_ratio_c"] = None
+            overrides["clip_ratio_c"] = _TINKER_PPO_DUAL_CLIP_C
         return replace(actor_cfg, **overrides)
 
     def sft_final_loss(model_output, data, dp_group=None):
