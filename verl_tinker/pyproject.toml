@@ -33,9 +33,9 @@ dependencies = [
     "ray[serve]",
     "tinker==0.19.0",
     "transformers==5.9.0",
-    "veomni @ git+https://github.com/ByteDance-Seed/VeOmni.git@506f6d6b6c1d715b1b22f6bb144797de222cc2d1",
-    "verl @ git+https://github.com/verl-project/verl.git@c791da0bfcd7d7b560b1e461d2c188145b39c353",
-    "vllm>=0.22.0,<0.23",
+    "veomni @ git+https://github.com/ByteDance-Seed/VeOmni.git@9ff4858618ae07901ece5c3070d9b7f3d5458da3",
+    "verl @ git+https://github.com/verl-project/verl.git@ddfbf4ea01b27ab47ac9de50514a9c9dcb631e7a",
+    "vllm>=0.26.0",
     "vexact @ git+https://github.com/verl-project/vexact.git@2da1ea2181b5fe09597077c9dc86539ec047e610",
     "kernels==0.14.1",
 ]

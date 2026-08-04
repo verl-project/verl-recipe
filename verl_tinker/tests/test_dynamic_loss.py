@@ -18,10 +18,10 @@ import pytest
 import torch
 from omegaconf import OmegaConf
 from tensordict import TensorDict
-
-from verl.utils import tensordict_utils as tu
 from verl_tinker.backends._loss import make_branching_loss, normalize_tinker_loss_spec
 from verl_tinker.data.datum_processing import _datums_to_update_actor_td
+
+from verl.utils import tensordict_utils as tu
 
 
 @pytest.mark.parametrize(
@@ -124,20 +124,14 @@ def test_cross_entropy_token_sum_preserves_signed_custom_loss_weights():
     loss_fn = make_branching_loss(_branching_config())
     data = TensorDict(
         {
-            "loss_mask": torch.nested.as_nested_tensor(
-                [torch.tensor([0.0, 2.0, -3.0])], layout=torch.jagged
-            ),
+            "loss_mask": torch.nested.as_nested_tensor([torch.tensor([0.0, 2.0, -3.0])], layout=torch.jagged),
         },
         batch_size=[1],
     )
     tu.assign_non_tensor_data(data, "dp_size", 2)
     tu.assign_non_tensor_data(data, "batch_num_tokens", -1.0)
     tu.assign_non_tensor_data(data, "__loss_mode__", "sft")
-    model_output = {
-        "log_probs": torch.nested.as_nested_tensor(
-            [torch.tensor([-1.0, -2.0, -3.0])], layout=torch.jagged
-        )
-    }
+    model_output = {"log_probs": torch.nested.as_nested_tensor([torch.tensor([-1.0, -2.0, -3.0])], layout=torch.jagged)}
 
     loss, metrics = loss_fn(model_output=model_output, data=data)
 
