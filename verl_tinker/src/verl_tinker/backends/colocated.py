@@ -27,6 +27,7 @@ serialization lock for synchronous training and checkpoint operations.
 import asyncio
 import logging
 import threading
+from copy import deepcopy
 from typing import Any, Optional
 
 import ray
@@ -191,11 +192,18 @@ class ColocatedBackend:
                 Role.ActorRollout if ref_in_actor or not needs_reference_policy(config) else Role.ActorRolloutRef
             )
 
+        # ``ref.enable`` is a verl-tinker deployment switch, not an ActorConfig
+        # field. Keep it in the server config for readable role selection, but
+        # never pass it to VeRL's ref-config dataclass constructor.
+        worker_config = deepcopy(config.actor_rollout_ref)
+        if "ref" in worker_config and "enable" in worker_config.ref:
+            del worker_config.ref.enable
+
         worker_cls = NoRolloutWorker if self._no_rollout_deployment else TinkerServerActorRolloutRefWorker
         role_cls = {
             str(actor_role): RayClassWithInitArgs(
                 cls=ray.remote(worker_cls),
-                config=config.actor_rollout_ref,
+                config=worker_config,
                 role=str(actor_role),
             ),
         }

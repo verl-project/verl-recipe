@@ -786,6 +786,22 @@ class TestNoRolloutDeployment:
             role_cls, _ = backend._build_role_cls()
         assert list(role_cls.values())[0].cls is TinkerServerActorRolloutRefWorker
 
+    def test_build_role_cls_strips_server_only_ref_enable_before_verl_worker(self):
+        config = _make_config()
+        config.actor_rollout_ref.ref = {"enable": True}
+        backend = _make_backend(config)
+
+        with (
+            patch(f"{_BACKEND_MODULE}.ray") as mock_ray,
+            patch(f"{_BACKEND_MODULE}.needs_reference_policy", return_value=True),
+        ):
+            mock_ray.remote = MagicMock(side_effect=lambda cls: cls)
+            role_cls, actor_role = backend._build_role_cls()
+
+        worker_config = role_cls[str(actor_role)].kwargs["config"]
+        assert "enable" not in worker_config.ref
+        assert config.actor_rollout_ref.ref.enable is True
+
     def test_tinker_worker_exposes_optimizer_zero_grad(self):
         """optimizer=false load_weights depends on this registered worker method."""
         assert hasattr(TinkerActorRolloutRefWorker, "optimizer_zero_grad")
