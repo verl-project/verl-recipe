@@ -68,8 +68,8 @@ async def run_opd_multi_teacher_test(
         kl_penalty_coef=1.0,
         kl_discount_factor=0.0,
         num_substeps=1,
-        loss_fn="importance_sampling",
-        loss_fn_config=None,
+        loss_fn="cispo",
+        loss_fn_config={"clip_low_threshold": 0.0, "clip_high_threshold": 4.0},
         wandb_project="verl-tinker-ci",
         wandb_name=(
             f"opd-multi-{model_name_slug(model_name)}"

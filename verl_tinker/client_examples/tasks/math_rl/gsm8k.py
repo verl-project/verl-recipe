@@ -50,8 +50,8 @@ async def run_math_rl_gsm8k_test(base_url, model_name, tokenizer_name_or_path=No
         base_url=base_url,
         load_checkpoint_path=None,
         # Loss
-        loss_fn="importance_sampling",
-        loss_fn_config=None,
+        loss_fn="ppo",
+        loss_fn_config={"clip_low_threshold": 0.8, "clip_high_threshold": 1.2},
         # No async/off-policy mode for simplest version
         async_config=None,
         stream_minibatch_config=None,
