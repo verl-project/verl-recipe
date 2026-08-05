@@ -7,6 +7,7 @@ from verl_tinker.config_utils import (
     _validate_config,
     is_no_rollout_deployment,
     main,
+    needs_reference_policy,
     process_actor_rollout_ref_config,
     process_config,
 )
@@ -25,7 +26,6 @@ def _minimal_tinker_config():
                 "model": {"path": "/models/qwen"},
             },
             "algorithm": {"adv_estimator": "grpo"},
-            "data": {"train_batch_size": 512},
             "trainer": {"nnodes": 1, "n_gpus_per_node": 8},
         }
     )
@@ -34,7 +34,7 @@ def _minimal_tinker_config():
 def test_tinker_config_merges_verl_defaults_and_keeps_only_tinker_overrides():
     config = process_actor_rollout_ref_config(_minimal_tinker_config())
 
-    assert set(config.keys()) == {"server", "actor_rollout_ref", "algorithm", "data", "distillation", "trainer"}
+    assert set(config.keys()) == {"server", "actor_rollout_ref", "algorithm", "distillation", "trainer"}
     assert config.distillation.enabled is False
     assert config.server.host == "0.0.0.0"
     assert config.server.port == 8000
@@ -61,6 +61,15 @@ def test_tinker_config_merges_verl_defaults_and_keeps_only_tinker_overrides():
         "extra",
         "hf_model",
     ]
+
+
+def test_tinker_config_does_not_require_or_merge_algorithm_section():
+    config = _minimal_tinker_config()
+    del config.algorithm
+
+    config = process_config(config)
+
+    assert "algorithm" not in config
 
 
 @pytest.mark.parametrize(
@@ -443,10 +452,16 @@ def test_tinker_config_rejects_server_side_kl_loss():
     ]
 
 
-def test_actor_rollout_ref_quick_start_uses_client_side_kl_and_keeps_reference_worker():
+def test_actor_rollout_ref_quick_start_explicitly_enables_reference_worker():
     config = OmegaConf.load(_TINKER_CONFIG_DIR / "quick_start" / "actor_rollout_ref.yaml")
 
-    assert config.actor_rollout_ref.actor.use_kl_loss is False
-    assert config.algorithm.use_kl_in_reward is True
-    assert "kl_loss_coef" not in config.actor_rollout_ref.actor
-    assert "kl_loss_type" not in config.actor_rollout_ref.actor
+    assert config.actor_rollout_ref.ref.enable is True
+    assert needs_reference_policy(config) is True
+
+
+def test_reference_worker_enablement_falls_back_to_legacy_verl_settings():
+    config = _minimal_tinker_config()
+    del config.actor_rollout_ref.ref.enable
+    config.algorithm.use_kl_in_reward = True
+
+    assert needs_reference_policy(config) is True

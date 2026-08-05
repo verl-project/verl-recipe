@@ -16,7 +16,6 @@ server:
 actor_rollout_ref:
   actor:
     strategy: veomni
-    use_kl_loss: false
     ppo_mini_batch_size: 8
     ppo_micro_batch_size_per_gpu: 1
     optim:
@@ -64,15 +63,6 @@ distillation:
         engine_kwargs:
           vllm:
             max_logprobs: 128
-
-algorithm:
-  adv_estimator: grpo
-  use_kl_in_reward: false
-
-data:
-  train_batch_size: 64
-  max_prompt_length: 4096
-  max_response_length: 10000
 
 trainer:
   logger:

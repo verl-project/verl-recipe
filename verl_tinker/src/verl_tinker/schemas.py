@@ -37,7 +37,6 @@ from tinker.types import Datum, ModelID
 
 from verl.utils import tensordict_utils as tu
 
-
 # ==================== Tinker API compatibility ====================
 
 

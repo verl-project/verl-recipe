@@ -178,20 +178,18 @@ async def test_get_session_returns_only_currently_valid_samplers():
     assert response["sampler_ids"] == [current_sampler_id]
 
 
-def test_no_rollout_config_requires_backend_runtime_sections():
+def test_no_rollout_config_requires_trainer_runtime_fields():
     config = OmegaConf.create(
         {
             "actor_rollout_ref": {"model": {"path": "/models/qwen"}},
         }
     )
 
-    with patch("verl_tinker.config_utils._validate_supported_verl_config") as mock_validate:
+    with patch("verl_tinker.config_utils._validate_supported_verl_config"):
         errors = _validate_config(config)
 
-    assert "algorithm config is required" in errors
     assert "trainer.nnodes is required" in errors
     assert "trainer.n_gpus_per_node is required" in errors
-    mock_validate.assert_not_called()
 
 
 def test_create_model_metadata_is_full_model_training_even_with_lora_request():

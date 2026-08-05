@@ -18,7 +18,6 @@ actor_rollout_ref: # this is the same as verl's config, this field is ALWAYS req
   # this is a bit more customized as it's a larger model
   actor:
     strategy: fsdp
-    use_kl_loss: false
     optim:
       lr_scheduler_type: constant
       lr: 1.0e-06
@@ -52,15 +51,6 @@ actor_rollout_ref: # this is the same as verl's config, this field is ALWAYS req
 
   model:
     path: ${oc.env:TINKER_SERVER_MODEL_PATH,unsloth/gpt-oss-20b-BF16}
-
-algorithm:
-  adv_estimator: grpo
-  use_kl_in_reward: false
-
-data:
-  train_batch_size: 64
-  max_prompt_length: 4096
-  max_response_length: 10000
 
 trainer:
   logger:

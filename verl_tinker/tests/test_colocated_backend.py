@@ -119,7 +119,7 @@ def test_init_imports_model_external_libs_before_workers_and_rollout():
             ColocatedBackend, "_prepare_model_roles", side_effect=lambda *_args, **_kwargs: call_order.append("offload")
         ),
         patch.object(ColocatedBackend, "_init_rollout_replicas", side_effect=lambda: call_order.append("init_rollout")),
-        patch(f"{_BACKEND_MODULE}.need_reference_policy", return_value=False),
+        patch(f"{_BACKEND_MODULE}.needs_reference_policy", return_value=False),
         patch(f"{_BACKEND_MODULE}.is_ref_in_actor", return_value=False),
     ):
         ColocatedBackend(config)
@@ -719,7 +719,7 @@ class TestBackendOffloadConfig:
             patch.object(ColocatedBackend, "_init_worker_groups"),
             patch.object(ColocatedBackend, "_prepare_model_roles"),
             patch.object(ColocatedBackend, "_init_rollout_replicas"),
-            patch(f"{_BACKEND_MODULE}.need_reference_policy", return_value=False),
+            patch(f"{_BACKEND_MODULE}.needs_reference_policy", return_value=False),
             patch(f"{_BACKEND_MODULE}.is_ref_in_actor", return_value=False),
         ):
             backend = ColocatedBackend(config)
@@ -768,7 +768,7 @@ class TestNoRolloutDeployment:
         backend = _make_backend(_make_config(no_rollout_deployment=True))
         with (
             patch(f"{_BACKEND_MODULE}.ray") as mock_ray,
-            patch(f"{_BACKEND_MODULE}.need_reference_policy", return_value=False),
+            patch(f"{_BACKEND_MODULE}.needs_reference_policy", return_value=False),
         ):
             mock_ray.remote = MagicMock(side_effect=lambda cls: cls)
             role_cls, actor_role = backend._build_role_cls()
@@ -780,7 +780,7 @@ class TestNoRolloutDeployment:
         backend = _make_backend(_make_config())
         with (
             patch(f"{_BACKEND_MODULE}.ray") as mock_ray,
-            patch(f"{_BACKEND_MODULE}.need_reference_policy", return_value=False),
+            patch(f"{_BACKEND_MODULE}.needs_reference_policy", return_value=False),
         ):
             mock_ray.remote = MagicMock(side_effect=lambda cls: cls)
             role_cls, _ = backend._build_role_cls()

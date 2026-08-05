@@ -5,7 +5,6 @@ from typing import Any
 
 from omegaconf import DictConfig, ListConfig, OmegaConf
 
-from verl.trainer.ppo.utils import need_reference_policy
 from verl.utils.config import omega_conf_to_dataclass
 
 _MISSING_VALUES = (None, "", "???")
@@ -23,8 +22,6 @@ _VERL_STRATEGY_ALIASES = {
 }
 _DEFAULT_TOP_LEVEL_SECTIONS = (
     "actor_rollout_ref",
-    "algorithm",
-    "data",
     "distillation",
     "trainer",
 )
@@ -32,7 +29,6 @@ _SUPPORTED_TOP_LEVEL_SECTIONS = (
     "server",
     "actor_rollout_ref",
     "algorithm",
-    "data",
     "distillation",
     "trainer",
     "global_profiler",
@@ -102,6 +98,20 @@ def is_enable_false(config: DictConfig, path: str) -> bool:
 
 def is_no_rollout_deployment(config: DictConfig) -> bool:
     return is_enable_false(config, "actor_rollout_ref.rollout")
+
+
+def needs_reference_policy(config: DictConfig) -> bool:
+    """Resolve reference-worker enablement without requiring a loss setting.
+
+    ``ref.enable`` is the verl-tinker-facing switch. Falling back to verl's
+    legacy loss-derived helper keeps externally supplied configs compatible.
+    """
+    enabled = OmegaConf.select(config, "actor_rollout_ref.ref.enable")
+    if enabled is not None:
+        return bool(enabled)
+    algorithm = config.get("algorithm", {})
+    actor = config.get("actor_rollout_ref", {}).get("actor", {})
+    return bool(algorithm.get("use_kl_in_reward", False) or actor.get("use_kl_loss", False))
 
 
 def process_actor_rollout_ref_config(config: DictConfig) -> DictConfig:
@@ -355,8 +365,6 @@ def _validate_config(config) -> list[str]:
     errors = []
 
     errors.extend(_normalize_actor_model_identifiers(config))
-    if "algorithm" not in config:
-        errors.append("algorithm config is required")
     trainer_cfg = config.get("trainer", {})
     if trainer_cfg.get("nnodes") is None:
         errors.append("trainer.nnodes is required")
@@ -395,7 +403,7 @@ def _validate_config(config) -> list[str]:
             errors.append("no_rollout_deployment does not support reference policy")
     else:
         try:
-            _validate_supported_verl_config(config, need_reference_policy(config))
+            _validate_supported_verl_config(config, needs_reference_policy(config))
         except Exception as e:
             errors.append(f"VeRL config validation: {e}")
 
@@ -462,34 +470,21 @@ def _validate_supported_verl_config(config: DictConfig, use_reference_policy: bo
 
     n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
 
-    if not config.actor_rollout_ref.actor.use_dynamic_bsz:
-        if config.actor_rollout_ref.actor.strategy == "megatron":
-            model_parallel_size = (
-                config.actor_rollout_ref.actor.megatron.tensor_model_parallel_size
-                * config.actor_rollout_ref.actor.megatron.pipeline_model_parallel_size
-            )
-            assert (
-                n_gpus % (model_parallel_size * config.actor_rollout_ref.actor.megatron.context_parallel_size) == 0
-            ), (
-                f"n_gpus ({n_gpus}) must be divisible by model_parallel_size ({model_parallel_size}) times "
-                f"context_parallel_size ({config.actor_rollout_ref.actor.megatron.context_parallel_size})"
-            )
-            megatron_dp = n_gpus // (
-                model_parallel_size * config.actor_rollout_ref.actor.megatron.context_parallel_size
-            )
-            minimal_bsz = megatron_dp * config.actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu
-        else:
-            minimal_bsz = n_gpus
-
-        rollout_n = OmegaConf.select(config, "actor_rollout_ref.rollout.n", default=1) or 1
-        real_train_batch_size = config.data.train_batch_size * rollout_n
-        assert real_train_batch_size % minimal_bsz == 0, (
-            f"real_train_batch_size ({real_train_batch_size}) must be divisible by minimal possible batch size "
-            f"({minimal_bsz})"
+    if not config.actor_rollout_ref.actor.use_dynamic_bsz and config.actor_rollout_ref.actor.strategy == "megatron":
+        model_parallel_size = (
+            config.actor_rollout_ref.actor.megatron.tensor_model_parallel_size
+            * config.actor_rollout_ref.actor.megatron.pipeline_model_parallel_size
+        )
+        assert n_gpus % (model_parallel_size * config.actor_rollout_ref.actor.megatron.context_parallel_size) == 0, (
+            f"n_gpus ({n_gpus}) must be divisible by model_parallel_size ({model_parallel_size}) times "
+            f"context_parallel_size ({config.actor_rollout_ref.actor.megatron.context_parallel_size})"
         )
 
     actor_config = omega_conf_to_dataclass(config.actor_rollout_ref.actor)
-    actor_config.validate(n_gpus, config.data.train_batch_size, config.actor_rollout_ref.model)
+    # Verl's ActorConfig validator expects a trainer-owned train batch size.
+    # Tinker requests supply their own batches, so use the actor mini-batch size
+    # to retain its micro-batch/topology checks without inventing a global batch.
+    actor_config.validate(n_gpus, actor_config.ppo_mini_batch_size, config.actor_rollout_ref.model)
 
     if not config.actor_rollout_ref.actor.use_dynamic_bsz:
         if use_reference_policy:
@@ -505,15 +500,8 @@ def _validate_supported_verl_config(config: DictConfig, use_reference_policy: bo
             "actor_rollout_ref.rollout",
         )
 
-    if config.algorithm.get("use_kl_in_reward", False) and config.actor_rollout_ref.actor.use_kl_loss:
+    if config.get("algorithm", {}).get("use_kl_in_reward", False) and config.actor_rollout_ref.actor.use_kl_loss:
         print("NOTICE: You have both enabled in-reward kl and kl loss.")
-
-    if config.data.get("val_batch_size", None) is not None:
-        print(
-            "WARNING: val_batch_size is deprecated."
-            + " Validation datasets are sent to inference engines as a whole batch,"
-            + " which will schedule the memory themselves."
-        )
 
     if OmegaConf.select(config, "actor_rollout_ref.rollout.val_kwargs.do_sample", default=False):
         assert config.actor_rollout_ref.rollout.temperature > 0, (

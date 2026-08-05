@@ -12,7 +12,6 @@ server:
 actor_rollout_ref: # this is the same as verl's config, this field is ALWAYS required.
   actor:
     strategy: veomni
-    use_kl_loss: false
     ppo_mini_batch_size: 16
     veomni:
       cross_entropy_loss_implementation: chunk_loss
@@ -35,14 +34,6 @@ actor_rollout_ref: # this is the same as verl's config, this field is ALWAYS req
     enable: false
   model:
     path: ${oc.env:TINKER_SERVER_MODEL_PATH,Qwen/Qwen3-1.7B}
-
-algorithm:
-  adv_estimator: sft
-
-data:
-  train_batch_size: 64
-  max_prompt_length: 4096
-  max_response_length: 10000
 
 trainer:
   logger:

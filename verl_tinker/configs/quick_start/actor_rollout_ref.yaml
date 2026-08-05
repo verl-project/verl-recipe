@@ -12,8 +12,6 @@ server:
 actor_rollout_ref: # this is the same as verl's config, this field is ALWAYS required.
   actor:
     strategy: veomni
-    use_kl_loss: false
-    entropy_coeff: 0
     ppo_mini_batch_size: 16
     veomni:
       cross_entropy_loss_implementation: chunk_loss
@@ -25,24 +23,12 @@ actor_rollout_ref: # this is the same as verl's config, this field is ALWAYS req
     tensor_model_parallel_size: 2
     gpu_memory_utilization: 0.4
   ref:
+    enable: true
     log_prob_micro_batch_size_per_gpu: 1
     veomni:
       param_offload: false # offload will be handled by server
   model:
     path: ${oc.env:TINKER_SERVER_MODEL_PATH,Qwen/Qwen3-1.7B}
-
-algorithm:
-  adv_estimator: grpo
-  # Tinker Cookbook computes reference log probabilities client-side and
-  # folds the KL penalty into the advantages sent to forward_backward. This
-  # flag keeps VeRL's frozen reference worker initialized without adding a
-  # second, server-side KL term to the actor loss.
-  use_kl_in_reward: true
-
-data:
-  train_batch_size: 64
-  max_prompt_length: 4096
-  max_response_length: 10000
 
 trainer:
   logger:

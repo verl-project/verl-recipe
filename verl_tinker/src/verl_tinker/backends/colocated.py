@@ -37,7 +37,7 @@ from verl.protocol import DataProtoFuture
 from verl.single_controller.base.decorator import Dispatch, register
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
 from verl.single_controller.ray.base import create_colocated_worker_cls
-from verl.trainer.ppo.utils import Role, need_reference_policy
+from verl.trainer.ppo.utils import Role
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.import_utils import import_external_libs
 from verl.utils.memory_utils import aggressive_empty_cache
@@ -45,7 +45,7 @@ from verl.workers.engine_workers_tinker import TinkerActorRolloutRefWorker
 from verl.workers.rollout.llm_server import LLMServerClient
 from verl.workers.rollout.replica import TokenOutput, get_rollout_replica_class
 
-from ..config_utils import is_no_rollout_deployment
+from ..config_utils import is_no_rollout_deployment, needs_reference_policy
 from ..schemas import ServerCapabilities
 from ._loss import is_ref_in_actor, make_branching_loss
 from .backend_utils import kill_ray_actors_and_wait, remove_placement_groups_and_wait
@@ -111,8 +111,8 @@ class ColocatedBackend:
         self._engine_lock = threading.Lock()
         self._no_rollout_deployment: bool = is_no_rollout_deployment(config)
         self.use_kl_loss: bool = config.actor_rollout_ref.actor.get("use_kl_loss", False)
-        self.use_kl_in_reward: bool = config.algorithm.get("use_kl_in_reward", False)
-        self.use_reference_policy: bool = need_reference_policy(config)
+        self.use_kl_in_reward: bool = config.get("algorithm", {}).get("use_kl_in_reward", False)
+        self.use_reference_policy: bool = needs_reference_policy(config)
         self._ref_in_actor: bool = is_ref_in_actor(config)
         self._enable_offload = bool(config.get("server", {}).get("enable_offload", True))
 
@@ -183,12 +183,12 @@ class ColocatedBackend:
         # Ref always shares actor_rollout_wg.
         ref_in_actor = is_ref_in_actor(config)
         if self._no_rollout_deployment:
-            if need_reference_policy(config):
+            if needs_reference_policy(config):
                 raise ValueError("no_rollout_deployment does not support reference policy")
             actor_role = Role.Actor
         else:
             actor_role = (
-                Role.ActorRollout if ref_in_actor or not need_reference_policy(config) else Role.ActorRolloutRef
+                Role.ActorRollout if ref_in_actor or not needs_reference_policy(config) else Role.ActorRolloutRef
             )
 
         worker_cls = NoRolloutWorker if self._no_rollout_deployment else TinkerServerActorRolloutRefWorker
@@ -254,7 +254,7 @@ class ColocatedBackend:
         # Ref policy always shares actor_rollout_wg:
         # - LoRA: same weights, adapters disabled for ref forward
         # - Full fine-tune: ActorRolloutRef worker holds both actor and ref model state
-        if need_reference_policy(config):
+        if needs_reference_policy(config):
             self.ref_policy_wg = self.actor_rollout_wg
 
     def _prepare_model_roles(self, required_roles: set[ModelRole], *, reason: str):
@@ -565,7 +565,7 @@ class ColocatedBackend:
     def compute_ref_log_prob(self, data):
         with self._engine_lock:
             if self.ref_policy_wg is None:
-                raise RuntimeError("Reference policy not initialized (need_reference_policy is False)")
+                raise RuntimeError("Reference policy not initialized (actor_rollout_ref.ref.enable is false)")
             self._prepare_model_roles({ModelRole.REF}, reason="compute_ref_log_prob")
             return self.ref_policy_wg.compute_ref_log_prob(data)
 
