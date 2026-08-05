@@ -17,29 +17,82 @@
 import asyncio
 import json
 import logging
+import math
 import uuid
 import warnings
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 from tinker.types import Datum, ModelInput
 
 from verl.workers.engine_workers_tinker import OptimStepParams
 
-from .backends._loss import normalize_tinker_loss_spec
 from .data.datum_processing import (
     _coerce_verl_metrics_to_floats,
     _datums_to_forward_td,
     _datums_to_sft_td,
     _datums_to_update_actor_td,
 )
+from .schemas import TinkerLossFnType
 
 logger = logging.getLogger(__name__)
 
 GLOBAL_SESSION_ID = "verl-remote-actor"
 GLOBAL_MODEL_ID = "verl-remote-actor-model"
 STATE_METADATA_FILE = "metadata.json"
+
+
+def normalize_tinker_loss_spec(loss_name: str, loss_config: dict[str, float] | None = None) -> dict:
+    """Validate the wire loss request before constructing a verl TensorDict.
+
+    ``custom_from_config`` is a verl-tinker extension: the wire config is
+    intentionally ignored and the actor config supplied at server startup is
+    used by the engine unchanged.
+    """
+    supported_losses = get_args(TinkerLossFnType)
+    if loss_name not in supported_losses:
+        raise ValueError(f"Unsupported loss {loss_name!r}; expected one of {sorted(supported_losses)}")
+
+    if loss_name == "custom_from_config":
+        return {"name": loss_name}
+
+    config = dict(loss_config or {})
+    if any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in config.values()):
+        raise ValueError("loss_fn_config values must be finite numbers")
+    if any(not math.isfinite(float(value)) for value in config.values()):
+        raise ValueError("loss_fn_config values must be finite numbers")
+
+    if loss_name in {"cross_entropy", "importance_sampling"}:
+        if config:
+            raise ValueError(f"loss_fn={loss_name!r} does not accept loss_fn_config; got {sorted(config)}")
+        return {"name": loss_name}
+
+    if loss_name in {"ppo", "cispo"}:
+        allowed = {"clip_low_threshold", "clip_high_threshold"}
+        unknown = sorted(set(config) - allowed)
+        if unknown:
+            raise ValueError(f"loss_fn={loss_name!r} received unsupported config fields: {unknown}")
+        default_low, default_high = (0.8, 1.2) if loss_name == "ppo" else (0.0, 4.0)
+        low = float(config.get("clip_low_threshold", default_low))
+        high = float(config.get("clip_high_threshold", default_high))
+        if not 0.0 <= low <= 1.0 <= high:
+            raise ValueError(
+                f"loss_fn={loss_name!r} requires 0 <= clip_low_threshold <= 1 <= "
+                f"clip_high_threshold; got low={low}, high={high}"
+            )
+        return {
+            "name": loss_name,
+            "clip_ratio_low": 1.0 - low,
+            "clip_ratio_high": high - 1.0,
+        }
+
+    unknown = sorted(set(config) - {"beta"})
+    if unknown:
+        raise ValueError(f"loss_fn='dro' received unsupported config fields: {unknown}")
+    if "beta" not in config or float(config["beta"]) <= 0:
+        raise ValueError("loss_fn='dro' requires a positive loss_fn_config['beta']")
+    return {"name": "dro", "dro_beta": float(config["beta"])}
 
 
 def get_configured_model_name(engine) -> str:

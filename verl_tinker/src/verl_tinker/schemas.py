@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Pydantic request/response models for the legacy remote-worker JSON API.
+"""Request/response models for Tinker compatibility and the legacy JSON API.
 
 Each schema class declares its fields (the contract), and inherits conversion
 logic from _TensorDictSchema. To understand what an endpoint expects, just
@@ -26,14 +26,54 @@ Data categories in each schema:
 
 from __future__ import annotations
 
-from typing import Any, ClassVar, Optional
+from dataclasses import dataclass, field
+from typing import Any, ClassVar, Literal, Optional
 
 import numpy as np
 import torch
 from pydantic import BaseModel
 from tensordict import NonTensorData, NonTensorStack, TensorDict
+from tinker.types import Datum, ModelID
 
 from verl.utils import tensordict_utils as tu
+
+
+# ==================== Tinker API compatibility ====================
+
+
+TinkerLossFnType = Literal[
+    "cross_entropy",
+    "importance_sampling",
+    "ppo",
+    "cispo",
+    "dro",
+    "custom_from_config",
+]
+"""Tinker's five wire losses plus verl-tinker's server-configured extension."""
+
+
+@dataclass(frozen=True)
+class TinkerForwardBackwardInput:
+    """Tinker ForwardBackwardInput extended with ``custom_from_config``."""
+
+    data: list[Datum]
+    loss_fn: TinkerLossFnType
+    loss_fn_config: Optional[dict[str, float]] = field(default=None)
+
+
+@dataclass(frozen=True)
+class TinkerForwardRequest:
+    forward_input: TinkerForwardBackwardInput
+    model_id: ModelID
+    seq_id: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class TinkerForwardBackwardRequest:
+    forward_backward_input: TinkerForwardBackwardInput
+    model_id: ModelID
+    seq_id: Optional[int] = None
+
 
 # ==================== TensorData ====================
 

@@ -20,7 +20,7 @@ binds this branching loss to its actor worker group via ``set_loss_fn``
 once at init.
 """
 
-import math
+from copy import deepcopy
 from dataclasses import replace
 
 from omegaconf import DictConfig
@@ -28,59 +28,13 @@ from omegaconf import DictConfig
 from verl.utils.config import omega_conf_to_dataclass
 from verl.workers.utils.losses import ppo_loss
 
-__all__ = ["is_ref_in_actor", "make_branching_loss", "normalize_tinker_loss_spec"]
-
-
-_TINKER_LOSSES = frozenset({"cross_entropy", "importance_sampling", "ppo", "cispo", "dro"})
+__all__ = ["is_ref_in_actor", "make_branching_loss"]
 
 # VERL clamps PPO's log-ratio to 20 before exponentiating, so the largest
 # ratio that can reach the dual-clip branch is exp(20) ~= 4.85e8. Tinker PPO
 # has no third/dual clip; a finite value above that bound disables it while
 # satisfying VERL's ``clip_ratio_c > 1`` validation.
 _TINKER_PPO_DUAL_CLIP_C = 1e9
-
-
-def normalize_tinker_loss_spec(loss_name: str, loss_config: dict[str, float] | None = None) -> dict:
-    """Validate Tinker's wire config and translate it to VERL-native values."""
-    if loss_name not in _TINKER_LOSSES:
-        raise ValueError(f"Unsupported Tinker loss {loss_name!r}; expected one of {sorted(_TINKER_LOSSES)}")
-
-    config = dict(loss_config or {})
-    if any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in config.values()):
-        raise ValueError("loss_fn_config values must be finite numbers")
-    if any(not math.isfinite(float(value)) for value in config.values()):
-        raise ValueError("loss_fn_config values must be finite numbers")
-
-    if loss_name in {"cross_entropy", "importance_sampling"}:
-        if config:
-            raise ValueError(f"loss_fn={loss_name!r} does not accept loss_fn_config; got {sorted(config)}")
-        return {"name": loss_name}
-
-    if loss_name in {"ppo", "cispo"}:
-        allowed = {"clip_low_threshold", "clip_high_threshold"}
-        unknown = sorted(set(config) - allowed)
-        if unknown:
-            raise ValueError(f"loss_fn={loss_name!r} received unsupported config fields: {unknown}")
-        default_low, default_high = (0.8, 1.2) if loss_name == "ppo" else (0.0, 4.0)
-        low = float(config.get("clip_low_threshold", default_low))
-        high = float(config.get("clip_high_threshold", default_high))
-        if not 0.0 <= low <= 1.0 <= high:
-            raise ValueError(
-                f"loss_fn={loss_name!r} requires 0 <= clip_low_threshold <= 1 <= "
-                f"clip_high_threshold; got low={low}, high={high}"
-            )
-        return {
-            "name": loss_name,
-            "clip_ratio_low": 1.0 - low,
-            "clip_ratio_high": high - 1.0,
-        }
-
-    unknown = sorted(set(config) - {"beta"})
-    if unknown:
-        raise ValueError(f"loss_fn='dro' received unsupported config fields: {unknown}")
-    if "beta" not in config or float(config["beta"]) <= 0:
-        raise ValueError("loss_fn='dro' requires a positive loss_fn_config['beta']")
-    return {"name": "dro", "dro_beta": float(config["beta"])}
 
 
 def is_ref_in_actor(config: DictConfig) -> bool:
@@ -142,6 +96,11 @@ def make_branching_loss(config: DictConfig):
     def actor_config_for(spec: dict):
         """Build an isolated request config; ppo_loss mutates global_batch_info."""
         loss_name = spec["name"]
+        if loss_name == "custom_from_config":
+            # Preserve every startup setting while isolating mutable fields that
+            # verl updates during ppo_loss (notably global_batch_info).
+            return deepcopy(actor_cfg)
+
         loss_mode = {
             "ppo": "vanilla",
             # Tinker's ``logprobs`` are behavior/rollout-policy log probs and
@@ -274,9 +233,11 @@ def make_branching_loss(config: DictConfig):
             return sft_final_loss(model_output=model_output, data=data, dp_group=dp_group)
         if mode == "topk_distill":
             return topk_final_loss(model_output, data, dp_group=dp_group)
+        # This metadata is created by tinker_ops after request validation. Its
+        # absence is an internal server-plumbing bug, not invalid client input.
         spec = tu.get_non_tensor_data(data=data, key="__tinker_loss_spec__", default=None)
         if spec is None:
-            raise ValueError("RL TensorDict is missing the normalized __tinker_loss_spec__ metadata")
+            raise RuntimeError("Internal RL TensorDict is missing normalized __tinker_loss_spec__ metadata")
         request_cfg = actor_config_for(spec)
         loss, metrics = ppo_loss(config=request_cfg, model_output=model_output, data=data, dp_group=dp_group)
         metrics["loss"] = Metric(value=loss, aggregation=AggregationType.SUM)

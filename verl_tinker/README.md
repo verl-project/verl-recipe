@@ -174,6 +174,31 @@ os.environ["TINKER_API_KEY"] = "tml-verl-tinker-local"
 client = tinker.ServiceClient(base_url=os.environ["TINKER_BASE_URL"])
 ```
 
+### Server-configured custom loss
+
+The five Tinker-native wire losses are `cross_entropy`,
+`importance_sampling`, `ppo`, `cispo`, and `dro`. Verl-tinker additionally
+accepts `custom_from_config` on `forward_backward`:
+
+```python
+future = training_client.forward_backward(
+    data,
+    loss_fn="custom_from_config",  # type: ignore[arg-type]
+)
+```
+
+This extension ignores `loss_fn_config` and runs the request with the complete
+`actor_rollout_ref.actor` loss configuration supplied when the server started.
+The type-ignore is needed because the upstream Tinker SDK's `LossFnType` does
+not include verl-tinker's extension, although its runtime request serializer
+preserves the string.
+
+This is separate from Tinker's `forward_backward_custom`, which evaluates a
+Python loss function in the client and sends `cross_entropy` forward/backward
+requests to the server. Verl-tinker currently supports that SDK helper only
+for 1-D `target_tokens`; multi-target custom losses are rejected before engine
+execution.
+
 ## Run The Included Client Examples
 
 The examples intentionally use a separate client environment, because real

@@ -33,8 +33,6 @@ from tinker.types import (
     CreateModelRequest,
     CreateSamplingSessionRequest,
     CreateSamplingSessionResponse,
-    ForwardBackwardRequest,
-    ForwardRequest,
     FutureRetrieveRequest,
     GetInfoRequest,
     OptimStepRequest,
@@ -51,7 +49,7 @@ from .model_resource_manager import (
     StaleSamplerError,
     UnknownSamplerError,
 )
-from .schemas import StatusResponse
+from .schemas import StatusResponse, TinkerForwardBackwardRequest, TinkerForwardRequest
 from .tinker_ops import (
     forward as tinker_forward,
 )
@@ -680,14 +678,14 @@ class TinkerServer:
         return {"status": "accepted"}
 
     @app.post("/api/v1/forward")
-    async def forward(self, req: ForwardRequest):
+    async def forward(self, req: TinkerForwardRequest):
         self._require_ready()
         request_id = uuid.uuid4().hex
         self._schedule(request_id, tinker_forward(self._get_engine(), req.forward_input.data))
         return self._future_envelope(request_id, model_id=req.model_id)
 
     @app.post("/api/v1/forward_backward")
-    async def forward_backward(self, req: ForwardBackwardRequest):
+    async def forward_backward(self, req: TinkerForwardBackwardRequest):
         self._require_ready()
         request_id = uuid.uuid4().hex
         self._schedule(

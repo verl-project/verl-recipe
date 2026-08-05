@@ -16,6 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from fastapi import HTTPException
 from tensordict import TensorDict
 from tinker import AdamParams, SampleResponse
 from verl_tinker.tinker_ops import (
@@ -84,8 +85,10 @@ class _ForwardBackwardEngine:
 
     def __init__(self, result_td):
         self.result_td = result_td
+        self.calls = 0
 
     def forward_backward(self, _data):
+        self.calls += 1
         return self.result_td
 
 
@@ -171,6 +174,17 @@ async def test_forward_backward_zero_fills_missing_cross_entropy_model_logprobs(
         {"logprobs": {"data": [0.0, 0.0], "dtype": "float32", "shape": [2]}},
     ]
     assert result["metrics"]["loss:sum"] == 4.25
+
+
+@pytest.mark.asyncio
+async def test_forward_backward_rejects_invalid_loss_config_before_engine():
+    engine = _ForwardBackwardEngine(TensorDict({}, batch_size=[]))
+
+    with pytest.raises(HTTPException, match="does not accept") as exc_info:
+        await forward_backward(engine, [], "importance_sampling", {"beta": 0.1})
+
+    assert exc_info.value.status_code == 422
+    assert engine.calls == 0
 
 
 @pytest.mark.asyncio

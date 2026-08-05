@@ -729,6 +729,14 @@ def _datums_to_forward_td(datums, pad_to_multiple: int = 1) -> TensorDict:
     for d in datums:
         prefix = list(d.model_input.to_ints())
         target_tokens = _tensor_data_to_torch(d.loss_fn_inputs["target_tokens"]).long()
+        if target_tokens.dim() != 1:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "The verl-tinker /forward endpoint currently supports only 1-D target_tokens; "
+                    "multi-target custom losses are not supported."
+                ),
+            )
         if target_tokens.numel() == 0:
             raise HTTPException(
                 status_code=422,
