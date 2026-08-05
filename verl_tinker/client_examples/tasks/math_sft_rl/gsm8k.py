@@ -8,7 +8,7 @@ from typing import Any, cast
 import chz
 import datasets
 import tinker
-from tinker_cookbook import checkpoint_utils, cli_utils, model_info, renderers
+from tinker_cookbook import checkpoint_utils, cli_utils, renderers
 from tinker_cookbook.eval.benchmarks import BenchmarkConfig, BenchmarkResult, run_benchmark
 from tinker_cookbook.eval.benchmarks import gsm8k as _gsm8k_benchmark  # noqa: F401
 from tinker_cookbook.recipes.math_rl import math_env
@@ -23,7 +23,7 @@ from tinker_cookbook.supervised.types import (
 )
 from tinker_cookbook.tokenizer_utils import get_tokenizer
 
-from ..utils import model_name_slug
+from ..utils import model_name_slug, recommended_renderer_name
 
 DATASET_NAME = "gsm8k"
 
@@ -201,6 +201,7 @@ async def _evaluate_stage(
     model_name: str,
     renderer: renderers.Renderer,
     sampler_path: str | None = None,
+    lite: bool = False,
 ) -> dict[str, Any]:
     sampling_client = await _create_sampling_client(
         base_url,
@@ -213,9 +214,9 @@ async def _evaluate_stage(
         sampling_client,
         renderer,
         BenchmarkConfig(
-            max_examples=EVAL_NUM_EXAMPLES,
-            concurrency=EVAL_CONCURRENCY,
-            max_tokens=EVAL_MAX_TOKENS,
+            max_examples=min(EVAL_NUM_EXAMPLES, 20) if lite else EVAL_NUM_EXAMPLES,
+            concurrency=min(EVAL_CONCURRENCY, 8) if lite else EVAL_CONCURRENCY,
+            max_tokens=min(EVAL_MAX_TOKENS, 512) if lite else EVAL_MAX_TOKENS,
             temperature=EVAL_TEMPERATURE,
             save_dir=str(save_dir),
         ),
@@ -226,15 +227,20 @@ async def _evaluate_stage(
     return {"metrics": metrics}
 
 
-def _write_experiment_summary(stage_results: Sequence[dict[str, Any]], model_name: str) -> None:
+def _write_experiment_summary(
+    stage_results: Sequence[dict[str, Any]],
+    model_name: str,
+    *,
+    lite: bool = False,
+) -> None:
     summary = {
         "dataset": "openai/gsm8k",
         "train_split": "train",
         "test_split": "test",
         "model_name": model_name,
-        "sft_max_steps": SFT_MAX_STEPS,
-        "rl_max_steps": RL_MAX_STEPS,
-        "eval_num_examples": EVAL_NUM_EXAMPLES,
+        "sft_max_steps": min(SFT_MAX_STEPS, 20) if lite else SFT_MAX_STEPS,
+        "rl_max_steps": min(RL_MAX_STEPS, 20) if lite else RL_MAX_STEPS,
+        "eval_num_examples": min(EVAL_NUM_EXAMPLES, 20) if lite else EVAL_NUM_EXAMPLES,
         "eval_temperature": EVAL_TEMPERATURE,
         "stages": [result["metrics"] for result in stage_results],
     }
@@ -247,11 +253,22 @@ def _print_final_eval_summary(stage_results: Sequence[dict[str, Any]]) -> None:
         _print_eval_metrics(result["metrics"])
 
 
-async def run_math_sft_rl_gsm8k_test(base_url: str, model_name: str, tokenizer_name_or_path: str | None = None):
+async def run_math_sft_rl_gsm8k_test(
+    base_url: str,
+    model_name: str,
+    tokenizer_name_or_path: str | None = None,
+    lite: bool = False,
+):
     tokenizer_name_or_path = tokenizer_name_or_path or model_name
     model_slug = model_name_slug(model_name)
-    renderer_name = model_info.get_recommended_renderer_name(model_name)
+    renderer_name = recommended_renderer_name(model_name)
     eval_renderer = _build_eval_renderer(renderer_name, tokenizer_name_or_path)
+    sft_max_steps = min(SFT_MAX_STEPS, 20) if lite else SFT_MAX_STEPS
+    rl_max_steps = min(RL_MAX_STEPS, 20) if lite else RL_MAX_STEPS
+    sft_batch_size = 16 if lite else SFT_BATCH_SIZE
+    rl_group_size = 4 if lite else RL_GROUP_SIZE
+    rl_groups_per_batch = 4 if lite else RL_GROUPS_PER_BATCH
+    rl_max_tokens = min(RL_MAX_TOKENS, 512) if lite else RL_MAX_TOKENS
 
     cli_utils.check_log_dir(str(EVAL_LOG_PATH), behavior_if_exists="delete")
     base_eval = await _evaluate_stage(
@@ -259,23 +276,25 @@ async def run_math_sft_rl_gsm8k_test(base_url: str, model_name: str, tokenizer_n
         base_url=base_url,
         model_name=model_name,
         renderer=eval_renderer,
+        lite=lite,
     )
 
     sft_common = ChatDatasetBuilderCommonConfig(
         model_name_for_tokenizer=tokenizer_name_or_path,
         renderer_name=renderer_name,
         max_length=SFT_MAX_LENGTH,
-        batch_size=SFT_BATCH_SIZE,
+        batch_size=sft_batch_size,
         train_on_what=TrainOnWhat.LAST_ASSISTANT_MESSAGE,
     )
     sft_config = sft_train.Config(
         log_path=SFT_LOG_PATH,
         model_name=model_name,
+        recipe_name="verl_tinker_math_sft_rl_gsm8k_sft",
         renderer_name=renderer_name,
         dataset_builder=Gsm8kSFTBuilder(common_config=sft_common),
         learning_rate=SFT_LEARNING_RATE,
         num_epochs=1,
-        max_steps=SFT_MAX_STEPS,
+        max_steps=sft_max_steps,
         eval_every=0,
         save_every=0,
         base_url=base_url,
@@ -292,6 +311,7 @@ async def run_math_sft_rl_gsm8k_test(base_url: str, model_name: str, tokenizer_n
         model_name=model_name,
         renderer=eval_renderer,
         sampler_path=sft_checkpoint.sampler_path,
+        lite=lite,
     )
 
     rl_renderer_name = await checkpoint_utils.resolve_renderer_name_from_checkpoint_or_default_async(
@@ -305,16 +325,17 @@ async def run_math_sft_rl_gsm8k_test(base_url: str, model_name: str, tokenizer_n
         batch_size=1,
         model_name_for_tokenizer=tokenizer_name_or_path,
         renderer_name=rl_renderer_name,
-        group_size=RL_GROUP_SIZE,
+        group_size=rl_group_size,
         seed=0,
     )
     rl_warmup_config = rl_train.Config(
         model_name=model_name,
+        recipe_name="verl_tinker_math_sft_rl_gsm8k_warmup",
         renderer_name=rl_renderer_name,
         dataset_builder=rl_warmup_dataset_builder,
         max_steps=1,
         learning_rate=RL_LEARNING_RATE,
-        max_tokens=RL_MAX_TOKENS,
+        max_tokens=rl_max_tokens,
         temperature=0.7,
         kl_penalty_coef=0.0,
         wandb_project=WANDB_PROJECT,
@@ -340,24 +361,26 @@ async def run_math_sft_rl_gsm8k_test(base_url: str, model_name: str, tokenizer_n
         model_name=model_name,
         renderer=eval_renderer,
         sampler_path=rl_warmup_checkpoint.sampler_path,
+        lite=lite,
     )
 
-    if RL_MAX_STEPS > 1:
+    if rl_max_steps > 1:
         rl_dataset_builder = math_env.get_math_dataset_builder(
             dataset_name=DATASET_NAME,
-            batch_size=RL_GROUPS_PER_BATCH,
+            batch_size=rl_groups_per_batch,
             model_name_for_tokenizer=tokenizer_name_or_path,
             renderer_name=rl_renderer_name,
-            group_size=RL_GROUP_SIZE,
+            group_size=rl_group_size,
             seed=0,
         )
         rl_config = rl_train.Config(
             model_name=model_name,
+            recipe_name="verl_tinker_math_sft_rl_gsm8k_rl",
             renderer_name=rl_renderer_name,
             dataset_builder=rl_dataset_builder,
-            max_steps=RL_MAX_STEPS,
+            max_steps=rl_max_steps,
             learning_rate=RL_LEARNING_RATE,
-            max_tokens=RL_MAX_TOKENS,
+            max_tokens=rl_max_tokens,
             temperature=0.7,
             # Tinker Cookbook computes the KL penalty client-side and folds it
             # into the advantages. The base-model sampling session stays bound
@@ -387,10 +410,11 @@ async def run_math_sft_rl_gsm8k_test(base_url: str, model_name: str, tokenizer_n
             model_name=model_name,
             renderer=eval_renderer,
             sampler_path=rl_checkpoint.sampler_path,
+            lite=lite,
         )
         stage_results = [base_eval, after_sft_eval, after_rl_1_eval, after_rl_eval]
     else:
         stage_results = [base_eval, after_sft_eval, after_rl_1_eval]
 
-    _write_experiment_summary(stage_results, model_name)
+    _write_experiment_summary(stage_results, model_name, lite=lite)
     _print_final_eval_summary(stage_results)

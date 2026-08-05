@@ -3,6 +3,26 @@ import time
 from urllib.parse import urljoin
 
 import requests
+from tinker_cookbook import model_info
+
+
+_LOCAL_RENDERERS = {
+    # verl-tinker can serve models that are not in the hosted Tinker model
+    # catalog. Cookbook 0.5.2 removed this small Qwen3 variant from its
+    # metadata, but it uses the standard Qwen3 renderer.
+    "Qwen/Qwen3-1.7B": "qwen3",
+}
+
+
+def recommended_renderer_name(model_name: str) -> str:
+    """Resolve a Cookbook renderer, including verl-tinker-only models."""
+
+    try:
+        return model_info.get_recommended_renderer_name(model_name)
+    except KeyError:
+        if renderer_name := _LOCAL_RENDERERS.get(model_name):
+            return renderer_name
+        raise
 
 
 def model_name_slug(model_name: str) -> str:

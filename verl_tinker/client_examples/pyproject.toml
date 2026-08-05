@@ -9,5 +9,5 @@ dependencies = [
     "protobuf>=7.35.1",
     "requests",
     "tinker>=0.18.0",
-    "tinker-cookbook[math-rl]==0.4.0",
+    "tinker-cookbook[math-rl,wandb]==0.5.2",
 ]

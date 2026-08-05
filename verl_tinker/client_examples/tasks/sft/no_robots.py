@@ -5,7 +5,7 @@ from typing import cast
 
 import datasets
 import tinker
-from tinker_cookbook import cli_utils, model_info, renderers
+from tinker_cookbook import cli_utils, renderers
 from tinker_cookbook.recipes.chat_sl import chat_datasets
 from tinker_cookbook.renderers import TrainOnWhat
 from tinker_cookbook.supervised import train
@@ -14,12 +14,12 @@ from tinker_cookbook.supervised.data import conversation_to_datum
 from tinker_cookbook.supervised.types import ChatDatasetBuilderCommonConfig
 from tinker_cookbook.tokenizer_utils import get_tokenizer
 
-from ..utils import model_name_slug
+from ..utils import model_name_slug, recommended_renderer_name
 
 
-async def run_no_robot_test(base_url, model_name, tokenizer_name_or_path=None):
+async def run_no_robot_test(base_url, model_name, tokenizer_name_or_path=None, lite: bool = False):
     tokenizer_name_or_path = tokenizer_name_or_path or model_name
-    renderer_name = model_info.get_recommended_renderer_name(model_name)
+    renderer_name = recommended_renderer_name(model_name)
     common = ChatDatasetBuilderCommonConfig(
         model_name_for_tokenizer=tokenizer_name_or_path,
         renderer_name=renderer_name,
@@ -30,13 +30,14 @@ async def run_no_robot_test(base_url, model_name, tokenizer_name_or_path=None):
     config = train.Config(
         log_path="/tmp/tinker-sft-norobot-demo",
         model_name=model_name,
+        recipe_name="verl_tinker_sft_no_robots",
         renderer_name=renderer_name,
         dataset_builder=chat_datasets.NoRobotsBuilder(common_config=common),
         learning_rate=1e-5,
         num_epochs=1,
         lora_rank=0,
-        max_steps=100,
-        eval_every=25,
+        max_steps=20 if lite else 100,
+        eval_every=0 if lite else 25,
         save_every=0,
         base_url=base_url,
         # WandB
@@ -52,11 +53,17 @@ async def run_no_robot_test(base_url, model_name, tokenizer_name_or_path=None):
 # rollout deployment
 
 
-async def run_no_robot_direct_sft_test(base_url, model_name, tokenizer_name_or_path=None):
+async def run_no_robot_direct_sft_test(
+    base_url,
+    model_name,
+    tokenizer_name_or_path=None,
+    lite: bool = False,
+):
     tokenizer_name_or_path = tokenizer_name_or_path or model_name
     log_path = os.environ.get("TINKER_NOROBOT_DIRECT_LOG_PATH", "/tmp/direct-sft-norobot")
     batch_size = int(os.environ.get("TINKER_NOROBOT_DIRECT_BATCH_SIZE", "16"))
-    max_steps = int(os.environ.get("TINKER_NOROBOT_DIRECT_MAX_STEPS", "100"))
+    configured_max_steps = int(os.environ.get("TINKER_NOROBOT_DIRECT_MAX_STEPS", "100"))
+    max_steps = min(configured_max_steps, 20) if lite else configured_max_steps
     max_length = int(os.environ.get("TINKER_NOROBOT_DIRECT_MAX_LENGTH", "2048"))
     learning_rate = float(os.environ.get("TINKER_NOROBOT_DIRECT_LEARNING_RATE", "1e-5"))
     lora_rank = int(os.environ.get("TINKER_NOROBOT_DIRECT_LORA_RANK", "0"))
@@ -65,7 +72,7 @@ async def run_no_robot_direct_sft_test(base_url, model_name, tokenizer_name_or_p
     Path(log_path).mkdir(parents=True, exist_ok=True)
 
     tokenizer = get_tokenizer(tokenizer_name_or_path)
-    renderer_name = model_info.get_recommended_renderer_name(model_name)
+    renderer_name = recommended_renderer_name(model_name)
     renderer = renderers.get_renderer(renderer_name, tokenizer=tokenizer)
 
     dataset = cast(datasets.DatasetDict, datasets.load_dataset("HuggingFaceH4/no_robots"))

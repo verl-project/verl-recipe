@@ -1,23 +1,28 @@
-from tinker_cookbook import checkpoint_utils, cli_utils, model_info
+from tinker_cookbook import checkpoint_utils, cli_utils
 from tinker_cookbook.distillation import sdft
 from tinker_cookbook.recipes.sdft.datasets import (
     SciKnowEvalSDFTBuilder,
 )
 
-from ..utils import model_name_slug
+from ..utils import model_name_slug, recommended_renderer_name
 
 
-async def run_sdft_single_task_test(base_url: str, model_name: str, tokenizer_name_or_path: str | None = None):
+async def run_sdft_single_task_test(
+    base_url: str,
+    model_name: str,
+    tokenizer_name_or_path: str | None = None,
+    lite: bool = False,
+):
     tokenizer_name_or_path = tokenizer_name_or_path or model_name
     renderer_name = await checkpoint_utils.resolve_renderer_name_from_checkpoint_or_default_async(
         model_name=model_name,
-        explicit_renderer_name=model_info.get_recommended_renderer_name(model_name),
+        explicit_renderer_name=recommended_renderer_name(model_name),
         load_checkpoint_path=None,
         base_url=base_url,
     )
 
     group_size = 1
-    groups_per_batch = 4
+    groups_per_batch = 2 if lite else 4
 
     dataset_builder = SciKnowEvalSDFTBuilder(
         groups_per_batch=groups_per_batch,
@@ -31,12 +36,13 @@ async def run_sdft_single_task_test(base_url: str, model_name: str, tokenizer_na
 
     config = sdft.Config(
         model_name=model_name,
+        recipe_name="verl_tinker_sdft_single_task",
         renderer_name=renderer_name,
         lora_rank=128,
         base_url=base_url,
         # Training
         learning_rate=2e-5,
-        max_tokens=256,
+        max_tokens=256 if lite else 512,
         temperature=1.0,
         # SDFT-specific
         topk=20,
@@ -55,7 +61,7 @@ async def run_sdft_single_task_test(base_url: str, model_name: str, tokenizer_na
         save_every=0,
         # Service / checkpoint
         load_checkpoint_path=None,
-        max_steps=50,
+        max_steps=20 if lite else 100,
     )
 
     cli_utils.check_log_dir(config.log_path, behavior_if_exists="delete")

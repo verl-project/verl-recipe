@@ -38,7 +38,8 @@ python -m verl_tinker.start \
   --config configs/quick_start/actor.yaml
 ```
 
-For the dedicated-teacher OPD example on one eight-GPU node, use:
+For the dedicated-teacher OPD and top-K distillation examples on one eight-GPU
+node, use:
 
 ```bash
 python -m verl_tinker.start \
@@ -80,6 +81,7 @@ Set `--test-name` to one of:
 - `sft_tulu3`
 - `sft_norobot`
 - `sft_norobot_no_rollout`
+- `topk_distillation`
 - `sdft_single_task`
 - `rl_gsm8k`
 - `sft_rl_gsm8k`
@@ -96,6 +98,27 @@ Useful arguments:
   `--model-name`.
 - `--api-key`: Tinker API key compatibility value.
 - `--test-name`: workload selector.
+- `--lite`: cap training phases at 20 steps and reduce expensive batch,
+  rollout, and evaluation sizes for nightly CI. Without it, workloads use
+  their longer settings so learning trends and evaluation changes are easier
+  to observe.
+
+Run the dedicated-teacher top-K distillation demo with:
+
+```bash
+uv run run_single_test.py \
+  --test-name topk_distillation \
+  --model-name Qwen/Qwen3-1.7B \
+  --lite
+```
+
+This is a thin wrapper around the Cookbook's `train_off_policy.Config` and
+`OpenThoughts3Builder`. The Qwen3-30B-A3B teacher supplies 20 soft token
+targets per position and the Qwen3-1.7B student trains on their weighted
+cross-entropy. In W&B, `train/distillation/loss` should show a downward
+smoothed trend. Lite mode uses 20 steps; the standard demo uses 200 steps to
+make that trend easier to see.
+
 Run the one-step OPD smoke workload with:
 
 ```bash

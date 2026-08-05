@@ -1,21 +1,21 @@
-from tinker_cookbook import checkpoint_utils, cli_utils, model_info
+from tinker_cookbook import checkpoint_utils, cli_utils
 from tinker_cookbook.recipes.math_rl import math_env
 from tinker_cookbook.rl.train import Config, KLReferenceConfig, main
 
-from ..utils import model_name_slug
+from ..utils import model_name_slug, recommended_renderer_name
 
 
-async def run_math_rl_gsm8k_test(base_url, model_name, tokenizer_name_or_path=None):
+async def run_math_rl_gsm8k_test(base_url, model_name, tokenizer_name_or_path=None, lite: bool = False):
     tokenizer_name_or_path = tokenizer_name_or_path or model_name
     renderer_name = await checkpoint_utils.resolve_renderer_name_from_checkpoint_or_default_async(
         model_name=model_name,
-        explicit_renderer_name=model_info.get_recommended_renderer_name(model_name),
+        explicit_renderer_name=recommended_renderer_name(model_name),
         load_checkpoint_path=None,
         base_url=base_url,
     )
 
-    group_size = 16
-    groups_per_batch = 16
+    group_size = 4 if lite else 16
+    groups_per_batch = 4 if lite else 16
 
     dataset_builder = math_env.get_math_dataset_builder(
         dataset_name="gsm8k",
@@ -28,13 +28,14 @@ async def run_math_rl_gsm8k_test(base_url, model_name, tokenizer_name_or_path=No
 
     config = Config(
         model_name=model_name,
+        recipe_name="verl_tinker_math_rl_gsm8k",
         renderer_name=renderer_name,
         dataset_builder=dataset_builder,
-        max_steps=30,
+        max_steps=20 if lite else 100,
         # Training
         learning_rate=1e-5,
         lora_rank=0,
-        max_tokens=4096,
+        max_tokens=1024 if lite else 4096,
         temperature=0.7,
         kl_penalty_coef=0.01,
         kl_reference_config=KLReferenceConfig(base_model=model_name),
