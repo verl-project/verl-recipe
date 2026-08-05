@@ -5,7 +5,6 @@ from urllib.parse import urljoin
 import requests
 from tinker_cookbook import model_info
 
-
 _LOCAL_RENDERERS = {
     # verl-tinker can serve models that are not in the hosted Tinker model
     # catalog. Cookbook 0.5.2 removed this small Qwen3 variant from its

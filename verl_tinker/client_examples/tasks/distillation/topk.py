@@ -60,10 +60,7 @@ async def run_topk_distillation_test(
         load_checkpoint_path=None,
         log_path="/tmp/tinker-topk-distillation-demo",
         wandb_project="verl-tinker-ci",
-        wandb_name=(
-            f"topk-distillation-{model_name_slug(model_name)}"
-            f"-teacher-{model_name_slug(TEACHER_MODEL)}"
-        ),
+        wandb_name=(f"topk-distillation-{model_name_slug(model_name)}-teacher-{model_name_slug(TEACHER_MODEL)}"),
         base_url=base_url,
     )
 
