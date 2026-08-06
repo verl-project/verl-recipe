@@ -1,0 +1,66 @@
+# RandOpt recipe configuration.
+
+randopt:
+  sigma: 0.001
+  # Optional list of perturbation scales. When set, each sampled perturbation
+  # draws one sigma uniformly from this list, following the reference RandOpt code.
+  sigma_list: null
+  population_size: 30
+  # Evaluate majority-vote ensembles for top int(ratio * population_size) perturbations.
+  top_k_ratios:
+    - 0.02
+    - 0.1
+  # Optional absolute K values. When set, this takes precedence over top_k_ratios.
+  top_k_values: null
+  num_engines: 4
+  tensor_parallel_size: 1
+  precision: bfloat16
+  max_tokens: 1024
+  temperature: 0.0
+  gpu_memory_utilization: 0.85
+  enable_prefix_caching: false
+  enforce_eager: true
+  worker_extension_cls: recipe.randopt.worker_extension.WorkerExtension
+  global_seed: 42
+  debug_print_samples: false
+  debug_max_samples: 4
+
+model:
+  path: Qwen/Qwen2.5-3B-Instruct
+  trust_remote_code: false
+
+data:
+  # Built-in options: countdown, parquet_prompt, custom.
+  task_type: countdown
+  train_files: data/countdown/train.parquet
+  val_files: data/countdown/test.parquet
+  train_max_samples: 200
+  val_max_samples: -1
+  system_message: "You are a helpful assistant. You first think about the reasoning process in your mind and then provide the user with the answer."
+  user_template: "Using the numbers {numbers}, create an equation that equals {target}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. Return the final answer in <answer> </answer> tags, for example <answer> (1 + 2) / 3 </answer>."
+  response_prompt: "Let me solve this step by step.\n<think>"
+  reward_fn_path: null
+  reward_fn_name: null
+  prompt_processor_path: null
+  prompt_processor_name: null
+
+trainer:
+  project_name: randopt
+  experiment_name: countdown-randopt
+  logger:
+    - console
+  default_local_dir: /tmp/${oc.env:USER}/verl/randopt_checkpoints
+  default_hdfs_dir: null
+  device: cuda
+  n_gpus_per_node: 4
+  nnodes: 1
+  total_epochs: null
+  test_freq: null
+  save_freq: -1
+  npu_profile:
+    enable: false
+
+ray_kwargs:
+  ray_init:
+    runtime_env: {}
+
