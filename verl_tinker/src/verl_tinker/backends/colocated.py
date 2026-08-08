@@ -39,6 +39,7 @@ from verl.single_controller.base.decorator import Dispatch, register
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
 from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.ppo.utils import Role
+from verl.utils import tensordict_utils as tu
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.import_utils import import_external_libs
 from verl.utils.memory_utils import aggressive_empty_cache
@@ -113,8 +114,11 @@ class ColocatedBackend:
         self._no_rollout_deployment: bool = is_no_rollout_deployment(config)
         self.use_kl_loss: bool = config.actor_rollout_ref.actor.get("use_kl_loss", False)
         self.use_kl_in_reward: bool = config.get("algorithm", {}).get("use_kl_in_reward", False)
-        self.use_reference_policy: bool = needs_reference_policy(config)
         self._ref_in_actor: bool = is_ref_in_actor(config)
+        # A LoRA actor can always serve base-model reference log-probs by
+        # disabling its adapter, even when the server-side training algorithm
+        # did not otherwise request a reference policy.
+        self.use_reference_policy: bool = needs_reference_policy(config) or self._ref_in_actor
         self._enable_offload = bool(config.get("server", {}).get("enable_offload", True))
 
         self.actor_rollout_wg: Optional[RayWorkerGroup] = None
@@ -572,6 +576,10 @@ class ColocatedBackend:
 
     def compute_ref_log_prob(self, data):
         with self._engine_lock:
+            if self._ref_in_actor:
+                self._prepare_model_roles({ModelRole.ACTOR}, reason="compute_ref_log_prob")
+                tu.assign_non_tensor(data, no_lora_adapter=True)
+                return self.actor_rollout_wg.compute_log_prob(data)
             if self.ref_policy_wg is None:
                 raise RuntimeError("Reference policy not initialized (actor_rollout_ref.ref.enable is false)")
             self._prepare_model_roles({ModelRole.REF}, reason="compute_ref_log_prob")

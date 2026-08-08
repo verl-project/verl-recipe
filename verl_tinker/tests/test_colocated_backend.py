@@ -28,6 +28,7 @@ import pytest
 import torch
 from omegaconf import OmegaConf
 from tensordict import TensorDict
+from verl_tinker.backends._loss import is_ref_in_actor
 from verl_tinker.backends.colocated import (
     ColocatedBackend,
     NoRolloutWorker,
@@ -97,6 +98,36 @@ def _make_config(
     return OmegaConf.create(cfg)
 
 
+@pytest.mark.parametrize(
+    "model_overrides",
+    [
+        {"lora": {"rank": 8}},
+        {"lora_rank": 8},
+        {"lora_adapter_path": "/fake/adapter"},
+    ],
+)
+def test_is_ref_in_actor_detects_verl_lora_config(model_overrides):
+    config = _make_config()
+    config.actor_rollout_ref.model.update(model_overrides)
+
+    assert is_ref_in_actor(config) is True
+
+
+@pytest.mark.parametrize(
+    "model_overrides",
+    [
+        {},
+        {"lora": None, "lora_rank": 0},
+        {"lora": {"rank": 0}, "lora_adapter_path": None},
+    ],
+)
+def test_is_ref_in_actor_rejects_disabled_lora_config(model_overrides):
+    config = _make_config()
+    config.actor_rollout_ref.model.update(model_overrides)
+
+    assert is_ref_in_actor(config) is False
+
+
 def test_init_imports_model_external_libs_before_workers_and_rollout():
     config = _make_config()
     config.actor_rollout_ref.model.external_lib = [
@@ -126,6 +157,23 @@ def test_init_imports_model_external_libs_before_workers_and_rollout():
 
     mock_import.assert_called_once_with(config.actor_rollout_ref.model.external_lib)
     assert call_order == ["import", "build", "spawn", "init_workers", "offload", "init_rollout"]
+
+
+def test_lora_exposes_reference_capability_without_reference_config():
+    config = _make_config()
+
+    with (
+        patch.object(ColocatedBackend, "_build_role_cls", return_value=({}, "actor")),
+        patch.object(ColocatedBackend, "_spawn_worker_groups", return_value={}),
+        patch.object(ColocatedBackend, "_init_worker_groups"),
+        patch.object(ColocatedBackend, "_prepare_model_roles"),
+        patch.object(ColocatedBackend, "_init_rollout_replicas"),
+        patch(f"{_BACKEND_MODULE}.needs_reference_policy", return_value=False),
+        patch(f"{_BACKEND_MODULE}.is_ref_in_actor", return_value=True),
+    ):
+        backend = ColocatedBackend(config)
+
+    assert backend.capabilities.use_reference_policy is True
 
 
 def _make_backend(config):
@@ -475,6 +523,29 @@ class TestReplicaLifecycle:
         backend.compute_ref_log_prob("data")
 
         backend.checkpoint_manager.sleep_replicas.assert_called_once()
+
+    def test_lora_reference_log_prob_uses_actor_without_adapter(self):
+        """LoRA base log-probs reuse actor inference with its adapter disabled."""
+        backend = self._make_lifecycle_backend()
+        backend._ref_in_actor = True
+        backend.ref_policy_wg = None
+        data = TensorDict({}, batch_size=[])
+
+        backend.compute_ref_log_prob(data)
+
+        backend.actor_rollout_wg.compute_log_prob.assert_called_once_with(data)
+        assert tu.get(data, "no_lora_adapter") is True
+        assert backend._lifecycle.awake_roles == {ModelRole.ACTOR}
+
+    def test_full_finetune_reference_log_prob_uses_reference_worker(self):
+        """Full-model training retains the separate reference-worker path."""
+        backend = self._make_lifecycle_backend()
+        backend._ref_in_actor = False
+
+        backend.compute_ref_log_prob("data")
+
+        backend.ref_policy_wg.compute_ref_log_prob.assert_called_once_with("data")
+        backend.actor_rollout_wg.compute_log_prob.assert_not_called()
 
     def test_forward_backward_sleeps_first(self):
         """forward_backward() sleeps replicas before running FSDP backward."""
