@@ -261,6 +261,22 @@ def test_multi_teacher_config_uses_dedicated_pools_and_validates_gpu_footprints(
     assert processed.distillation.teacher_models.tulu3_teacher.inference.tensor_model_parallel_size == 8
 
 
+def test_qwen3_1b7_actor_rollout_lora_config_validates():
+    config = OmegaConf.load(_TINKER_CONFIG_DIR / "advance" / "qwen3_1b7_actor_rollout_lora.yaml")
+
+    processed = process_actor_rollout_ref_config(config)
+    errors = _validate_config(processed)
+
+    assert errors == []
+    assert processed.server.model_name == "Qwen/Qwen3-1.7B"
+    assert processed.actor_rollout_ref.actor.strategy == "veomni"
+    assert processed.actor_rollout_ref.rollout.name == "vllm"
+    assert processed.actor_rollout_ref.model.lora_rank == 32
+    assert processed.actor_rollout_ref.model.lora_alpha == 32
+    assert processed.actor_rollout_ref.model.target_modules == "all-linear"
+    assert processed.actor_rollout_ref.ref.enable is False
+
+
 @pytest.mark.parametrize(
     ("teacher_identifiers", "expected_name", "expected_path"),
     [
