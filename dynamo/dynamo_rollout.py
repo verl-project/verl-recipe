@@ -112,6 +112,14 @@ class ServerAdapter(_VllmServerAdapter):
         tag = f"[v4a-4][rank={self.rollout_rank}]"
         print(f"{tag} ENTER update_weights", flush=True)
 
+        # The naive path resumes vLLM inside ``WorkerDict.update_weights``;
+        # the NCCL/NIXL path returns early before that resume runs, so we
+        # wake the engine here (weights + kv_cache) before pushing weights
+        # via CUDA IPC. Without this the IPC handshake finds no GPU buffers
+        # and the next generation request after refit fails on missing KV.
+        if self.config.free_cache_engine and self._ensure_server_handle():
+            await self.server_handle.wake_up.remote(tags=["weights", "kv_cache"])
+
         # Fire RPC (only rank 0 actually fires per parent _execute_method gating).
         future = await self._execute_method(
             "update_weights_from_ipc",
