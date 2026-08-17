@@ -1,0 +1,231 @@
+# 2-node verl+dynamo NIXL test rig (validated on AWS p5.48xlarge: 8xH100, EFA x32).
+# Adjust before use: metadata.namespace/labels, the model-cache PVC name, and the
+# RDMA resource for your fabric (AWS: vpc.amazonaws.com/efa, IB clusters: rdma/ib).
+# Full-node pods: 8 GPU + all 32 EFA NICs (partial EFA requests break GPU<->NIC
+# rail affinity). IPC_LOCK is required or NIXL memory registration hangs.
+# For the EFA LIBFABRIC path, additionally install the AWS EFA userspace
+# (efa_installer.sh -y --skip-kmod --skip-limit-conf --no-verify) and export
+# LD_LIBRARY_PATH=/opt/amazon/efa/lib FI_EFA_USE_DEVICE_RDMA=1
+# FI_EFA_ENABLE_SHM_TRANSFER=0 before `ray start`.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nixl-node-0
+  namespace: elaineh
+  labels:
+    owner: elaineh
+    purpose: nixl-multinode-verl
+    nixl-role: head
+spec:
+  restartPolicy: Never
+  terminationGracePeriodSeconds: 30
+  containers:
+    - name: main
+      image: verlai/verl:vllm020.dev1
+      command: ["bash", "-c"]
+      args:
+        - |
+          set -ex
+          mkdir -p /workspace && cd /workspace
+          # --- etcd + nats-server (dynamo control plane subprocesses) ---
+          if ! command -v etcd >/dev/null; then
+            curl -fsSL https://github.com/etcd-io/etcd/releases/download/v3.5.21/etcd-v3.5.21-linux-amd64.tar.gz | tar xz --strip-components=1 -C /usr/local/bin etcd-v3.5.21-linux-amd64/etcd
+          fi
+          if ! command -v nats-server >/dev/null; then
+            curl -fsSL https://github.com/nats-io/nats-server/releases/download/v2.10.29/nats-server-v2.10.29-linux-amd64.tar.gz | tar xz --strip-components=1 -C /usr/local/bin nats-server-v2.10.29-linux-amd64/nats-server
+          fi
+          # --- verl @ pinned commit (REQUIRED_VERL.txt), keep image torch/vllm ---
+          if [ ! -d verl ]; then
+            git clone https://github.com/verl-project/verl.git
+            cd verl && git checkout d82d2777b5dc3e96a8a45168d02660312707ab98 && cd ..
+          fi
+          pip uninstall -y verl 2>/dev/null || true
+          pip install --no-deps -e /workspace/verl
+          # --- recipe branch at verl/recipe (README layout convention) ---
+          # verl's checkout ships an empty recipe/ dir — test for .git, not the dir
+          if [ ! -d verl/recipe/.git ]; then
+            rm -rf verl/recipe
+            git clone -b dynamo-nixl-multinode-v4 https://github.com/hou2lin/verl-recipe.git verl/recipe
+          fi
+          # --- dynamo + nixl ---
+          python -c "import dynamo" 2>/dev/null || pip install "ai-dynamo==1.3.1"
+          python -c "from nixl import _api" 2>/dev/null || pip install nixl
+          # cupy: required by verl nixl/nccl checkpoint engines (transfer buffers)
+          python -c "import cupy" 2>/dev/null || pip install "cupy-cuda$(python -c 'import torch; print(torch.version.cuda.split(".")[0])')x"
+          # --- tiny model + data for functional smoke ---
+          python - <<'PYEOF'
+          from huggingface_hub import snapshot_download, hf_hub_download
+          snapshot_download("Qwen/Qwen2.5-0.5B-Instruct", local_dir="/workspace/models/Qwen2.5-0.5B-Instruct")
+          hf_hub_download("BytedTsinghua-SIA/DAPO-Math-17k", "data/dapo-math-17k.parquet", repo_type="dataset", local_dir="/workspace/data_dapo")
+          hf_hub_download("BytedTsinghua-SIA/AIME-2024", "data/aime-2024.parquet", repo_type="dataset", local_dir="/workspace/data_aime")
+          PYEOF
+          nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader || true
+          ls /dev/infiniband/ || echo "WARN: no infiniband devices"
+          echo "[bootstrap] ready; sleeping"
+          sleep infinity
+      env:
+        - name: WORKSPACE
+          value: /workspace
+        # Inherited by `ray start` → every Ray worker process. verl/__init__
+        # imports VERL_USE_EXTERNAL_MODULES on package import; recipe.* is
+        # only importable with /workspace/verl on the path.
+        - name: VERL_USE_EXTERNAL_MODULES
+          value: recipe.dynamo.register
+        - name: PYTHONPATH
+          value: /workspace/verl
+        # UCX for the NIXL checkpoint-engine chain. EFA supports SRD only —
+        # `rc` matches no device on p5 and silently drops to tcp/eth0
+        # (~85MB/s). srd rides EFA RDMA; tcp stays as fallback; cuda_ipc
+        # covers the same-GPU trainer<->CE hop. (On IB clusters use rc.)
+        - name: UCX_TLS
+          value: "cuda_ipc,cuda_copy,srd,tcp"
+        - name: UCX_KEEPALIVE_INTERVAL
+          value: "300s"
+        - name: GLOO_SOCKET_IFNAME
+          value: eth0
+        - name: NCCL_SOCKET_IFNAME
+          value: eth0
+        - name: NCCL_STORE_TIMEOUT
+          value: "7200"
+        - name: NIXL_LOG_LEVEL
+          value: INFO
+      securityContext:
+        capabilities:
+          add: ["IPC_LOCK", "SYS_PTRACE"]
+      resources:
+        requests:
+          nvidia.com/gpu: 8
+          vpc.amazonaws.com/efa: 32
+          cpu: "60"
+          memory: 600Gi
+        limits:
+          nvidia.com/gpu: 8
+          vpc.amazonaws.com/efa: 32
+          cpu: "160"
+          memory: 1200Gi
+      volumeMounts:
+        - name: ws
+          mountPath: /workspace
+        - name: models
+          mountPath: /models
+          readOnly: true
+        - name: shm
+          mountPath: /dev/shm
+  volumes:
+    - name: ws
+      emptyDir: {}
+    - name: models
+      persistentVolumeClaim:
+        claimName: shared-model-cache
+    - name: shm
+      emptyDir:
+        medium: Memory
+        sizeLimit: 256Gi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nixl-node-1
+  namespace: elaineh
+  labels:
+    owner: elaineh
+    purpose: nixl-multinode-verl
+    nixl-role: worker
+spec:
+  restartPolicy: Never
+  terminationGracePeriodSeconds: 30
+  containers:
+    - name: main
+      image: verlai/verl:vllm020.dev1
+      command: ["bash", "-c"]
+      args:
+        - |
+          set -ex
+          mkdir -p /workspace && cd /workspace
+          if ! command -v etcd >/dev/null; then
+            curl -fsSL https://github.com/etcd-io/etcd/releases/download/v3.5.21/etcd-v3.5.21-linux-amd64.tar.gz | tar xz --strip-components=1 -C /usr/local/bin etcd-v3.5.21-linux-amd64/etcd
+          fi
+          if ! command -v nats-server >/dev/null; then
+            curl -fsSL https://github.com/nats-io/nats-server/releases/download/v2.10.29/nats-server-v2.10.29-linux-amd64.tar.gz | tar xz --strip-components=1 -C /usr/local/bin nats-server-v2.10.29-linux-amd64/nats-server
+          fi
+          if [ ! -d verl ]; then
+            git clone https://github.com/verl-project/verl.git
+            cd verl && git checkout d82d2777b5dc3e96a8a45168d02660312707ab98 && cd ..
+          fi
+          pip uninstall -y verl 2>/dev/null || true
+          pip install --no-deps -e /workspace/verl
+          # verl's checkout ships an empty recipe/ dir — test for .git, not the dir
+          if [ ! -d verl/recipe/.git ]; then
+            rm -rf verl/recipe
+            git clone -b dynamo-nixl-multinode-v4 https://github.com/hou2lin/verl-recipe.git verl/recipe
+          fi
+          python -c "import dynamo" 2>/dev/null || pip install "ai-dynamo==1.3.1"
+          python -c "from nixl import _api" 2>/dev/null || pip install nixl
+          # cupy: required by verl nixl/nccl checkpoint engines (transfer buffers)
+          python -c "import cupy" 2>/dev/null || pip install "cupy-cuda$(python -c 'import torch; print(torch.version.cuda.split(".")[0])')x"
+          python - <<'PYEOF'
+          from huggingface_hub import snapshot_download, hf_hub_download
+          snapshot_download("Qwen/Qwen2.5-0.5B-Instruct", local_dir="/workspace/models/Qwen2.5-0.5B-Instruct")
+          hf_hub_download("BytedTsinghua-SIA/DAPO-Math-17k", "data/dapo-math-17k.parquet", repo_type="dataset", local_dir="/workspace/data_dapo")
+          hf_hub_download("BytedTsinghua-SIA/AIME-2024", "data/aime-2024.parquet", repo_type="dataset", local_dir="/workspace/data_aime")
+          PYEOF
+          nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader || true
+          ls /dev/infiniband/ || echo "WARN: no infiniband devices"
+          echo "[bootstrap] ready; sleeping"
+          sleep infinity
+      env:
+        - name: WORKSPACE
+          value: /workspace
+        # Inherited by `ray start` → every Ray worker process. verl/__init__
+        # imports VERL_USE_EXTERNAL_MODULES on package import; recipe.* is
+        # only importable with /workspace/verl on the path.
+        - name: VERL_USE_EXTERNAL_MODULES
+          value: recipe.dynamo.register
+        - name: PYTHONPATH
+          value: /workspace/verl
+        - name: UCX_TLS
+          value: "cuda_ipc,cuda_copy,rc,tcp"
+        - name: UCX_RC_TIMEOUT
+          value: "600s"
+        - name: UCX_KEEPALIVE_INTERVAL
+          value: "300s"
+        - name: GLOO_SOCKET_IFNAME
+          value: eth0
+        - name: NCCL_SOCKET_IFNAME
+          value: eth0
+        - name: NCCL_STORE_TIMEOUT
+          value: "7200"
+        - name: NIXL_LOG_LEVEL
+          value: INFO
+      securityContext:
+        capabilities:
+          add: ["IPC_LOCK", "SYS_PTRACE"]
+      resources:
+        requests:
+          nvidia.com/gpu: 8
+          vpc.amazonaws.com/efa: 32
+          cpu: "60"
+          memory: 600Gi
+        limits:
+          nvidia.com/gpu: 8
+          vpc.amazonaws.com/efa: 32
+          cpu: "160"
+          memory: 1200Gi
+      volumeMounts:
+        - name: ws
+          mountPath: /workspace
+        - name: models
+          mountPath: /models
+          readOnly: true
+        - name: shm
+          mountPath: /dev/shm
+  volumes:
+    - name: ws
+      emptyDir: {}
+    - name: models
+      persistentVolumeClaim:
+        claimName: shared-model-cache
+    - name: shm
+      emptyDir:
+        medium: Memory
+        sizeLimit: 256Gi

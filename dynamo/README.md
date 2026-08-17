@@ -133,6 +133,55 @@ sbatch recipe/dynamo/train_30b_rl_dynamo_kv_metrics.sh     # KV router + metrics
 
 
 
+## NIXL weight sync (checkpoint engine)
+
+By default the trainer pushes weights to the Dynamo workers through verl's
+naive CUDA-IPC path. Setting
+
+```bash
+actor_rollout_ref.rollout.checkpoint_engine.backend=nixl \
+actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=1024
+```
+
+routes refit through verl's `CheckpointEngineManager` instead: the recipe
+spawns one `CheckpointEngineWorker` Ray actor per rollout rank (colocated on
+the paired GPU — CUDA IPC requires same-GPU pairing) and NIXL moves the
+buckets down a trainer → CE₁ → … → CEₙ chain, which crosses nodes at most
+twice regardless of world size.
+
+### Support matrix
+
+| backend | single-node | multi-node |
+|---|---|---|
+| naive | ✅ | ✅ |
+| NIXL  | ✅ | ✅ (2×8 GPU validated) |
+| NCCL  | ❌ NCCL forbids two ranks on one GPU: the colocated trainer rank and CE worker share a device, so cupy `groupEnd` aborts with `Duplicate GPU detected`. NIXL is unaffected because UCX/libfabric support multi-process same-GPU. | ❌ same |
+
+### Transport selection (read this before multi-node)
+
+NIXL's default backend is UCX, and UCX picks its transport from `UCX_TLS`.
+The right setting depends on the RDMA fabric:
+
+| fabric | recommendation |
+|---|---|
+| InfiniBand / RoCE | `UCX_TLS=cuda_ipc,cuda_copy,rc,tcp` — `rc` gives native RDMA read at line rate. |
+| AWS EFA | UCX cannot RDMA-read over EFA (SRD is send/recv only, so UCX emulates RMA over active messages — we measured 0.23 GB/s). Use NIXL's **LIBFABRIC** backend instead: `+actor_rollout_ref.rollout.checkpoint_engine.engine_kwargs.nixl.backends=[LIBFABRIC]`, with the AWS libfabric (≥1.18) on `LD_LIBRARY_PATH` and `FI_EFA_USE_DEVICE_RDMA=1 FI_EFA_ENABLE_SHM_TRANSFER=0`. Same 1 GiB cross-node read: **48.5 GB/s**. |
+
+Cross-node measured on 2×8×H100 (p5.48xlarge, EFA×32): a 3-step GRPO smoke
+passes with `update_weights` at 12.2 s (UCX/tcp), 11.5 s (UCX/srd) and
+3.1 s (LIBFABRIC) for a 0.5B model, where the remaining LIBFABRIC time is
+chain orchestration latency, not bandwidth.
+
+`dynamo/k8s/` carries the validation harness: the 2-pod Kubernetes rig
+(RDMA resources + `IPC_LOCK`, which NIXL needs for memory registration),
+the training smoke (`run_nixl_smoke.sh`), and a standalone cross-node
+bandwidth probe (`nixl_bench.py`) for checking what a fabric actually
+delivers before debugging the training path.
+
+> `engine_kwargs.nixl.backends` requires verl ≥ the commit adding the
+> `backends` kwarg to `NIXLCheckpointEngine` (in review); on IB/RoCE
+> fabrics the stock UCX backend needs no verl change.
+
 ## KV-aware routing result
 
 The matched comparison below keeps only Dynamo KV routing with
