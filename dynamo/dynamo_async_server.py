@@ -2157,8 +2157,13 @@ class DynamoReplica(RolloutReplica):
 
         # Now that dynamo.vllm subprocesses are alive on the GPUs identified
         # by self._trainer_worker_infos, spawn matching CheckpointEngineWorker
-        # actors and adopt them as our framework-facing workers.
-        self.workers = self._spawn_rollout_checkpoint_engine_workers()
+        # actors and adopt them as our framework-facing workers. Naive mode
+        # must keep the trainer WorkerDict handles: its refit runs inside
+        # WorkerDict.update_weights, and a CE actor's ServerAdapter would
+        # collide with the WorkerDict adapter on the per-rank IPC socket
+        # (observed as a stuck sender -> 30min NCCL watchdog abort).
+        if self.config.checkpoint_engine.backend != "naive":
+            self.workers = self._spawn_rollout_checkpoint_engine_workers()
 
     def _spawn_rollout_checkpoint_engine_workers(self) -> list[ActorHandle]:
         """Spawn one CheckpointEngineWorker Ray actor per rollout rank.
