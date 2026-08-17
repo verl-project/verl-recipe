@@ -1,0 +1,35 @@
+diff --git a/verl/checkpoint_engine/nixl_checkpoint_engine.py b/verl/checkpoint_engine/nixl_checkpoint_engine.py
+index dd356e00..e9e520ab 100644
+--- a/verl/checkpoint_engine/nixl_checkpoint_engine.py
++++ b/verl/checkpoint_engine/nixl_checkpoint_engine.py
+@@ -57,9 +57,14 @@ class NixlAgent:
+     `nixl_agent.send_notif` to send bucket tensor metadata.
+     """
+ 
+-    def __init__(self):
++    def __init__(self, backends=None):
+         self.agent_name = str(uuid.uuid4())
+-        self.agent = nixl_api.nixl_agent(self.agent_name)
++        if backends:
++            self.agent = nixl_api.nixl_agent(
++                self.agent_name, nixl_api.nixl_agent_config(backends=list(backends))
++            )
++        else:
++            self.agent = nixl_api.nixl_agent(self.agent_name)
+         self.notifications: dict[str, deque[bytes]] = defaultdict(deque)
+ 
+         self.start_zmq_server()
+@@ -255,11 +260,12 @@ class NIXLCheckpointEngine(CheckpointEngine):
+         device: str = "cuda",
+         rollout_dtype: torch.dtype = torch.bfloat16,
+         is_master: bool = False,
++        backends=None,
+     ):
+         self.bucket_size = bucket_size
+         self.device = device
+         self.rollout_dtype = rollout_dtype
+-        self.agent = NixlAgent()
++        self.agent = NixlAgent(backends)
+         self.is_master = is_master
+ 
+     def prepare(self) -> NixlAgentMetadata:

@@ -167,10 +167,17 @@ The right setting depends on the RDMA fabric:
 | InfiniBand / RoCE | `UCX_TLS=cuda_ipc,cuda_copy,rc,tcp` — `rc` gives native RDMA read at line rate. |
 | AWS EFA | UCX cannot RDMA-read over EFA (SRD is send/recv only, so UCX emulates RMA over active messages — we measured 0.23 GB/s). Use NIXL's **LIBFABRIC** backend instead: `+actor_rollout_ref.rollout.checkpoint_engine.engine_kwargs.nixl.backends=[LIBFABRIC]`, with the AWS libfabric (≥1.18) on `LD_LIBRARY_PATH` and `FI_EFA_USE_DEVICE_RDMA=1 FI_EFA_ENABLE_SHM_TRANSFER=0`. Same 1 GiB cross-node read: **48.5 GB/s**. |
 
-Cross-node measured on 2×8×H100 (p5.48xlarge, EFA×32): a 3-step GRPO smoke
-passes with `update_weights` at 12.2 s (UCX/tcp), 11.5 s (UCX/srd) and
-3.1 s (LIBFABRIC) for a 0.5B model, where the remaining LIBFABRIC time is
-chain orchestration latency, not bandwidth.
+Cross-node measured on 2×8×H100 (p5.48xlarge, EFA×32), 3-step GRPO,
+step-3 `update_weights`:
+
+| model | naive | NIXL UCX/tcp | NIXL UCX/srd | NIXL LIBFABRIC |
+|---|---|---|---|---|
+| Qwen2.5-0.5B | 3.08 s | 12.2 s | 11.6 s | 3.09 s |
+| Qwen3-8B | 29.7 s | — | — | **27.1 s** |
+
+At 0.5B the LIBFABRIC path is at parity with naive (the shared per-rank
+engine-consume dominates); at 8B it is ~9% faster. The UCX numbers are the
+EFA active-message emulation ceiling, not a tuning issue.
 
 `dynamo/k8s/` carries the validation harness: the 2-pod Kubernetes rig
 (RDMA resources + `IPC_LOCK`, which NIXL needs for memory registration),
