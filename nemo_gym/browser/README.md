@@ -76,11 +76,27 @@ not a run where the policy got worse. This recipe keeps them apart:
    flagged samples out of the group baseline, and drops a group entirely when
    fewer than two valid samples remain or more than a quarter of it failed.
 
-Steps 1–3 work as-is. **Step 4 needs one upstream change**: registered advantage
-estimators receive `non_tensor_batch` only for `gdpo`
-(`verl/trainer/ppo/ray_trainer.py`, the `else` branch of `compute_advantage`), so
-the flags do not reach the estimator yet and it degrades to stock GRPO behaviour
-rather than guessing. The change is two lines and is being proposed separately:
+Steps 1–3 work as-is. Step 4 needs the flags to reach the estimator, and
+registered estimators receive `non_tensor_batch` only for `gdpo`
+(`verl/trainer/ppo/ray_trainer.py`, the `else` branch of `compute_advantage`).
+Two ways around that, both shipped here:
+
+**Drop the sample (no patching).** Set `NEMO_GYM_BROWSER_DROP_INVALID=1`. A
+rollout that is still invalid after its retries returns nothing, and the V1
+trainer skips a sample whose agent loop returned nothing, so the failure never
+enters the batch. The group is smaller but never poisoned. This is the default
+in `submit_webvoyager.sh`.
+
+**Route GRPO through the estimator (`patches.py`).** `sitecustomize.py` installs
+a wrapper around `compute_advantage` that dispatches to `grpo_env_aware` only
+when the batch actually carries `env_invalid` flags, and forwards everything
+else untouched — other recipes and stock GRPO runs are unaffected even with this
+module loaded. Ray workers are separate processes, which is why this goes
+through `sitecustomize` rather than a driver-side import; the submit script puts
+this directory on `PYTHONPATH`. Disable with `NEMO_GYM_BROWSER_DISABLE_PATCHES=1`.
+
+The wrapper exists because of a two-line gap upstream, which is worth closing
+regardless:
 
 ```python
 # verl/trainer/ppo/ray_trainer.py, compute_advantage()
@@ -88,9 +104,8 @@ adv_kwargs["non_tensor_batch"] = data.non_tensor_batch
 adv_kwargs["batch"] = data.batch
 ```
 
-Until then, leave `algorithm.adv_estimator=grpo`; the loss masking and the
-resampling still remove the bulk of the damage. The estimator is unit-tested
-offline in the meantime.
+Once that lands, `patches.py` can be deleted and `algorithm.adv_estimator=grpo_env_aware`
+is enough.
 
 Related NeMo Gym issues, which would let the environment report this itself
 instead of the recipe inferring it: NVIDIA-NeMo/Gym#2608 (report an
@@ -106,7 +121,16 @@ pytest recipe/nemo_gym/browser/tests -q
 ```
 
 Covers the group-statistics estimator (including the "flags absent must not mean
-everything is invalid" case), the dataset conversion, and transcript truncation.
+everything is invalid" case), the advantage routing wrapper, the dataset
+conversion, and transcript truncation.
+
+Before spending a node, check the environment itself over the same contract the
+agent loop uses:
+
+```bash
+gym env start --resources-server interactive_browser --no-agent --no-model
+python recipe/nemo_gym/browser/smoke_environment.py --url http://127.0.0.1:8000
+```
 
 ## Files
 
@@ -115,6 +139,8 @@ everything is invalid" case), the dataset conversion, and transcript truncation.
 | `browser_agent_loop.py` | `BrowserTool` (NeMo Gym HTTP contract) and `BrowserToolAgentLoop` |
 | `judge.py` | Binary LLM judge for open-ended tasks |
 | `group_stats.py` | `grpo_env_aware` advantage estimator |
+| `patches.py`, `sitecustomize.py` | Route GRPO through that estimator until verl passes `non_tensor_batch` to registered estimators |
+| `smoke_environment.py` | Walk one episode over the environment's HTTP contract, no GPU and no policy |
 | `dataset.py` | NeMo Gym rollout rows to `tools_kwargs` |
 | `prepare_webvoyager_data.py` | Task list to rollout inputs |
 | `configs/` | Environment config paths, tool config |

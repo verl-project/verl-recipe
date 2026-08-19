@@ -103,7 +103,8 @@ PYTHONUNBUFFERED=1 srun --overlap --nodes=1 --ntasks=1 -w "${head_node}" \
         JUDGE_BASE_URL="${JUDGE_BASE_URL}" \
         JUDGE_API_KEY="${JUDGE_API_KEY}" \
         JUDGE_MODEL="${JUDGE_MODEL}" \
-        PYTHONPATH="${VERL_ROOT}" \
+        PYTHONPATH="${VERL_ROOT}/recipe/nemo_gym/browser:${VERL_ROOT}" \
+        NEMO_GYM_BROWSER_DROP_INVALID=1 \
         VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
     python3 -m verl.trainer.main_ppo \
             data.train_files="${TRAIN_FILE}" \

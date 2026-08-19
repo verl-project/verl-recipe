@@ -108,3 +108,45 @@ def test_transcript_truncates_but_keeps_both_ends():
     assert len(rendered) <= 2200
     assert "truncated" in rendered
     assert rendered.startswith("CALL")
+
+
+def test_patch_routes_only_batches_that_carry_flags(monkeypatch):
+    """The wrapper must be inert for every batch that has no env_invalid flags."""
+    import sys
+    import types
+
+    calls = {"original": 0}
+
+    class _FakeDataProto:
+        def __init__(self, non_tensor_batch):
+            self.non_tensor_batch = non_tensor_batch
+            self.batch = {
+                "token_level_rewards": _rewards([1.0, 1.0, 0.0, 0.0]),
+                "response_mask": _mask(4),
+            }
+
+    def _original(data, adv_estimator=None, *args, **kwargs):
+        calls["original"] += 1
+        return data
+
+    ray_trainer = types.ModuleType("verl.trainer.ppo.ray_trainer")
+    ray_trainer.compute_advantage = _original
+    monkeypatch.setitem(sys.modules, "verl.trainer.ppo.ray_trainer", ray_trainer)
+
+    core_algos = sys.modules["verl.trainer.ppo.core_algos"]
+    monkeypatch.setattr(core_algos, "AdvantageEstimator", types.SimpleNamespace(GRPO="grpo"), raising=False)
+
+    from recipe.nemo_gym.browser import patches
+
+    monkeypatch.setattr(patches, "_INSTALLED", False, raising=False)
+    patches.install()
+
+    # No flags: forwarded untouched.
+    ray_trainer.compute_advantage(_FakeDataProto({"uid": np.array(["g"] * 4)}), "grpo")
+    assert calls["original"] == 1
+
+    # Flags present: handled by the estimator, original never called.
+    data = _FakeDataProto({"uid": np.array(["g"] * 4), "env_invalid": np.array([False, False, True, True])})
+    ray_trainer.compute_advantage(data, "grpo")
+    assert calls["original"] == 1
+    assert "advantages" in data.batch

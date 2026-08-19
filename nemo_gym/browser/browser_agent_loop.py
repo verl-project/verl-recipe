@@ -283,9 +283,15 @@ class BrowserToolAgentLoop(ToolAgentLoop):
       infrastructure failures from GRPO group statistics instead of treating them
       as a policy that scored zero. A rollout that is invalid is resampled first;
       only one that stays invalid reaches the batch, loss-masked and flagged.
+
+    With `NEMO_GYM_BROWSER_DROP_INVALID=1` a rollout that is still invalid after
+    its retries is dropped instead: the V1 trainer skips a sample whose agent
+    loop returns nothing, so the failure never reaches the batch at all. That
+    keeps the group baseline clean without any patching, at the cost of a
+    variable group size.
     """
 
-    async def run(self, sampling_params: dict[str, Any], **kwargs: Any) -> AgentLoopOutput:
+    async def run(self, sampling_params: dict[str, Any], **kwargs: Any) -> AgentLoopOutput | list[AgentLoopOutput]:
         attempts = 1 + max(0, int(os.environ.get("NEMO_GYM_BROWSER_ENV_RETRIES", "1")))
         output: AgentLoopOutput | None = None
         for attempt in range(1, attempts + 1):
@@ -301,6 +307,13 @@ class BrowserToolAgentLoop(ToolAgentLoop):
                 )
                 output.extra_fields["env_retry_attempts"] = attempt + 1
         assert output is not None
+        if os.environ.get("NEMO_GYM_BROWSER_DROP_INVALID") == "1":
+            logger.warning(
+                "dropping environment-invalid rollout (%s) after %d attempts",
+                output.extra_fields.get("env_invalid_reason", "unknown"),
+                attempts,
+            )
+            return []
         return output
 
     async def _run_episode(self, sampling_params: dict[str, Any], **kwargs: Any) -> AgentLoopOutput:
