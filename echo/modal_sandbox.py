@@ -5,11 +5,11 @@ import io
 import logging
 import tarfile
 import tempfile
-import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
 import modal
+import tomllib
 
 logger = logging.getLogger(__name__)
 
@@ -81,9 +81,7 @@ def _load_task(root: Path) -> _Task:
         raise ValueError("environment.memory_mb must be positive")
 
     verifier_files = {
-        f"/{path.relative_to(root).as_posix()}": path.read_bytes()
-        for path in tests_path.rglob("*")
-        if path.is_file()
+        f"/{path.relative_to(root).as_posix()}": path.read_bytes() for path in tests_path.rglob("*") if path.is_file()
     }
     return _Task(
         cpus=cpus,

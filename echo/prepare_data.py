@@ -15,7 +15,6 @@ from huggingface_hub import snapshot_download
 
 from verl.utils.hdfs_io import copy, makedirs
 
-
 DEFAULT_REPO_ID = "obiwan96/endless-terminals"
 SYSTEM_PROMPT = (
     "You are a highly capable Linux terminal agent. "

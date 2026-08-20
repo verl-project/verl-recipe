@@ -88,10 +88,7 @@ class EchoInteraction:
 def truncate_output(output: str) -> str:
     if len(output) <= MAX_TERMINAL_OUTPUT_CHARS:
         return output
-    message = (
-        f"\n[Output truncated: showing first {MAX_TERMINAL_OUTPUT_CHARS} "
-        f"of {len(output)} characters]"
-    )
+    message = f"\n[Output truncated: showing first {MAX_TERMINAL_OUTPUT_CHARS} of {len(output)} characters]"
     return output[:MAX_TERMINAL_OUTPUT_CHARS] + message
 
 
@@ -277,9 +274,7 @@ class EchoAgentLoop(AgentLoopBase):
             try:
                 arguments = json.loads(tool_call.arguments)
             except (json.JSONDecodeError, TypeError):
-                outputs.append(
-                    f"Command '{tool_call.arguments}' skipped due to parse error: invalid arguments"
-                )
+                outputs.append(f"Command '{tool_call.arguments}' skipped due to parse error: invalid arguments")
                 continue
             if tool_call.name != "bash":
                 outputs.append(
@@ -426,7 +421,7 @@ class EchoAgentLoop(AgentLoopBase):
     @staticmethod
     def _common_prefix_length(first: list[int], second: list[int]) -> int:
         length = 0
-        for first_token, second_token in zip(first, second):
+        for first_token, second_token in zip(first, second, strict=False):
             if first_token != second_token:
                 break
             length += 1
