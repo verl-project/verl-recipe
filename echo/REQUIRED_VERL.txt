@@ -1,0 +1,6 @@
+# echo — pinned to the upstream main commit used for the reproduction
+UPSTREAM=https://github.com/verl-project/verl.git
+MODE=pinned_commit
+BRANCH=main
+COMMIT=8bda42207cc08a947a49587d38315647740b9e14
+PIP_INSTALL=pip install verl@git+https://github.com/verl-project/verl.git@8bda42207cc08a947a49587d38315647740b9e14

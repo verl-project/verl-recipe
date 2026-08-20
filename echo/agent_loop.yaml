@@ -1,0 +1,2 @@
+- name: echo_agent
+  _target_: recipe.echo.agent_loop.EchoAgentLoop
