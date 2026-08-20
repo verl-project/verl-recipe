@@ -93,6 +93,7 @@ The script requires only `bash`, `git`, `awk`, and `pip`/`pip3` on `PATH`. It do
 | spo | [`recipe/spo/REQUIRED_VERL.txt`](spo/REQUIRED_VERL.txt) |
 | sppo | [`recipe/sppo/REQUIRED_VERL.txt`](sppo/REQUIRED_VERL.txt) |
 | swe_agent | [`recipe/swe_agent/REQUIRED_VERL.txt`](swe_agent/REQUIRED_VERL.txt) |
+| tmax | [`recipe/tmax/REQUIRED_VERL.txt`](tmax/REQUIRED_VERL.txt) |
 | verl_tinker | [`recipe/verl_tinker/REQUIRED_VERL.txt`](verl_tinker/REQUIRED_VERL.txt) |
 
 ## Available Recipes (high level)

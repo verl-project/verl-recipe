@@ -1,0 +1,17 @@
+tools:
+  - class_name: verl.tools.base_tool.BaseTool
+    config:
+      type: native
+    tool_schema:
+      type: function
+      function:
+        name: bash
+        description: Execute a bash command in a persistent shell. Working directory and environment variables are preserved between calls.
+        parameters:
+          type: object
+          properties:
+            command:
+              type: string
+              description: The bash command to execute.
+          required:
+            - command

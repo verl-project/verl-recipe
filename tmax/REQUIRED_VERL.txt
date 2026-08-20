@@ -1,0 +1,6 @@
+# tmax — rolling against upstream main; exact commit records the latest tested revision
+UPSTREAM=https://github.com/verl-project/verl.git
+MODE=rolling
+BRANCH=main
+VERL_COMMIT=8bda42207cc08a947a49587d38315647740b9e14
+PIP_INSTALL=pip install verl@git+https://github.com/verl-project/verl.git@8bda42207cc08a947a49587d38315647740b9e14
