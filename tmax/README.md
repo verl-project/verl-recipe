@@ -4,7 +4,7 @@ This recipe reproduces [TMax](https://arxiv.org/abs/2606.23321), an RL recipe fo
 
 ## Required `verl` version
 
-This recipe tracks upstream `main` and was most recently tested at [`8bda42207c`](https://github.com/verl-project/verl/commit/8bda42207cc08a947a49587d38315647740b9e14); see [`REQUIRED_VERL.txt`](REQUIRED_VERL.txt) for installation details.
+This recipe is currently pinned to [`f765e4f439`](https://github.com/Mengyuyang/verl/commit/f765e4f439c92c553334154c2dcc4f17e27a8e39) from [verl PR #7458](https://github.com/verl-project/verl/pull/7458); see [`REQUIRED_VERL.txt`](REQUIRED_VERL.txt) for installation details.
 
 ## Data
 

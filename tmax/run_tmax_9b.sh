@@ -39,6 +39,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.model.fused_kernel_options.impl_backend=triton \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.strategy=fsdp2 \
+    actor_rollout_ref.actor.fsdp_config.use_no_sync_for_gradient_accumulation=False \
     actor_rollout_ref.actor.fsdp_config.offload_policy=False \
     actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=${SP_SIZE} \
     actor_rollout_ref.actor.optim.lr=1e-6 \
