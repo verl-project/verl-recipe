@@ -273,10 +273,20 @@ class TmaxAgentLoop(AgentLoopBase):
         return "\n\n".join(outputs), False
 
     async def _append_observation(self, interaction: TmaxInteraction, text: str) -> bool:
-        token_ids = await self.apply_chat_template([{"role": "tool", "content": text}], remove_system_prompt=True)
-        if len(interaction.response_ids) + len(token_ids) >= self.response_length:
+        merge_result, response_mask, response_logprobs = await self.ct_merge_non_assistant_msg(
+            [],
+            [{"role": "tool", "content": text, "name": "bash"}],
+            interaction.token_ids,
+            interaction.response_mask,
+            interaction.response_logprobs,
+            tools=self.tool_schema_dicts,
+        )
+        response_ids = merge_result.token_ids[len(interaction.prompt_ids) :]
+        if len(response_ids) >= self.response_length:
             return False
-        interaction.append_observation(token_ids)
+        interaction.response_ids = response_ids
+        interaction.response_mask = response_mask
+        interaction.response_logprobs = response_logprobs or []
         return True
 
     def _render_messages(
