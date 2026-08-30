@@ -9,8 +9,10 @@ is driven from `rollout.engine_kwargs.dynamo.*`.
 
 Dynamo owns request routing behind a single logical frontend, so its
 **KV-cache-aware router** can raise the prefix-cache hit rate across a rollout
-step. Weight updates still flow through verl's colocated CUDA-IPC path, so the trainer and the `dynamo.vllm`
-workers share GPUs the same way the native vLLM backend does.
+step. Weight updates flow through verl's colocated CUDA-IPC path when trainer
+and `dynamo.vllm` workers share GPUs (`colocate_async` / legacy V0), and
+through a two-hop checkpoint-engine path (nccl across pools → node-local
+CUDA-IPC) for the standalone rollout pool in `separate_async`.
 
 ## How it works
 
@@ -82,7 +84,7 @@ defaults are applied in `DynamoHttpServer`.
 | `request_engine_data` / `request_completion_token_ids` | `true` / `false`                                         | Ask the frontend to return `nvext.engine_data` / raw `completion_token_ids` (token-in/token-out for RL). |
 | `return_tokens_as_token_ids`                           | `true` / `false`                                         | Emit token ids instead of detokenized text.                                                              |
 | `request_timeout_s`                                    | `600` (default; scripts use `1800`)                      | Per-request timeout.                                                                                     |
-| `free_engine_on_train`                                 | `true`                                                   | Free the engine (sleep) during the training phase.                                                       |
+| `free_engine_on_train`                                 | mirrors `rollout.free_cache_engine`                      | DEPRECATED as an independent switch: now follows `rollout.free_cache_engine`; an explicit value that contradicts it fails at startup. |
 | `enable_worker_system_metrics`                         | `true` / `false`                                         | Expose the per-worker system-status / metrics port (paired with `metrics_sidecar.py`).                   |
 | `extra_args`                                           | `["--generation-config","vllm","--stream-interval=100"]` | Extra CLI args forwarded verbatim to `dynamo.vllm`.                                                      |
 
@@ -152,27 +154,50 @@ Per-step timing per token from the KV-aware router comparison
 Dynamo KV is approximately **7.3% faster per generated token** in this
 comparison and improves the KV-cache hit rate by **12.70 percentage points**.
 
-## Running a full agent-loop RL run
+## Running a full RL run (V1 trainer — the main path)
 
-The quick-start examples above are single-turn smoke tests. A real RL run drives
-a **multi-turn agent loop** (tool calls, an external environment, a custom
-reward) through the Dynamo frontend. The pieces below are what that adds on top
-of the smoke test; everything is parameterised, so drop in your own model, data,
-and agent loop.
+The recipe now targets verl's **V1 unified trainer** (see `REQUIRED_VERL.txt`
+for the tested pin). Two entry configs ship ready to run:
 
-### Trainer: currently no fully_async
+| Entry config | Mode | Placement |
+| --- | --- | --- |
+| `--config-name=dynamo_trainer_v1_colocate` | `colocate_async` | trainer + rollout share GPUs; replicas abort + sleep every train step |
+| `--config-name=dynamo_trainer_v1_separate` | `separate_async` | standalone rollout pool (`rollout.nnodes × n_gpus_per_node`); weights flow nccl → node-local CUDA-IPC |
 
-Dynamo has **no** `fully_async` **trainer**. Run it through `verl.trainer.main_ppo`
-(or this recipe's `main_dynamo.py`) with `actor_rollout_ref.hybrid_engine=True`.
-`DynamoLLMServerManager` is colocated — it forwards the trainer's
-`CUDA_VISIBLE_DEVICES` into the `dynamo.vllm` shards — so `hybrid_engine=True` is
-required, not optional.
+Smoke them end-to-end (real training steps, tiny model):
 
-### Wire in your agent loop
+```bash
+bash recipe/dynamo/smoke_dynamo_v1_colocate.sh
+bash recipe/dynamo/smoke_dynamo_v1_separate.sh   # needs >= 2 GPUs and cupy (nccl backend)
+```
 
-These overrides turn a plain GRPO run into a multi-turn agent-loop run served by
-Dynamo. The config path and loop name are **yours** — this recipe does not ship
-an agent loop:
+Under V1, leave `agent.agent_loop_manager_class` at `null` (the presets do):
+verl's `AgentLoopManagerTQ` drives the loop and writes TransferQueue, and
+`DynamoLLMServerManager` upgrades the client to a partial-rollout-aware
+`FullyAsyncLLMServerClient` (with ThunderAgent affinity when enabled).
+Multi-turn agent frameworks (e.g. uni-agent) plug in unchanged via their own
+`agent_loop_manager_class` — validated with the uni-agent mem-agent recipe by
+only switching `rollout.name=vllm` → `dynamo`.
+
+ThunderAgent under V1: programs are keyed by the caller's stable `request_id`
+and auto-finalized per generate call (`thunderagent.auto_finalize`, default
+true). Multi-turn callers that want cross-turn affinity set
+`auto_finalize: false` and call the client's `finalize_program(session_id)`
+from their trajectory-end hook. Program tables are frontend-local and
+separate_async re-routes aborted retries across pools, so the client records
+**every server that serves a generation attempt** and finalizes each of them
+(each finalize RPC bounded by `thunderagent.finalize_timeout_s`, default
+60 s); cleanup counts as confirmed only when all ack, and unconfirmed
+cleanups count toward `thunderagent.finalize_leak_threshold`.
+
+### Legacy V0 path (compatibility only)
+
+The original PR #110/#126 flow — `--config-name=dynamo_trainer` (which pins
+`trainer.use_v1=false`), colocated `hybrid_engine=True`, and the legacy
+`DynamoAgentLoopManager` — still works but is a **compatibility path**:
+upstream has deprecated the V0 trainer (removal planned in v0.9.0), and the
+legacy manager must NOT be combined with `trainer.use_v1=true` (the entry
+point fails fast on that combination because it does not write TransferQueue).
 
 ```bash
 actor_rollout_ref.rollout.mode=async \
@@ -182,10 +207,6 @@ actor_rollout_ref.rollout.agent.agent_loop_config_path=/path/to/agent_config.yam
 actor_rollout_ref.rollout.agent.default_agent_loop=<your_loop_name> \
 +actor_rollout_ref.rollout.agent.agent_loop_manager_class=recipe.dynamo.dynamo_agent_loop.DynamoAgentLoopManager
 ```
-
-The `agent_loop_manager_class` override is the key one: it swaps verl's default
-manager for `DynamoAgentLoopManager`, which talks to the single shared Dynamo
-frontend instead of load-balancing across replicas.
 
 ### Recommended `engine_kwargs.dynamo` for RL
 
@@ -199,7 +220,6 @@ phase. See the Configuration table above for every key.
 ++actor_rollout_ref.rollout.engine_kwargs.dynamo.request_completion_token_ids=true \
 ++actor_rollout_ref.rollout.engine_kwargs.dynamo.return_tokens_as_token_ids=false \
 ++actor_rollout_ref.rollout.engine_kwargs.dynamo.request_timeout_s=1800 \
-++actor_rollout_ref.rollout.engine_kwargs.dynamo.free_engine_on_train=true \
 ++actor_rollout_ref.rollout.engine_kwargs.dynamo.enable_worker_system_metrics=true \
 '++actor_rollout_ref.rollout.engine_kwargs.dynamo.extra_args=["--generation-config","vllm","--stream-interval=100"]'
 ```
@@ -231,8 +251,14 @@ modify core `verl` or Dynamo.
 
 ### Required versions
 
-- Dynamo: source commit `59d614641837e593f0567b79d75394aae5f864e0`, including
-[PR #11185](https://github.com/ai-dynamo/dynamo/pull/11185).
+- Dynamo: PyPI `ai-dynamo>=1.3.0.post1` (ships `dynamo.vllm`,
+`dynamo.frontend`, and `dynamo.thunderagent_router`, including
+[PR #11185](https://github.com/ai-dynamo/dynamo/pull/11185)). Supersedes the
+previous source build at commit `59d614641837e593f0567b79d75394aae5f864e0`.
+- verl: pinned commit in [REQUIRED_VERL.txt](REQUIRED_VERL.txt).
+- `separate_async` additionally needs `cupy-cuda12x` (verl's nccl
+checkpoint-engine backend registers only when cupy imports); the V1 trainer
+itself needs `TransferQueue` (tested with `0.1.9`).
 
 
 

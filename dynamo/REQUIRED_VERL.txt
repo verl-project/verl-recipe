@@ -1,5 +1,7 @@
-# Dynamo ThunderAgent — tested core verl commit
+# Dynamo backend — tested core verl commit
+# Aligned with the uni-agent verl submodule pin (V1 unified trainer available).
+# Previous tested pin (pre-V1): d82d2777b5dc3e96a8a45168d02660312707ab98
 UPSTREAM=https://github.com/verl-project/verl.git
 MODE=pinned_commit
-COMMIT=d82d2777b5dc3e96a8a45168d02660312707ab98
-PIP_INSTALL=pip install verl@git+https://github.com/verl-project/verl.git@d82d2777b5dc3e96a8a45168d02660312707ab98
+COMMIT=1ae945592754cbeb1350cbe092fe6117070fd4c7
+PIP_INSTALL=pip install verl@git+https://github.com/verl-project/verl.git@1ae945592754cbeb1350cbe092fe6117070fd4c7

@@ -1,0 +1,62 @@
+# V1 separate_async entry config for the dynamo rollout backend.
+#
+# Split placement: the trainer owns trainer.nnodes × trainer.n_gpus_per_node
+# and a hybrid dynamo pool (slept outside validation); the standalone dynamo
+# pool owns rollout.nnodes × rollout.n_gpus_per_node with one
+# CheckpointEngineWorker per GPU. Weights flow in two hops: checkpoint-engine
+# backend (nccl, cross-node capable) into the CE workers, then node-local
+# CUDA-IPC into the dynamo.vllm shards.
+#
+# Hard constraint (asserted by PPOTrainerSeparateAsync):
+#   data.train_batch_size == trainer.v1.separate_async.parameter_sync_step
+#                            * actor_rollout_ref.actor.ppo_mini_batch_size
+#
+# NOTE: requires the verl pin from REQUIRED_VERL.txt (>= 1ae94559).
+
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - dynamo_base
+  - _self_
+
+trainer:
+  use_v1: true
+  v1:
+    trainer_mode: separate_async
+    separate_async:
+      num_warmup_batches: 1
+      parameter_sync_step: 4
+
+transfer_queue:
+  enable: true
+
+actor_rollout_ref:
+  actor:
+    fsdp_config:
+      # separate_async's Decoupled PPO (bypass_mode=false) uses DTensor-based
+      # save_model_to_cpu/restore_model_from_cpu — only fsdp2/veomni/megatron
+      # work; default FSDP1 asserts on the first mini step.
+      strategy: fsdp2
+  rollout:
+    # Standalone pool size — MUST be overridden to the real rollout topology.
+    # If you raise gpu_memory_utilization, leave headroom on the rollout GPUs
+    # for the checkpoint-engine second hop (~3x update_weights_bucket_megabytes
+    # + largest tensor + CE worker CUDA/NCCL context, empirically >= 3-4 GB).
+    nnodes: 1
+    n_gpus_per_node: 1
+    # The hybrid pool on trainer GPUs sleeps at every switch_to_trainer.
+    free_cache_engine: true
+    checkpoint_engine:
+      # separate_async requires a non-naive backend for the cross-pool first
+      # hop; nccl matches the uni-agent recipes.
+      backend: nccl
+    agent:
+      agent_loop_manager_class: null
+    engine_kwargs:
+      dynamo:
+        thunderagent:
+          enabled: false
+          # auto_finalize: true

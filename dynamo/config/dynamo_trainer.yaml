@@ -1,15 +1,9 @@
-# Hydra config for the recipe-side dynamo rollout backend.
+# Legacy (V0 trainer) entry config for the dynamo rollout backend.
 #
-# Inherits everything from the standard ppo_trainer; the only deltas are:
-#   * actor_rollout_ref.rollout.name=dynamo  -> resolves to recipe.dynamo via
-#     the static entries in verl.workers.rollout.base._ROLLOUT_REGISTRY and
-#     verl.workers.rollout.replica.RolloutReplicaRegistry
-#   * actor_rollout_ref.rollout.mode=async   -> dynamo only ships an async
-#     ServerAdapter (mirrors trtllm/vllm async-server pattern)
-#
-# Anything dynamo-specific (router_mode, frontend_http_port, namespace,
-# etc.) lives under actor_rollout_ref.rollout.engine_kwargs.dynamo and is
-# parsed inside DynamoHttpServer (see dynamo_async_server.py:_dynamo_cfg).
+# Inherits ppo_trainer + dynamo_base. Pins trainer.use_v1=false: this preset
+# carries the V0-era defaults (DynamoAgentLoopManager, ThunderAgent on) which
+# violate the V1 TransferQueue contract — the V1 path lives in
+# dynamo_trainer_v1_colocate.yaml. main_dynamo.py dispatches on trainer.use_v1.
 
 hydra:
   searchpath:
@@ -17,27 +11,13 @@ hydra:
 
 defaults:
   - ppo_trainer
+  - dynamo_base
   - _self_
+
+trainer:
+  use_v1: false
 
 actor_rollout_ref:
   rollout:
-    name: dynamo
-    mode: async
     agent:
       agent_loop_manager_class: recipe.dynamo.dynamo_agent_loop.DynamoAgentLoopManager
-    engine_kwargs:
-      dynamo:
-        thunderagent:
-          enabled: true
-          router_block_size: 16
-        # All keys optional; sane defaults applied in DynamoHttpServer.
-        # namespace: verl_dynamo
-        # router_mode: kv               # round-robin | kv | random | least-loaded
-        # frontend_http_port: 0         # 0 = auto-assign on master node
-        # etcd_port: 0                  # 0 = auto-assign
-        # etcd_peer_port: 0             # 0 = auto-assign
-        # nats_port: 0                  # 0 = auto-assign
-        # served_model_name: <str>      # falls back to model_config.local_path
-
-trainer:
-  project_name: verl-dynamo

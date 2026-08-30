@@ -13,43 +13,23 @@
 # limitations under the License.
 """vLLM worker_extension_cls for the dynamo backend.
 
-The base ``vLLMColocateWorkerExtension._get_zmq_handle`` (verl/workers/rollout
-/vllm_rollout/utils.py) uses ``self.local_rank``, which is the rank of
-the worker *within its TP group*. In the dynamo Route-B topology each DP shard
-is a separate ``dynamo.vllm`` subprocess, so two DP shards' TP rank 0 would
-both compute ``self.local_rank == 0`` and connect to the same IPC socket file.
-
-Fix: read ``VERL_DYNAMO_RANK_OFFSET`` from env (set by DynamoHttpServer when
-spawning each DP shard) and add it to ``self.local_rank`` so the IPC handle
-encodes a node-global rank that matches what the trainer side computes
-(``rollout_rank % local_world_size`` in vllm_rollout.py). Keep the same Ray
-job id prefix as verl's native vLLM path so sender and receiver build identical
-socket paths.
+Each DP shard in the dynamo topology is a separate ``dynamo.vllm`` subprocess,
+so two shards' TP rank 0 would both compute ``self.local_rank == 0`` and
+connect to the same IPC socket file. DynamoHttpServer disambiguates by
+injecting ``VERL_ZMQ_BASE_TRAINER_RANK=<shard rank offset>`` per subprocess —
+verl's base ``vLLMColocateWorkerExtension._get_zmq_handle`` consumes it
+natively (``int(base) + dp-resolved local rank``; dynamo shards run dp=1 so
+the resolver is the identity), producing the node-global socket rank the
+trainer/CE sender side computes. No ``_get_zmq_handle`` override needed.
 """
 
 from __future__ import annotations
 
-import os
-
 from verl.workers.rollout.vllm_rollout.utils import vLLMColocateWorkerExtension
-
-_RANK_OFFSET_ENV = "VERL_DYNAMO_RANK_OFFSET"
 
 
 class vLLMDynamoColocateWorkerExtension(vLLMColocateWorkerExtension):
-    """vLLM worker mixin for verl × dynamo.
-
-    Override ``_get_zmq_handle`` to use a node-global rank (rather than the
-    per-shard TP-local rank), so trainer-side BucketedWeightSender and
-    engine-side BucketedWeightReceiver agree on the IPC socket path.
-    """
-
-    def _get_zmq_handle(self) -> str:
-        replica_rank = os.environ.get("VERL_REPLICA_RANK", "0")
-        job_id = os.environ.get("VERL_RAY_JOB_ID", "0")
-        offset = int(os.environ.get(_RANK_OFFSET_ENV, "0"))
-        global_rank = self.local_rank + offset
-        return f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{replica_rank}-rank-{global_rank}.sock"
+    """vLLM worker mixin for verl × dynamo."""
 
     def update_weights_from_ipc(self, *args, **kwargs):
         """Run verl's weight reload inside vLLM's config context.

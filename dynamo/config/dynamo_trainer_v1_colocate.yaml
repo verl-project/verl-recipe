@@ -1,0 +1,53 @@
+# V1 colocate_async entry config for the dynamo rollout backend.
+#
+# Inherits ppo_trainer + dynamo_base and turns on the verl V1 unified trainer
+# in colocate_async mode: actor and rollout share GPUs, rollout replicas are
+# aborted + slept during each train step, weights flow through the colocated
+# naive (CUDA-IPC) path.
+#
+# NOTE: requires the verl pin from REQUIRED_VERL.txt (>= 1ae94559). Older
+# verl has no trainer.v1 schema and hydra will reject these keys.
+
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - dynamo_base
+  - _self_
+
+trainer:
+  use_v1: true
+  v1:
+    trainer_mode: colocate_async
+    colocate_async:
+      num_warmup_batches: 1
+
+# TaskRunnerV1 force-enables this anyway; set it for config transparency.
+transfer_queue:
+  enable: true
+
+actor_rollout_ref:
+  rollout:
+    # colocate_async sleeps replicas every step. The dynamo-side switch
+    # (engine_kwargs.dynamo.free_engine_on_train) follows this key and
+    # fails fast when explicitly contradicting it.
+    free_cache_engine: true
+    agent:
+      # null -> V1 default AgentLoopManagerTQ (writes TransferQueue). The
+      # legacy DynamoAgentLoopManager predates V1 and violates that contract.
+      agent_loop_manager_class: null
+    engine_kwargs:
+      dynamo:
+        thunderagent:
+          # Supported under V1 colocate_async/separate_async via
+          # DynamoFullyAsyncLLMServerClient (programs keyed by the caller's
+          # stable request_id). NOT supported under trainer_mode=sync.
+          # auto_finalize (default true) releases each program when its
+          # generate call returns — the router has no passive expiry, so this
+          # is required unless a multi-turn caller wires finalize_program
+          # into its trajectory-end hook and sets auto_finalize: false.
+          # Default off: single-turn TQ gains nothing from affinity.
+          enabled: false
+          # auto_finalize: true

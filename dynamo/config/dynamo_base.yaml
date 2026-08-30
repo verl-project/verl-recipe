@@ -1,0 +1,29 @@
+# Shared dynamo-backend deltas over ppo_trainer. This fragment must stay free
+# of any `hydra:` block: hydra.searchpath is only legal in the PRIMARY config,
+# and this file is included from multiple primary entry configs
+# (dynamo_trainer.yaml, dynamo_trainer_v1_colocate.yaml).
+#
+# Anything dynamo-specific (router_mode, frontend_http_port, namespace, etc.)
+# lives under actor_rollout_ref.rollout.engine_kwargs.dynamo and is parsed
+# inside DynamoHttpServer (see dynamo_async_server.py:_dynamo_cfg).
+
+actor_rollout_ref:
+  rollout:
+    name: dynamo
+    mode: async
+    engine_kwargs:
+      dynamo:
+        thunderagent:
+          enabled: true
+          router_block_size: 16
+        # All keys optional; sane defaults applied in DynamoHttpServer.
+        # namespace: verl_dynamo
+        # router_mode: kv               # round-robin | kv | random | least-loaded
+        # frontend_http_port: 0         # 0 = auto-assign on master node
+        # etcd_port: 0                  # 0 = auto-assign
+        # etcd_peer_port: 0             # 0 = auto-assign
+        # nats_port: 0                  # 0 = auto-assign
+        # served_model_name: <str>      # falls back to model_config.local_path
+
+trainer:
+  project_name: verl-dynamo
