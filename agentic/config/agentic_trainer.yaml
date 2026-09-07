@@ -1,0 +1,214 @@
+# ============================================================
+# Agentic Recipe Config
+# ============================================================
+#
+# 本配置继承 ppo_trainer 并添加 agentic 训练所需的全部默认参数。
+# 用户只需通过命令行 override 覆盖少量必填参数即可启动训练。
+#
+# ============================================================
+# 通用参数（两种环境模式都需要）
+# ============================================================
+#   MODEL_PATH              - (必填) 模型路径，例如 /var/model/Qwen2.5-7B-Instruct
+#                             通过 actor_rollout_ref.model.path 传入。
+#   ENVIRONMENT             - 环境模式：docker 或 ack (默认: docker)
+#                             通过 remote_agent.environment_import_path 选择。
+#   REGISTRY                - 容器镜像 registry 地址
+#                             通过 remote_agent.environment_kwargs.registry 传入。
+#
+# ============================================================
+# ACK (Kubernetes) 环境参数
+#   设置 environment_import_path 为 harbor.environments.ack:ACKEnvironment 时生效
+# ============================================================
+#   KUBECONFIG              - kubeconfig 文件路径 (默认: ~/.kube/config)
+#   NAMESPACE               - K8s namespace (默认: default)
+#   IMAGE_PULL_SECRET       - K8s image pull secret 名称
+#   SERVICE_ACCOUNT         - K8s service account 名称
+#   USE_BUILDKIT            - 是否使用 BuildKit 构建镜像 (true/false, 默认: false)
+#   BUILDKIT_ADDRESS        - BuildKit 服务地址，例如 tcp://buildkit-service:1234
+#   USE_SANDBOX_CLAIM       - 是否使用 OpenKruise SandboxClaim (true/false, 默认: false)
+#   CLAIM_TIMEOUT           - SandboxClaim 超时秒数 (默认: 300)
+#   SANDBOXSET_REPLICAS     - SandboxSet 副本数 (默认: 5)
+#
+# 以上 ACK 参数通过 remote_agent.environment_kwargs 传入，例如:
+#   "remote_agent.environment_kwargs={namespace: default, registry: my-reg.example.com/swebench}"
+#
+# ============================================================
+# 用法示例
+# ============================================================
+#
+# Docker 模式（最简）：
+#   python3 -m recipe.agentic.agentic_main \
+#       actor_rollout_ref.model.path=/var/model/Qwen2.5-7B-Instruct
+#
+# ACK / Kubernetes 模式：
+#   python3 -m recipe.agentic.agentic_main \
+#       actor_rollout_ref.model.path=/var/model/Qwen2.5-7B-Instruct \
+#       remote_agent.environment_import_path="harbor.environments.ack:ACKEnvironment" \
+#       "remote_agent.environment_kwargs={namespace: default, registry: my-reg.example.com/swebench, kubeconfig: /root/.kube/config}"
+#
+# ============================================================
+
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+# ============================================================
+# Data (Harbor 本地数据集)
+# ============================================================
+#
+# return_raw_chat: 返回原始 chat 消息（raw_prompt），供 agent loop 使用。
+#   agentic 模式必须为 true。
+#
+# prompt_key: dataset 中用作 prompt 的字段名。
+#   agentic 场景使用 instance_id 作为任务标识。
+#
+# train_harbor_dir / val_harbor_dir: Harbor 任务目录路径。
+#   非 null 时 agentic_main 会扫描该目录下包含 task.toml + instruction.md 的子目录，
+#   生成 verl parquet 并覆盖 data.train_files / data.val_files。
+#   为 null 时保持原有 train_files / val_files 不变。
+#
+# harbor_cache_dir: 生成的 parquet 缓存路径。
+#
+# harbor_data_source: parquet row 中 data_source 字段值。
+#
+# harbor_ability: parquet row 中 ability 字段值。
+#
+# harbor_overwrite: true 时强制重新生成 parquet（忽略缓存）。
+#
+# harbor_train_limit / harbor_val_limit: 可选上限，仅取前 N 个任务（快速调试用）。
+#
+data:
+  return_raw_chat: true
+  prompt_key: instance_id
+  train_harbor_dir: /home/verl/swe-bench-verified
+  val_harbor_dir: /home/verl/swe-bench-verified
+  harbor_cache_dir: "~/.cache/verl/agentic/harbor"
+  harbor_data_source: "harbor"
+  harbor_ability: "agent"
+  harbor_overwrite: false
+  harbor_train_limit: null
+  harbor_val_limit: null
+
+# ============================================================
+# Proxy Server
+# ============================================================
+#
+# 由 agentic_main.py 中的 start_proxy_server() 使用。
+# Proxy server 桥接远程 Agent 的 OpenAI 兼容 HTTP 请求到 verl 的 vLLM rollout 服务。
+#
+# host: 监听地址。0.0.0.0 表示监听所有网卡。
+#
+# port: 监听端口。0 表示自动分配空闲端口。
+#
+# tool_format: Tool call 解析格式。
+#   可选值: hermes, qwen 等（取决于模型的 tool call 格式）。
+#
+# llm_proxy_ip: LLM proxy 对远程 Agent 可达的外部 IP。
+#   当 proxy 与 trainer 同机部署时，填 trainer 节点的外部 IP。
+#   null 表示不从 yaml 注入，仅允许 shell 环境变量 LLM_PROXY_IP 提供。
+#
+proxy_server:
+  host: "0.0.0.0"
+  port: 0
+  tool_format: "hermes"
+  llm_proxy_ip: null
+
+# ============================================================
+# RemoteAgentLoop Configuration
+# ============================================================
+#
+# 任意字段设为 null 表示不从 yaml 注入，
+# 保留给 RemoteAgentConfig.from_env() 读取同名环境变量。
+# 优先级：命令行 override > shell 环境变量 > yaml 默认值。
+#
+# --- Agent 配置 ---
+#
+# agent_name: Harbor 上注册的 agent 名称。
+#   示例: swe-agent, react-agent
+#
+# agent_import_path: 本地 Trial 模式下 agent 类的 Python import path。
+#   格式: module.path:ClassName
+#   示例: harbor.agents.swe_agent:SWEAgent
+#
+# model_name: 透传给远程 agent 的模型名称。
+#   示例: openai/qwen-max
+#
+# agent_kwargs: 传给 agent 构造器的额外参数（dict）。
+#   yaml 中直接用嵌套对象写法，会被转为 JSON 注入环境变量。
+#
+# --- 重试配置 ---
+#
+# max_retries: agent run 失败时的最大重试次数（默认 3）。
+#
+# retry_base_delay: 指数退避的基础延迟秒数（默认 2.0）。
+#   实际延迟 = retry_base_delay * 2^(attempt-1)
+#
+# --- 环境配置 ---
+#
+# environment_import_path: Harbor 环境类的 Python import path。
+#   Docker 模式:  harbor.environments.docker.docker:DockerEnvironment
+#   ACK 模式:     harbor.environments.ack:ACKEnvironment
+#
+# environment_overrides: 透传给远程 agent 的环境变量覆盖（dict）。
+#   会被设为 agent 进程的 env vars（如 OPENAI_API_KEY、OPENAI_BASE_URL 等由系统自动注入）。
+#
+# environment_kwargs: 传给 Harbor 环境构造器的参数（dict）。
+#   不同环境类接受不同参数：
+#
+#   DockerEnvironment: 通常不需要额外参数，传空 {} 即可。
+#
+#   ACKEnvironment 参数：
+#     namespace:           (必填) Kubernetes namespace
+#     registry:            容器镜像 registry 地址，用于推送/拉取 sandbox 镜像
+#                          示例: my-registry.example.com/swebench
+#     kubeconfig:          kubeconfig 文件路径（默认 ~/.kube/config）
+#     context:             Kubernetes context 名称（默认使用当前 context）
+#     image_pull_secret:   K8s image pull secret 名称，用于从私有 registry 拉取镜像
+#     service_account:     K8s service account 名称
+#     node_selector:       Pod 节点选择器（dict），例如 {gpu: "true"}
+#     tolerations:         Pod 容忍度（list[dict]）
+#     use_buildkit:        是否使用 BuildKit 构建镜像（替代 DinD），默认 false
+#     buildkit_address:    BuildKit 服务地址，use_buildkit=true 时必填
+#                          示例: tcp://buildkit-service:1234
+#     use_sandbox_claim:   是否使用 OpenKruise SandboxClaim 获取预热容器，默认 false
+#     claim_timeout:       SandboxClaim 等待超时秒数，默认 300
+#     sandboxset_replicas: SandboxSet 预热副本数，默认 5
+#     sandbox_image:       自定义 sandbox 镜像名称（可选）
+#
+# --- 运行模式 ---
+#
+# use_local_trial: 是否在本地进程内运行 Trial（而非发送到远程 Harbor HTTP 服务）。
+#   true:  使用 harbor.trial.trial.Trial 在本地执行（适合开发调试和单机部署）
+#   false: 通过 AgentRunClient 发送到 harbor_server_url 远程执行
+#
+# proxy_server_url: 独立 proxy 模式的 URL。
+#   设置后 agent loop 跳过 Ray 发现，直接连接此 URL。
+#   同时自动启动 InferenceWorkerClient 桥接 vLLM 到外部 proxy。
+#   不设置（null）则使用 Ray actor 模式（proxy 由 agentic_main 管理）。
+#
+# harbor_server_url: Harbor HTTP 服务地址（use_local_trial=false 时使用）。
+#   默认: http://localhost:8080
+#
+# harbor_timeout: Harbor 请求超时秒数。默认: 1800
+#
+remote_agent:
+  agent_name: swe-agent
+  agent_import_path: null
+  model_name: openai/qwen-max
+  agent_kwargs:
+    total_cost_limit: 0
+    per_instance_cost_limit: 0
+  max_retries: null
+  retry_base_delay: null
+  task_path_template: null
+  environment_overrides: null
+  environment_import_path: "harbor.environments.docker.docker:DockerEnvironment"
+  environment_kwargs: {}
+  use_local_trial: true
+  proxy_server_url: null
+  harbor_server_url: null
+  harbor_timeout: null
