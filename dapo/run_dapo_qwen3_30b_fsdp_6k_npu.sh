@@ -158,5 +158,5 @@ ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${log_prob_micro_batch_size_per_gpu} \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=${ppo_micro_batch_size_per_gpu} \
     ++actor_rollout_ref.nccl_timeout=7200 \
-    actor_rollout_ref.actor.use_torch_compile=False \
-    actor_rollout_ref.ref.use_torch_compile=False $@
+    actor_rollout_ref.actor.fsdp_config.use_torch_compile=False \
+    actor_rollout_ref.ref.fsdp_config.use_torch_compile=False $@

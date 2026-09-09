@@ -151,6 +151,6 @@ ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=auto \
     trainer.device='npu' \
-    actor_rollout_ref.actor.use_torch_compile=False \
-    actor_rollout_ref.ref.use_torch_compile=False $@
+    actor_rollout_ref.actor.fsdp_config.use_torch_compile=False \
+    actor_rollout_ref.ref.fsdp_config.use_torch_compile=False $@
 

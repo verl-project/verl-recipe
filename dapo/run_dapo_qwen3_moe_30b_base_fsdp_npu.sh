@@ -139,6 +139,6 @@ ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     trainer.test_freq=5 \
     trainer.save_freq=-1 \
     trainer.total_epochs=1 \
-    actor_rollout_ref.actor.use_torch_compile=False \
-    actor_rollout_ref.ref.use_torch_compile=False 
+    actor_rollout_ref.actor.fsdp_config.use_torch_compile=False \
+    actor_rollout_ref.ref.fsdp_config.use_torch_compile=False 
    
