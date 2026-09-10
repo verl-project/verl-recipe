@@ -1,0 +1,6 @@
+# tau2_airline — pinned to the verl commit this recipe was actually validated against
+UPSTREAM=https://github.com/verl-project/verl.git
+MODE=pinned_commit
+COMMIT=ad2e3c272ee95fc5627c5007af59b5d25100be1a
+PIP_INSTALL=pip install verl@git+https://github.com/verl-project/verl.git@ad2e3c272ee95fc5627c5007af59b5d25100be1a
+NOTES=All reported numbers and the offline test suite were produced against this commit (2026-07-10) with vLLM 0.11.0 / torch 2.8.0+cu128. Newer main revisions are untested here, not known-broken; the recipe only uses the public AgentLoop extension point and does not patch verl.
