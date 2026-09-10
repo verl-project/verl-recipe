@@ -1,0 +1,7 @@
+# RandOpt recipe is prepared against the latest tested verl release line.
+UPSTREAM=https://github.com/verl-project/verl.git
+MODE=pinned_tag
+TAG=v0.7.1
+COMMIT=bec9ef74768dd201881cd4e54cd0385e87caae27
+PIP_INSTALL=pip install verl==0.7.1
+
