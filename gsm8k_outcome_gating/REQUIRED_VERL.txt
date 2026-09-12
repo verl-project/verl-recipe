@@ -1,0 +1,6 @@
+# gsm8k_outcome_gating — pinned to the verl commit every experiment ran against
+UPSTREAM=https://github.com/verl-project/verl.git
+MODE=pinned_commit
+COMMIT=e52747a403f55044578d9435069825f949b549bf
+PIP_INSTALL=pip install verl@git+https://github.com/verl-project/verl.git@e52747a403f55044578d9435069825f949b549bf
+NOTES=All numbers in README.md were produced at this commit (2026-07-07) with vLLM 0.11.0 / torch 2.8.0 / transformers 4.57.6 on python 3.10, single RTX 5090 (LoRA r=32, ~50 min per 40-step arm). Newer main revisions are untested here, not known-broken: the recipe touches verl only through install_gate.sh (a .pth for Ray-worker injection plus a 6-line env-gated branch in the built-in gsm8k reward, reversible via the .bak backup).
