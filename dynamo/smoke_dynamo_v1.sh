@@ -17,6 +17,16 @@ TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/data/aime-2024.parquet"}
 
 export VERL_USE_EXTERNAL_MODULES=recipe.dynamo.register
 
+# FLEXKV=1 turns this same colocated smoke into the FlexKV L2 acceptance run.
+FLEXKV=${FLEXKV:-0}
+flexkv_args=()
+if [ "$FLEXKV" = "1" ]; then
+  export FLEXKV_CPU_CACHE_GB=${FLEXKV_CPU_CACHE_GB:-16} FLEXKV_ENABLE_MPS=${FLEXKV_ENABLE_MPS:-0}
+  flexkv_args=(++actor_rollout_ref.rollout.engine_kwargs.dynamo.enable_flexkv=True)
+fi
+# cold first-load + compile of the model can exceed the 600 s default window
+export VERL_DYNAMO_FE_READY_TIMEOUT=${VERL_DYNAMO_FE_READY_TIMEOUT:-2400}
+
 python3 -m recipe.dynamo.main_dynamo \
     algorithm.adv_estimator=grpo \
     data.train_files="${TRAIN_FILE}" \
@@ -48,6 +58,7 @@ python3 -m recipe.dynamo.main_dynamo \
     trainer.val_only=True \
     trainer.total_training_steps=1 \
     trainer.save_freq=-1 \
+    "${flexkv_args[@]}" \
     "$@"
 
 echo "PASS: Dynamo validation smoke completed"

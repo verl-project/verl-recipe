@@ -402,3 +402,47 @@ concurrency 384, ThunderAgent reaches **1.94× rollout-phase speedup** and
 **2.40×** and **1.60×**, respectively.
 
 <img src="assets/thunderagent_speedup.png" alt="ThunderAgent speedup over Global LB" width="800">
+
+## FlexKV L2 CPU KV cache (optional)
+
+With `engine_kwargs.dynamo.enable_flexkv=True` every `dynamo.vllm` shard runs a
+[FlexKV](https://github.com/taco-project/FlexKV) server: KV blocks evicted from
+the GPU spill to a CPU (DRAM) tier and are fetched back over PCIe on prefix
+re-hit instead of being recomputed. Combined with the KV-aware router this
+completes the KV-reuse stack for multi-turn agentic rollout. The CPU tier is
+maintained across the sleep/wake weight-sync choreography (`clear_kv_cache`
+forwards `reset_connector` so stale KV is dropped on weight updates).
+
+Validated stack:
+
+| Component | Version |
+|---|---|
+| verl | `main` (tested commit in `REQUIRED_VERL.txt`) |
+| vLLM | https://github.com/vllm-project/vllm/pull/54484 (tested at `4582c0d`) |
+| FlexKV | taco-project/FlexKV `main` ≥ PR #279 (`016c290`), unpatched |
+| ai-dynamo | ≥ 1.4.2 |
+
+Key environment knobs (all defaulted): `FLEXKV_CPU_CACHE_GB`,
+`FLEXKV_CONFIG_PATH`, `FLEXKV_ENABLE_MPS` (default 0 — an MPS daemon started
+inside a shard inherits that shard's `CUDA_VISIBLE_DEVICES` and breaks CUDA
+visibility for later clients), `FLEXKV_INIT_READY_TIMEOUT_S`,
+`VERL_DYNAMO_FE_READY_TIMEOUT` (default 2400 s). Multi-shard nodes are
+isolated automatically (per-shard IPC socket, instance ids, metric-port
+offsets); `FLEXKV_SHARED_CPU_CACHE=1` opts into one shared CPU pool instead.
+
+**Sizing rule:** keep the active working set inside the GPU cache:
+`concurrent_requests_per_engine × mean_context_tokens ≲ 0.7 × gate_tokens`
+(`gate_tokens = kv-cache-memory-bytes / kv_bytes_per_token`). Far above this
+the current FlexKV implementation can enter an allocator-starvation regime
+(in-flight transfer pins defeat vLLM preemption) that stalls the engine;
+fixes are being reported upstream.
+
+Known limitation: models with `tie_word_embeddings=true` (e.g. Qwen ≤ 4B)
+currently fail bucketed IPC weight updates on the PR-54484 loader (tied-alias
+guard); use untied models (Qwen3-8B and larger) for now.
+
+```bash
+# FlexKV L2 acceptance: the standard smoke with FlexKV on
+FLEXKV=1 MODEL_PATH=<untied model> TRAIN_FILE=... TEST_FILE=... \
+  bash dynamo/smoke_dynamo_v1.sh
+```

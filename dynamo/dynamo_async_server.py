@@ -294,6 +294,77 @@ class DynamoHttpServer:
         env["DYN_ENABLE_RL"] = "true" if self._enable_rl_mode() else "false"
         return env
 
+    def _enable_flexkv(self) -> bool:
+        """Enable the FlexKV CPU-tier KV cache (KVConnector) in every shard."""
+        return self._dynamo_cfg_bool("enable_flexkv", False)
+
+    def _flexkv_env_vars(self) -> dict[str, str]:
+        """Env forwarded into every dynamo.vllm subprocess when FlexKV is on.
+
+        ``DYNAMO_USE_FLEXKV=1`` activates the KVEventCollector inside FlexKV's
+        vllm_v1_adapter (upstream taco line), which re-publishes FlexKV
+        CPU-cache hits as vLLM ``BlockStored`` events over the ZMQ KV-events
+        channel so the Dynamo KV router can route future requests to workers
+        that already hold those blocks in CPU memory.
+
+        All ``FLEXKV_*`` vars in the trainer environment are forwarded
+        unchanged (config file via FLEXKV_CONFIG_PATH is the primary channel;
+        the explicit list below only documents the common knobs). With the
+        default FlexKV config (instance_num=1, no server_client_mode) each
+        shard runs FlexKV in-process — no external KVServer, no registration
+        protocol.
+
+        Cache-staleness note: no extra reset wiring is needed on this stack —
+        vLLM's pause path (EngineCore.pause_scheduler, clear_cache=True,
+        reset_connector=True default) already resets the FlexKV connector on
+        every abort_all_requests, so the CPU tier cannot serve stale KV
+        across RL weight updates.
+        """
+        env: dict[str, str] = {"DYNAMO_USE_FLEXKV": "1"}
+        for key, value in os.environ.items():
+            if key.startswith("FLEXKV_"):
+                env[key] = value
+        # MPS off by default (explicit user setting wins): with FlexKV's
+        # default on, the KVManager races to start nvidia-cuda-mps-control,
+        # the daemon inherits this shard's restricted CUDA_VISIBLE_DEVICES,
+        # and EVERY later CUDA client in the container gets routed through
+        # MPS and fails with "No CUDA GPUs are available" on all other GPUs
+        # — including the next run's EngineCore (smokeB run3).
+        env.setdefault("FLEXKV_ENABLE_MPS", "0")
+        return env
+
+    def _flexkv_shard_env_vars(self, spec_idx: int, worker_cvd: str, num_shards: int) -> dict[str, str]:
+        """Per-shard FlexKV isolation on multi-shard nodes (port of b20472a).
+
+        Private mode (default): every shard runs its own in-process FlexKV
+        stack, so the default ipc socket path (FLEXKV_SERVER_RECV_PORT,
+        ipc:///tmp/flexkv_server) collides across shards — GPU registrations
+        crosstalk and a shard's TransferManager can eat another shard's
+        registration. Suffix the path with the shard's GPU ids. The metrics
+        servers likewise default to fixed ports 8080/8081; offset per shard.
+
+        Shared pool mode (FLEXKV_SHARED_CPU_CACHE=1): all shards join ONE
+        KVServer over one socket — instance_num>1 flips KVManager into
+        server_client_mode (shard 0 spawns the server, others connect), and
+        the cache budget scales by shard count so totals match private mode.
+        NB: server_client_mode re-enters the multi-client registration
+        territory — pair it with FLEXKV_ZMQ_IMMEDIATE=1 /
+        FLEXKV_TRANSLATE_PHYSICAL_DEVICE=1 (the B2 patch gates).
+        """
+        env = self._flexkv_env_vars()
+        base_port = env.get("FLEXKV_SERVER_RECV_PORT", "ipc:///tmp/flexkv_server")
+        if env.get("FLEXKV_SHARED_CPU_CACHE", "0") == "1":
+            env["FLEXKV_INSTANCE_NUM"] = str(num_shards)
+            env["FLEXKV_INSTANCE_ID"] = str(spec_idx)
+            env["FLEXKV_SERVER_RECV_PORT"] = base_port
+            per_shard_gb = float(env.get("FLEXKV_CPU_CACHE_GB", "16"))
+            env["FLEXKV_CPU_CACHE_GB"] = str(int(per_shard_gb * num_shards))
+        else:
+            env["FLEXKV_SERVER_RECV_PORT"] = f"{base_port}_g{worker_cvd.replace(',', '-')}"
+        env["FLEXKV_PY_METRICS_PORT"] = str(int(env.get("FLEXKV_PY_METRICS_PORT", "8080")) + spec_idx * 2)
+        env["FLEXKV_CPP_METRICS_PORT"] = str(int(env.get("FLEXKV_CPP_METRICS_PORT", "8081")) + spec_idx * 2)
+        return env
+
     # ------------------------------------------------------------------ #
     # verl interface — addresses
     # ------------------------------------------------------------------ #
@@ -644,6 +715,8 @@ class DynamoHttpServer:
             # the same prefix hashes differently per worker → the router logs
             # "block_hash mismatch" and prefix-cache hits collapse.
             env.setdefault("PYTHONHASHSEED", "0")
+            if self._enable_flexkv():
+                env.update(self._flexkv_shard_env_vars(spec_idx, worker_cvd, len(worker_specs)))
 
             cmd = self._build_vllm_cmd(
                 served_model_name,
@@ -855,6 +928,14 @@ class DynamoHttpServer:
             executor_backend = "uni" if tp == 1 else "mp"
         cmd += ["--distributed-executor-backend", str(executor_backend)]
         cmd += ["--kv-events-config", kv_events_config_json]
+        if self._enable_flexkv():
+            # FlexKVConnectorV1 is registered natively in vLLM's
+            # KVConnectorFactory (main + #54484 line). kv_both: the shard both
+            # saves (PUT, incl. offload_aborted_kv) and loads (GET) CPU-tier KV.
+            cmd += [
+                "--kv-transfer-config",
+                '{"kv_connector":"FlexKVConnectorV1","kv_role":"kv_both"}',
+            ]
         # Pass through extra args from rollout.engine_kwargs.dynamo.extra_args.
         extra = self._dynamo_cfg().get("extra_args") or []
         if isinstance(extra, list):
@@ -1782,10 +1863,16 @@ class DynamoHttpServer:
         kwargs.setdefault("level", 1)
         await self._engine_method_all("sleep", kwargs=kwargs)
 
-    async def clear_kv_cache(self):
+    async def clear_kv_cache(self, reset_connector: bool = True):
+        # reset_connector is forwarded: with FlexKV (or any KV connector) on,
+        # the CPU tier must drop stale KV too. Without a connector configured
+        # vLLM treats reset_prefix_cache(reset_connector=True) as a no-op
+        # success (scheduler.reset_connector_cache logs and returns True).
         if not self._control_endpoints:
             return
-        await self._engine_method_all("reset_prefix_cache")
+        await self._engine_method_all(
+            "reset_prefix_cache", kwargs={"reset_connector": bool(reset_connector)}
+        )
 
     async def set_global_steps(self, global_steps: int):
         self.global_steps = global_steps

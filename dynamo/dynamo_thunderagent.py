@@ -87,7 +87,9 @@ class DynamoThunderAgentHttpServer(DynamoHttpServer):
             str(self.model_config.local_path),
             "--router-block-size",
             str(self._thunderagent_router_block_size()),
-            "--router-reset-states",
+            # NB: no --router-reset-states — that flag exists only in older
+            # internal builds; dynamo >= 1.4.2 argparse rejects it. Builds
+            # that support it can opt back in via thunderagent.extra_args.
             *self._thunderagent_extra_args(),
         ]
 
@@ -121,10 +123,10 @@ class DynamoThunderAgentHttpServer(DynamoHttpServer):
         return command
 
     def _frontend_router_args(self) -> list[str]:
-        args = super()._frontend_router_args()
-        if self._thunderagent_enabled() and "--router-reset-states" not in args:
-            args.append("--router-reset-states")
-        return args
+        # NB: no --router-reset-states — the flag was removed in dynamo >= 1.4.2
+        # (frontend exits rc=1 on unknown arguments). Re-enable on older dynamo
+        # via thunderagent.extra_args if needed.
+        return super()._frontend_router_args()
 
     def _start_thunderagent(self) -> None:
         if not self._thunderagent_enabled() or self._thunderagent_process is not None:

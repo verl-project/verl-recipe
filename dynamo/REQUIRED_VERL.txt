@@ -1,5 +1,6 @@
-# Dynamo ThunderAgent — tested core verl commit
+# Dynamo backend + FlexKV L2 — tested core verl commit (main lineage)
+# Both smokes (backend + FLEXKV=1) pass with the verl tree git-status clean.
 UPSTREAM=https://github.com/verl-project/verl.git
 MODE=pinned_commit
-COMMIT=d82d2777b5dc3e96a8a45168d02660312707ab98
-PIP_INSTALL=pip install verl@git+https://github.com/verl-project/verl.git@d82d2777b5dc3e96a8a45168d02660312707ab98
+COMMIT=9c7643648f1e1e109dd30da2da3cf94e1317b229
+PIP_INSTALL=pip install verl@git+https://github.com/verl-project/verl.git@9c7643648f1e1e109dd30da2da3cf94e1317b229
