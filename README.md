@@ -77,6 +77,7 @@ The script requires only `bash`, `git`, `awk`, and `pip`/`pip3` on `PATH`. It do
 | genrm_remote | [`recipe/genrm_remote/REQUIRED_VERL.txt`](genrm_remote/REQUIRED_VERL.txt) |
 | gkd/megatron | [`recipe/gkd/megatron/REQUIRED_VERL.txt`](gkd/megatron/REQUIRED_VERL.txt) |
 | gvpo | [`recipe/gvpo/REQUIRED_VERL.txt`](gvpo/REQUIRED_VERL.txt) |
+| hacpo | [`recipe/hacpo/REQUIRED_VERL.txt`](hacpo/REQUIRED_VERL.txt) |
 | infigui-g1 | [`recipe/infigui-g1/REQUIRED_VERL.txt`](infigui-g1/REQUIRED_VERL.txt) |
 | langgraph_agent | [`recipe/langgraph_agent/REQUIRED_VERL.txt`](langgraph_agent/REQUIRED_VERL.txt) |
 | minicpmo | [`recipe/minicpmo/REQUIRED_VERL.txt`](minicpmo/REQUIRED_VERL.txt) |

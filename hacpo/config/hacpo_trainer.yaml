@@ -1,0 +1,55 @@
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+data:
+  gen_batch_size: ${data.train_batch_size}
+
+trainer:
+  use_v1: true
+  v1:
+    trainer_mode: sync
+    sync: {}
+
+hacpo:
+  agents:
+    - id: agent_a
+      model_path: /path/to/model-a
+      apply_chat_template_kwargs: null
+    - id: agent_b
+      model_path: /path/to/model-b
+      apply_chat_template_kwargs: null
+
+  # Null validates every agent; a list validates only the selected policies.
+  validation_agent_ids: null
+
+  loss:
+    self_clip_low: 0.0003
+    self_clip_high: 0.0004
+    cross_clip_delta: 0.2
+    cross_clip_step: 0.025
+    alpha: 1.0
+    max_abs_log_ratio: 10.0
+
+  capability:
+    metric: positive_rate
+    window_size: 5
+    minimum: 1.0e-8
+    ratio_min: 0.1
+    ratio_max: 10.0
+    warmup_steps: 0
+
+  advantage:
+    normalize_by_std: true
+    epsilon: 1.0e-6
+    disable_weighting_for_uniform_rewards: true
+    binary_baseline_guard: true
+
+  trajectory:
+    overflow: truncate
+    target_max_prompt_length: null
+    target_max_response_length: null
