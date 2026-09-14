@@ -1,0 +1,197 @@
+# Copyright (c) 2026, HUAWEI CORPORATION. All rights reserved.
+
+# DR.Kernel-NATIVE kernel-RL trainer config.
+#
+# Mirrors DR.Kernel's `kernel/config/kernel_trainer.yaml` pattern: a custom
+# `KernelAsyncRewardManager` (registered as `kernel_async`) batches its own
+# trajectories and calls `compute_kernel_reward_batch` directly, matching
+# the upstream DR.Kernel layout.
+
+hydra:
+  searchpath:
+    - pkg://verl.trainer.config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+# ---- async-mode block (inlined from fully_async_ppo_trainer.yaml) ----
+async_training:
+  staleness_threshold: 0.1
+  trigger_parameter_sync_step: 4
+  require_batches: 1
+  partial_rollout: True
+  use_trainer_do_validate: False
+
+rollout:
+  nnodes: 1
+  n_gpus_per_node: 8
+  n: 4
+  total_rollout_steps: 100
+  test_freq: 10
+
+data:
+  gen_batch_size: 1
+
+actor_rollout_ref:
+  rollout:
+    calculate_log_probs: True
+    checkpoint_engine:
+      backend: "nccl"
+
+    # DR.Kernel-style multi-turn agent loop. The `kernel_agent` name is
+    # mapped to `recipe.drkernel.agent.kernel_agent_loop.KernelAgentLoop`
+    # via a Hydra `_target_:` entry in `agent_loop_config.yaml`, so the
+    # rollouter actor process can instantiate it without importing our
+    # recipe up front.
+    agent:
+      default_agent_loop: kernel_agent
+      agent_loop_config_path: recipe/drkernel/config/agent_loop_config.yaml
+
+    # `prompt_config_path` and `kernel_eval` for the kernel agent loop
+    # live in `agent_loop_config.yaml` — `MultiTurnConfig` here is a
+    # strict dataclass and rejects fields it doesn't predeclare.
+    multi_turn:
+      enable: True
+      format: hermes
+      max_user_turns: 3
+      max_assistant_turns: 3
+      max_parallel_calls: 1
+      max_tool_response_length: 4096
+      tool_response_truncate_side: "middle"
+      tool_config_path: null
+
+  actor:
+    use_rollout_log_probs: True
+
+  model:
+    use_remove_padding: True
+    # Loaded inside the (stock verl) actor worker via HFModelConfig.__post_init__
+    # -> import_external_libs, so the recipe's bypass_mode policy-loss override
+    # (per-token catastrophic-ratio veto) is registered where the loss runs.
+    external_lib: recipe.drkernel.rollout_veto_patch
+
+algorithm:
+  adv_estimator: trloo
+  gamma: 1.0
+  rollout_correction:
+    bypass_mode: True
+    rollout_is: token
+    rollout_is_threshold: 2.0
+    # DR.Kernel MRS per-token catastrophic-ratio veto (paper value: 1e-4).
+    # Declared here (default off) so the scripts' Hydra override resolves
+    # against the composed config; applied by recipe.drkernel.rollout_veto_patch.
+    rollout_token_veto_threshold: null
+  batch_filter:
+    enable: False
+
+# ----------------------------------------------------------------------
+# Reward wiring — DR.Kernel native pattern.
+#
+# How this works post-`migrate_legacy_reward_impl`:
+#   - `reward_model.reward_manager` selects the registered class
+#     (`kernel_async` -> `recipe.drkernel.workers.reward_manager.KernelAsyncRewardManager`).
+#   - `reward_model.reward_kwargs` is the only field the migration step
+#     forwards verbatim into `config.reward.reward_kwargs` (the rest of
+#     the `reward_model` block is dropped). Everything the kernel reward
+#     needs at runtime lives inside this blob so `KernelAsyncRewardManager.__init__`
+#     can read it from `config.reward.reward_kwargs`.
+#   - `custom_reward_function` is set; the manager forwards `compute_score`
+#     into `AsyncKernelRewardManager` for parity with the upstream
+#     DR.Kernel layout, even though the manager's HTTP path goes through
+#     `KernelRewardClient` directly.
+# ----------------------------------------------------------------------
+
+reward_model:
+  enable: False
+
+  # Use the importlib source so verl loads the adapter from our recipe
+  # module instead of looking it up in the in-process registry. The
+  # `RewardLoopWorker` Ray actors are spawned in fresh processes and don't
+  # import our recipe code, so the `@register("kernel_async")` decorator
+  # never fires there. importlib + an explicit module path bypasses the
+  # registry entirely. `reward_loop_class_name` is unused by the importlib
+  # branch (the loader uses `reward_manager.name` as the class name) but
+  # we set it for completeness.
+  reward_manager: kernel_async                                              # used as both registry name (unused here) and class name to import
+  reward_loop_source: importlib
+  reward_loop_module_path: pkg://recipe.drkernel.workers.reward_manager.kernel_async_adapter
+  reward_loop_class_name: kernel_async                                      # alias defined at bottom of kernel_async_adapter.py
+
+  server_url: ???                    # e.g. http://npu-4:8002
+  reward_func_name: calculate_reward_weighted
+
+  # The reward_kwargs blob mirrors DR.Kernel's `kernel_trainer.yaml`. Any
+  # knob the manager / `KernelRewardClient` / `compute_kernel_reward_batch`
+  # consume at runtime needs to live in here — `migrate_legacy_reward_impl`
+  # only forwards `reward_kwargs` into `config.reward.reward_kwargs`.
+  reward_kwargs:
+    # Pass-through to KernelRewardClient.
+    server_url: ${reward_model.server_url}
+    reward_func_name: ${reward_model.reward_func_name}
+
+    enhanced: True
+    use_sandbox_rate_limit: False    # rate-limiter dropped in our client
+    rate_limit: 64
+    acquire_timeout: 2400
+    max_concurrent: 32
+    timeout: 1800
+    max_retries: 3
+    task_timeout: 600
+    task_timeout_in_client: 2400
+    print_status: True
+
+    num_perf_trials: 100
+    num_correct_trials: 5
+    enable_profiling: True
+    verbose_errors: True
+    detect_decoy_kernel: True
+    reference_backend: eager
+    # KernelGym evaluation toolkit ("kernelbench" | "sandbox_v3"). The server
+    # never falls back to its own DEFAULT_TOOLKIT for /evaluate (the workflow
+    # controller pre-fills "kernelbench"), so the choice must be made here.
+    # sandbox_v3 adds AST decoy validation (Type 1/2/3): partial PyTorch
+    # implementations are rejected, not just zero-Triton ones.
+    toolkit: kernelbench
+
+    # Reward shaping bounds (KernelRewardClient reads these).
+    init_correct_weight: 1.0
+    init_performance_weight: 1.0
+    speedup_reward_upper_bound: 3.0
+    speedup_reward_lower_bound: 1.0
+    speedup_eps: 0.05
+    speedup_threshold: null
+
+    # Fast@X tensorboard metrics — fraction of kernels passing correctness with
+    # speedup >= X over Torch. Override from the launcher, e.g.:
+    #   reward_model.reward_kwargs.fast_at_thresholds=[0.5,1.0,1.5,2.0]
+    fast_at_thresholds: [0.2, 0.4, 0.6, 0.8, 1.0, 1.2]
+
+    coverage_reward:
+      reward_type: time_coverage
+      weight: 0.25
+      enable: False
+    coverage_rs: null
+    coverage_rs_threshold: 0.3
+    coverage_rs_factor: 0.1
+    coverage_rs_key: time_coverage
+
+    reward_weights:
+      correctness: 1.0
+      speedup: 1.0
+      coverage: 0.0
+
+    reward_policy:
+      penalties:
+        penalty_score: 0.0
+
+    is_valid: False
+
+# Custom reward function still wired up — `KernelAsyncRewardManager` accepts
+# `compute_score` from this and threads it into `AsyncKernelRewardManager`
+# for parity with DR.Kernel's layout. The manager's evaluation path goes
+# through `KernelRewardClient` directly, so the function is mostly a
+# DR.Kernel-compat anchor.
+custom_reward_function:
+  path: pkg://recipe.drkernel.rewards.kernel_reward
+  name: compute_kernel_reward_batch
