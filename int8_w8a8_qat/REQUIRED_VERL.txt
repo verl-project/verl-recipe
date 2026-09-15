@@ -1,0 +1,9 @@
+# Ascend INT8 W8A8 QAT rollout based on verl v0.7.0
+UPSTREAM=https://github.com/sunsunsun98/verl-int8-w8a8.git
+MODE=pinned_tag
+BRANCH=int8-w8a8-v0.7.0
+TAG=int8-w8a8-v0.7.0-r1
+COMMIT=acad76c47e86bd067596156e194e513ad3eb6206
+PIP_INSTALL=pip install verl@git+https://github.com/sunsunsun98/verl-int8-w8a8.git@acad76c47e86bd067596156e194e513ad3eb6206
+GIT_SETUP=git clone https://github.com/sunsunsun98/verl-int8-w8a8.git verl && cd verl && git checkout acad76c47e86bd067596156e194e513ad3eb6206
+NOTES=Experimental Ascend INT8 W8A8 QAT rollout implementation pinned to a custom fork of official verl v0.7.0.

@@ -78,6 +78,7 @@ The script requires only `bash`, `git`, `awk`, and `pip`/`pip3` on `PATH`. It do
 | gkd/megatron | [`recipe/gkd/megatron/REQUIRED_VERL.txt`](gkd/megatron/REQUIRED_VERL.txt) |
 | gvpo | [`recipe/gvpo/REQUIRED_VERL.txt`](gvpo/REQUIRED_VERL.txt) |
 | infigui-g1 | [`recipe/infigui-g1/REQUIRED_VERL.txt`](infigui-g1/REQUIRED_VERL.txt) |
+| int8_w8a8_qat | [`recipe/int8_w8a8_qat/REQUIRED_VERL.txt`](int8_w8a8_qat/REQUIRED_VERL.txt) |
 | langgraph_agent | [`recipe/langgraph_agent/REQUIRED_VERL.txt`](langgraph_agent/REQUIRED_VERL.txt) |
 | minicpmo | [`recipe/minicpmo/REQUIRED_VERL.txt`](minicpmo/REQUIRED_VERL.txt) |
 | nemo_gym | [`recipe/nemo_gym/REQUIRED_VERL.txt`](nemo_gym/REQUIRED_VERL.txt) |
@@ -104,6 +105,7 @@ The script requires only `bash`, `git`, `awk`, and `pip`/`pip3` on `PATH`. It do
 - [langgraph_agent](https://github.com/verl-project/verl-recipe/tree/main/langgraph_agent): A tiny example to demonstrate multi-turn rollout with [LangGraph ReactAgent](https://langchain-ai.github.io/langgraph/agents/overview/) to solve math expression.
 - [spo](https://github.com/verl-project/verl-recipe/tree/main/spo): [Single-stream Policy Optimization](https://arxiv.org/abs/2509.13232).
 - [partial_rollout](./partial_rollout/): synchronous RL with cross-step rollout interruption + resume to reclaim long-tail GPU bubbles ([APRIL](https://arxiv.org/pdf/2509.18521)-style).
+- [int8_w8a8_qat](./int8_w8a8_qat/): Ascend INT8 W8A8 rollout with FSDP quantization-aware training, backed by [verl-int8-w8a8](https://github.com/sunsunsun98/verl-int8-w8a8/tree/int8-w8a8-v0.7.0).
 - [verl_tinker](./verl_tinker/): Tinker-compatible HTTP server backed by VeRL actors, with separate Tinker cookbook client examples.
 - [specRL/rl_spec](./specRL/rl_spec/): accelerating RL rollout with a co-adapted diffusion drafter ([DFlash](https://github.com/z-lab/dflash)), via Split-KV context parallelism for drafter training and entropy-boosted anchor sampling.
 - TBA...
