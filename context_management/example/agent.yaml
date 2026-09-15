@@ -1,0 +1,16 @@
+# Agent-loop registry for the context-management recipe.
+# Pass via: actor_rollout_ref.rollout.agent.agent_loop_config_path=recipe/context_management/example/agent.yaml
+# then select one with actor_rollout_ref.rollout.agent.default_agent_loop=<name>.
+#
+# Each entry's extra keys (beyond name/_target_) are forwarded as __init__ kwargs to the loop.
+
+- name: naive_summarizer_agent
+  _target_: recipe.context_management.agent_loop_with_context_management.SummarizerAgentLoop
+  # Max number of summarize-and-continue compressions per rollout.
+  max_context_compressions: 4
+
+- name: tool_sliding_window_agent
+  _target_: recipe.context_management.agent_loop_with_context_management.ToolSlidingWindowAgentLoop
+  # Max number of sliding-window compressions per rollout (turn limits come from
+  # actor_rollout_ref.rollout.multi_turn.*).
+  max_context_compressions: 4
