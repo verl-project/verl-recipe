@@ -99,7 +99,7 @@ Verifies the full Dynamo stack (etcd + nats + workers + frontend) can serve a
 completion, no training loop. Passes when the log prints `PASS:`.
 
 ```bash
-bash recipe/dynamo/scripts/smoke_dynamo_v1.sh          # Qwen2.5-0.5B-Instruct, 1 GPU
+bash recipe/dynamo/smoke_dynamo_v1.sh          # Qwen2.5-0.5B-Instruct, 1 GPU
 ```
 
 
