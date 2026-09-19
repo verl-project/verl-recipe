@@ -74,6 +74,7 @@ The script requires only `bash`, `git`, `awk`, and `pip`/`pip3` on `PATH`. It do
 | fault_recover | [`recipe/fault_recover/REQUIRED_VERL.txt`](fault_recover/REQUIRED_VERL.txt) |
 | flash_rl_ascend | [`recipe/flash_rl_ascend/REQUIRED_VERL.txt`](flash_rl_ascend/REQUIRED_VERL.txt) |
 | flowrl | [`recipe/flowrl/REQUIRED_VERL.txt`](flowrl/REQUIRED_VERL.txt) |
+| [fully_async_policy](fully_async_policy/README.md) | [`recipe/fully_async_policy/REQUIRED_VERL.txt`](fully_async_policy/REQUIRED_VERL.txt) |
 | genrm_remote | [`recipe/genrm_remote/REQUIRED_VERL.txt`](genrm_remote/REQUIRED_VERL.txt) |
 | gkd/megatron | [`recipe/gkd/megatron/REQUIRED_VERL.txt`](gkd/megatron/REQUIRED_VERL.txt) |
 | gvpo | [`recipe/gvpo/REQUIRED_VERL.txt`](gvpo/REQUIRED_VERL.txt) |

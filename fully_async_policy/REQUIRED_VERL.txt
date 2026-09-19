@@ -1,0 +1,9 @@
+# Source revision of `verl.experimental.fully_async_policy`
+UPSTREAM=https://github.com/verl-project/verl.git
+MODE=pinned_commit
+COMMIT=e2ac8f6222801d5e8ce50447b0c3c2d9237e4770
+VERL_COMMIT=e2ac8f6222801d5e8ce50447b0c3c2d9237e4770
+PIP_INSTALL=pip install verl@git+https://github.com/verl-project/verl.git@e2ac8f6222801d5e8ce50447b0c3c2d9237e4770
+GIT_SETUP=git clone https://github.com/verl-project/verl.git && cd verl && git checkout e2ac8f6222801d5e8ce50447b0c3c2d9237e4770 && git submodule update --init --recursive recipe
+RECIPE_FOLDER=fully_async_policy
+NOTES=Requires verl.experimental.fully_async_policy and the Ascend dependency revisions listed in the example script. Use this recipe checkout in recipe/; the upstream revision's submodule does not include this newly added example.
