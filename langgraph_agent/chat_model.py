@@ -39,6 +39,7 @@ from pydantic import Field
 from verl.experimental.agent_loop.agent_loop import AgentLoopOutput, AsyncLLMServerManager
 from verl.experimental.agent_loop.tool_parser import ToolParser
 from verl.experimental.agent_loop.utils import add_generation_prompt_for_gpt_oss, format_gpt_oss_tool_response_manually
+from verl.utils import normalize_token_ids
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -90,7 +91,9 @@ class ChatModel(BaseChatModel):
         formatted_tools: list = [convert_to_openai_tool(tool) for tool in tools]
 
         # used to remove system prompt prefix when encoding tool response
-        system_prompt = self.tokenizer.apply_chat_template([{}], add_generation_prompt=False, tokenize=True)
+        system_prompt = normalize_token_ids(
+            self.tokenizer.apply_chat_template([{}], add_generation_prompt=False, tokenize=True)
+        )
         kwargs["system_prompt"] = system_prompt
 
         return self.bind(tools=formatted_tools, **kwargs)
@@ -190,6 +193,7 @@ class ChatModel(BaseChatModel):
                     tokenize=True,
                 ),
             )
+            prompt_ids = normalize_token_ids(prompt_ids)
             return str(uuid.uuid4()), prompt_ids, []
 
         # Case 2: follow up chat completion with tool/human response: [system], human, ai, human|tool, ...
@@ -210,7 +214,7 @@ class ChatModel(BaseChatModel):
                     messages, add_generation_prompt=True, tokenize=True
                 ),
             )
-            tool_response_ids = tool_response_ids[len(kwargs["system_prompt"]) :]
+            tool_response_ids = normalize_token_ids(tool_response_ids)[len(kwargs["system_prompt"]) :]
         elif self.tool_parser == "gpt-oss":
             # Format tool responses manually
             # since gpt-oss chat template requires tool call messages to parse tool response messages
