@@ -1,0 +1,25 @@
+# DMPO config overrides for verl PPO trainer.
+
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+actor_rollout_ref:
+  model:
+    external_lib: recipe.dmpo.dmpo_patch
+
+  actor:
+    _target_: recipe.dmpo.config.DMPOActorConfig
+
+    policy_loss:
+      _target_: recipe.dmpo.config.DMPOPolicyLossConfig
+      loss_mode: grpo_dmpo_zero
+      dmpo_beta: 1.0
+      dmpo_temperature: 0.06666666666666667
+
+algorithm:
+  adv_estimator: grpo
