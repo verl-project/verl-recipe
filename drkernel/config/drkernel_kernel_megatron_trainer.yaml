@@ -1,0 +1,155 @@
+# Copyright (c) 2026, HUAWEI CORPORATION. All rights reserved.
+
+# DR.Kernel kernel-RL trainer config — Megatron variant.
+#
+# Sibling of `drkernel_kernel_trainer_native.yaml` (which chains through
+# `ppo_trainer` for FSDP). This version chains through verl's
+# `ppo_megatron_trainer` base so the actor uses Megatron tensor/pipeline
+# parallelism instead of FSDP. Async-mode block is inlined directly
+# (mirrors `fully_async_ppo_megatron_trainer.yaml` upstream).
+#
+# Override on the command line:
+#   python -m recipe.drkernel.main \
+#       --config-name=drkernel_kernel_megatron_trainer \
+#       reward_model.server_url=http://npu-4:10907 \
+#       actor_rollout_ref.model.path=/path/to/qwen3-30b-a3b \
+#       data.train_files=[/path/to/train.parquet] \
+#       data.val_files=[/path/to/val.parquet]
+
+hydra:
+  searchpath:
+    - pkg://verl.trainer.config
+
+# Mirror the structure of `verl/trainer/config/ppo_megatron_trainer.yaml` —
+# chain through `ppo_trainer` and override `model_engine` at this primary
+# level. Going through `ppo_megatron_trainer` indirectly does NOT propagate
+# the override correctly through the `${model_engine}_actor` interpolation
+# in ppo_trainer's defaults list, which is why the actor was being
+# instantiated as FSDPActorConfig instead of McoreActorConfig.
+defaults:
+  - ppo_trainer
+  - override model_engine: megatron
+  - _self_
+
+# ---- async-mode block (inlined from fully_async_ppo_megatron_trainer.yaml) ----
+async_training:
+  staleness_threshold: 0.1
+  trigger_parameter_sync_step: 4
+  require_batches: 1
+  partial_rollout: True
+  use_trainer_do_validate: False
+
+# Separate resource pool for the rollouter — fully_async_policy splits the
+# trainer / rollouter NPUs. Override `nnodes` / `n_gpus_per_node` per run.
+rollout:
+  nnodes: 1
+  n_gpus_per_node: 8
+  n: 4
+  total_rollout_steps: 100
+  test_freq: 10
+
+data:
+  # Streaming sample production — fully_async_policy generates one
+  # prompt at a time off the queue.
+  gen_batch_size: 1
+
+actor_rollout_ref:
+  rollout:
+    # Required: log_probs must be calculated by the rollouter under async.
+    calculate_log_probs: True
+    checkpoint_engine:
+      backend: "nccl"
+
+    # Multi-turn kernel agent: model writes a kernel, sees evaluation
+    # feedback, refines, etc.
+    multi_turn:
+      enable: True
+      format: hermes
+      max_user_turns: 3
+      max_assistant_turns: 3
+      max_parallel_calls: 1
+      max_tool_response_length: 4096
+      tool_response_truncate_side: "middle"
+      # KernelGym evaluation tool config — set via override or null for a
+      # parser-only flow without tool calls between turns.
+      tool_config_path: null
+
+  actor:
+    # Use rollout-emitted log probs (avoids re-computing on the trainer).
+    use_rollout_log_probs: True
+
+  model:
+    use_remove_padding: True
+
+# Default to TRLOO (Phase 1.1) since multi-turn is on.
+algorithm:
+  adv_estimator: trloo
+  gamma: 1.0
+
+  # bypass_mode covers DR.Kernel's mismatch correction (Phase 1.2).
+  rollout_correction:
+    bypass_mode: True
+    rollout_is: token
+    rollout_is_threshold: 2.0
+
+  # Disable MRS by default — turn on per run when desired (Phase 2).
+  batch_filter:
+    enable: False
+
+# Reward manager + KernelGym wiring. server_url MUST be set on CLI.
+reward_model:
+  enable: False
+  reward_manager: kernel_async
+  server_url: ???                  # e.g. http://npu-4:10907
+  reward_func_name: calculate_reward_weighted
+
+  # KernelGym client tuning.
+  enhanced: True
+  use_sandbox_rate_limit: True
+  rate_limit: 64
+  acquire_timeout: 2400
+  max_concurrent: 32
+  timeout: 1800
+  max_retries: 3
+  task_timeout: 600
+  task_timeout_in_client: 2400
+  print_status: True
+  num_perf_trials: 100
+  num_correct_trials: 5
+  enable_profiling: True
+  verbose_errors: True
+  detect_decoy_kernel: True
+  reference_backend: eager         # placeholder; "eager" / "torch_compile"
+  toolkit: kernelbench             # KernelGym eval toolkit; "sandbox_v3" adds AST decoy validation
+
+  # Reward shaping bounds.
+  speedup_reward_upper_bound: 3.0
+  speedup_reward_lower_bound: 1.0
+  speedup_eps: 0.05
+  speedup_threshold: null
+
+  # Fast@X tensorboard metrics — fraction of kernels passing correctness with
+  # speedup >= X over Torch. Override from the launcher, e.g.:
+  #   reward_model.fast_at_thresholds=[0.5,1.0,1.5,2.0]
+  fast_at_thresholds: [0.4, 0.6, 0.8, 1.0, 1.2]
+
+  # Coverage-based RS (PRS in the DR.Kernel paper).
+  coverage_reward:
+    reward_type: time_coverage
+    weight: 0.25
+    enable: False
+  coverage_rs: null
+  coverage_rs_threshold: 0.3
+  coverage_rs_factor: 0.1
+  coverage_rs_key: time_coverage
+
+  # Reward weights blob — parsed by kernel_reward.calculate_reward_weighted.
+  reward_weights:
+    correctness: 1.0
+    speedup: 1.0
+    coverage: 0.0
+
+  # Reward policy / penalties (used when KernelGym returns errors).
+  reward_policy:
+    penalties:
+      penalty_score: 0.0

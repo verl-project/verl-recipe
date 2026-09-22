@@ -1,0 +1,40 @@
+# Copyright (c) 2026, HUAWEI CORPORATION. All rights reserved.
+
+# Per-turn prompt config for the kernel-RL multi-turn agent loop.
+#
+# Ported from `drkernel/KernelGYM/drkernel/kernel/config/prompt_config/multi_turn_kernel.yaml`.
+# Loaded by `recipe.drkernel.agent.per_turn_prompts.PerTurnPrompts` and
+# read by `KernelAgentLoop._handle_evaluating` to render the user
+# feedback message between assistant turns.
+#
+# The `condition` / `history_mode` / `response_truncation` /
+# `update_memory` fields are kept verbatim for parity with DR.Kernel's
+# config schema; our minimal engine currently honors only the `template`
+# string of the `tool_response` entry. Adding richer condition logic is
+# additive in `per_turn_prompts.py`.
+
+method: system
+prompt: null
+
+per_turn_prompts:
+  - name: first_turn
+    condition: "current_turn == 0"
+    history_mode: all
+    skip_env: 0.0
+    response_truncation: python_code, answer_code
+    template: null
+
+  - name: tool_response
+    condition: "make_up_tool_response == True"
+    history_mode: all
+    skip_env: 0.0
+    response_truncation: python_code, answer_code
+    update_memory: false
+    template: |
+      Now you have received the server feedback for your last implementation. Based on that and all your previous responses, improve the implementation.
+
+      Here is the server feedback. Please refer to this feedback to improve the implementation:
+      Server feedback (status/metrics/errors):
+      {feedback}
+
+      Return an improved Triton implementation named `ModelNew` as a single ```python``` block. Let's think step by step.
