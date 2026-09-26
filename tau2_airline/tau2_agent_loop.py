@@ -107,6 +107,17 @@ class Tau2AgentLoop(ToolAgentLoop):
         if task_id is None:
             raise ValueError("tau2_agent requires extra_info.task_id in the dataset row")
 
+        try:
+            return await self._run_trajectory(sampling_params, str(task_id))
+        except Exception:
+            # Infrastructure/parser failures are not observed task failures. Do
+            # not turn them into reward-zero training data or fabricate tokens.
+            # A plain exception also avoids carrying an unpicklable SDK error
+            # through Ray; the original traceback stays in the worker log.
+            logger.exception("tau2 trajectory failed for task %s", task_id)
+            raise RuntimeError(f"tau2 trajectory failed for task {task_id}; see worker traceback") from None
+
+    async def _run_trajectory(self, sampling_params: dict[str, Any], task_id: str) -> AgentLoopOutput:
         request_id = uuid4().hex
         metrics: dict[str, Any] = {}
 
@@ -133,47 +144,31 @@ class Tau2AgentLoop(ToolAgentLoop):
         # Text the policy last produced, stashed by the generating handler.
         agent_data.extra_fields["assistant_content"] = ""
 
-        # ContextVar isolation for the async portion of this trajectory.
-        # A single trajectory must never crash the whole batch: an occasional
-        # user-sim hiccup / tau2 edge case is caught here, the trajectory is
-        # terminated with an invalid terminal state (→ reward 0, honest), and
-        # the real traceback is logged so the root cause stays visible. Without
-        # this, the raised exception propagates through Ray and surfaces as an
-        # opaque UnserializableException that kills the run.
+        # Keep log-prob metadata consistent with the worker's batch contract,
+        # including the masked tool/user tokens between policy generations.
+        agent_data.extra_fields["logprobs_enabled"] = self.rollout_config.calculate_log_probs
         with rollout_scope(request_id, payload=traj):
             state = Tau2State.PENDING
             while state != Tau2State.TERMINATED:
-                try:
-                    if state == Tau2State.PENDING:
-                        state = await self._handle_pending_state(agent_data, sampling_params)
-                    elif state == Tau2State.GENERATING:
-                        state = await self._handle_generating_state(agent_data, sampling_params)
-                    elif state == Tau2State.PROCESSING_TOOLS:
-                        state = await self._handle_processing_tools_state(agent_data)
-                    elif state == Tau2State.PROCESSING_USER:
-                        state = await self._handle_processing_user_state(agent_data)
-                    else:
-                        logger.error(f"Invalid state: {state}")
-                        state = Tau2State.TERMINATED
-                except Exception:
-                    import traceback
+                if state == Tau2State.PENDING:
+                    state = await self._handle_pending_state(agent_data, sampling_params)
+                elif state == Tau2State.GENERATING:
+                    state = await self._handle_generating_state(agent_data, sampling_params)
+                elif state == Tau2State.PROCESSING_TOOLS:
+                    state = await self._handle_processing_tools_state(agent_data)
+                elif state == Tau2State.PROCESSING_USER:
+                    state = await self._handle_processing_user_state(agent_data)
+                else:
+                    raise RuntimeError(f"Invalid tau2 state: {state}")
 
-                    logger.warning(
-                        f"tau2 trajectory {request_id} failed in {state}; terminating "
-                        f"gracefully (reward 0):\n{traceback.format_exc()}"
-                    )
-                    agent_data.extra_fields["termination_reason"] = TerminationReason.MAX_STEPS
-                    state = Tau2State.TERMINATED
-
-        # Guard the empty-response edge case (failure before any generation):
-        # veRL requires a non-empty response. Emit a single eos token so the
-        # sample is well-formed and simply scores 0.
-        if not agent_data.response_mask:
-            eos = self.tokenizer.eos_token_id or 0
-            agent_data.prompt_ids.append(eos)
-            agent_data.response_mask.append(1)
-            if agent_data.extra_fields.get("logprobs_enabled"):
-                agent_data.response_logprobs.append(0.0)
+        if not agent_data.response_mask or not any(agent_data.response_mask):
+            raise RuntimeError("tau2 trajectory produced no policy tokens")
+        if len(agent_data.prompt_ids) <= len(agent_data.response_mask):
+            raise RuntimeError("tau2 trajectory has no prompt or misaligned response metadata")
+        if agent_data.extra_fields["logprobs_enabled"] and len(agent_data.response_logprobs) != len(
+            agent_data.response_mask
+        ):
+            raise RuntimeError("tau2 response log-probs and mask have different lengths")
 
         # Score the trajectory (pure function of messages+task) off-loop.
         termination_reason = agent_data.extra_fields["termination_reason"]
@@ -233,16 +228,18 @@ class Tau2AgentLoop(ToolAgentLoop):
                 mm_processor_kwargs=agent_data.mm_processor_kwargs,
             )
 
+        if not output.token_ids:
+            raise RuntimeError("Policy generation returned no tokens")
+        logprobs_enabled = agent_data.extra_fields["logprobs_enabled"]
+        if logprobs_enabled and (output.log_probs is None or len(output.log_probs) != len(output.token_ids)):
+            raise RuntimeError("Policy generation returned missing or misaligned log-probs")
+
         agent_data.assistant_turns += 1
         agent_data.response_ids = output.token_ids
         agent_data.prompt_ids += agent_data.response_ids
         agent_data.response_mask += [1] * len(agent_data.response_ids)  # policy tokens: trained
-        if output.log_probs is not None:
-            # `is not None`, not truthiness: a zero-token generation still marks
-            # logprobs as enabled, so masked turns below keep their 0.0 fillers
-            # aligned with response_mask.
+        if logprobs_enabled:
             agent_data.response_logprobs += output.log_probs
-            agent_data.extra_fields["logprobs_enabled"] = True
 
         # Length / turn caps -> stop (leaves termination_reason = MAX_STEPS).
         if len(agent_data.response_mask) >= self.response_length:

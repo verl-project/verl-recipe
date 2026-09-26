@@ -17,12 +17,12 @@ This recipe supplies the pieces verl does not have for that setting:
 | `rollout_context.py` | `ContextVar` scoping so N concurrent rollouts never share env state |
 | `data_prep_airline.py` | builds the train/test parquet from τ²-bench tasks (deterministic split) |
 | `agent_loop_config.yaml` | registers the loop via verl's public `agent_loop_config_path` hook |
-| `example/` | the exact launcher used for the reported runs + a local user-simulator server |
+| `example/` | training launcher + a local user-simulator server (see reproduction caveat below) |
 
 It plugs in through verl's **public AgentLoop extension point** — no verl source changes.
 
-Everything needed to reproduce the numbers below is public — RL from raw base is null here (see
-the note under *Results*), so the warm start is part of the recipe, not an optional extra:
+The warm start and teacher data are public. The original tau2 revision still needs to be
+recorded, and the corrected launcher needs a GPU rerun. The reported runs require this warm start:
 
 - **warm start:** [`yuyu0529nya/qwen2.5-7b-tau2-airline-sft-lora`](https://huggingface.co/yuyu0529nya/qwen2.5-7b-tau2-airline-sft-lora) (LoRA, Apache-2.0)
 - **teacher data it was distilled from:** [`yuyu0529nya/tau2-airline-deepseek-distill`](https://huggingface.co/datasets/yuyu0529nya/tau2-airline-deepseek-distill) (326 DeepSeek V4 Flash trajectories, Apache-2.0)
@@ -30,7 +30,8 @@ the note under *Results*), so the warm start is part of the recipe, not an optio
 ## Required `verl` version
 
 See [`REQUIRED_VERL.txt`](REQUIRED_VERL.txt). Pinned to `ad2e3c2` (2026-07-10), the commit every
-number below was produced against. Newer `main` is untested here — not known-broken, just untested.
+number below was produced against. Use this pin: current `main` (checked at `6093e007`) has removed the
+`apply_chat_template` helper this loop calls. Supporting it requires a separate port.
 
 ## Results
 
@@ -44,35 +45,39 @@ Held-out `BINARY mean@4` (20 held-out airline tasks, `VAL_TEMP=0.5`, n=4), `lr=1
 **2-seed mean ± std = 0.556 ± 0.01.**
 
 **Measured evaluation noise** (same checkpoint, same eval, 6 repeats of `val@0`):
-`0.2375, 0.2875, 0.35, 0.35, 0.2375, 0.3375` → **0.30 ± 0.05**. The endpoint sits ~5σ above that
-band, and both seeds land inside 0.0125 of each other.
+`0.2375, 0.2875, 0.35, 0.35, 0.2375, 0.3375` → **0.30 ± 0.05**. These repeats describe baseline evaluation variability; they are not a formal significance
+test for the training gain. The evaluation covers only 20 held-out tasks, and the two training
+seeds are insufficient to establish broad generalization.
 
 ### ⚠️ Two things you need to know before you try to reproduce this
 
 **1. You must start from the distilled SFT warm start, not raw `Qwen2.5-7B-Instruct`.**
-From raw base, GRPO on this task is **null** — a property of the task, not a bug: base success is
-~20%, so most groups come back all-fail → zero intra-group variance → the group-relative advantage
-is ~0 → no gradient. Worse, the base policy's own successful rollouts never invoke the write-tools
-(`update_reservation_*`) that held-out tasks require, so self-sampling cannot bootstrap them either.
-RL sharpens what a policy already does sometimes; it cannot invent a skill.
-
+In the reported raw-base runs, learning was flat. All-same-reward groups supply no GRPO
+outcome contrast, and the observed successful base rollouts lacked write-tool behavior needed
+by some held-out tasks. These observations motivated the distilled warm start; they do not
+establish that raw-base RL can never learn the task.
 Both the warm start and the teacher data it came from are published (links at the top). Merge the
 adapter into the base and point `POLICY_MODEL` at the merged weights — that is exactly the
 `step 0` of the table above.
 
-**2. The default learning rate is not the one that works.**
-At `lr=4e-6` / `2e-5` the curve is flat and looks like a structural problem. It is not — it is just
-too small: `grad_norm ≈ 0.05` against a clip threshold of 1.0 (**20× of headroom**), with
-`pg_clipfrac ≈ 0.001`, i.e. clipping never engages. `LR=1e-4` is what produces the table above. If
-your curve is flat, check `grad_norm` before you redesign anything.
+**2. Match the reported learning rate.**
+The reported `lr=4e-6` / `2e-5` runs were flat; the table above uses `LR=1e-4`, which
+is now the launcher default. Low gradient norm or clipping frequency alone does not establish
+that an optimizer learning rate is too small. Treat this as an observed hyperparameter result.
 
 ## Setup
 
 ```bash
 pip install verl@git+https://github.com/verl-project/verl.git@ad2e3c272ee95fc5627c5007af59b5d25100be1a
-pip install tau2-bench        # or install from source: https://github.com/sierra-research/tau2-bench
+# tau2-bench is the repository name; install its package from a source checkout.
+git clone https://github.com/sierra-research/tau2-bench.git ./third_party/tau2-bench
+pip install -e ./third_party/tau2-bench
+export TAU2_DATA_DIR="$(pwd)/third_party/tau2-bench/data"
+# Record `git -C ./third_party/tau2-bench rev-parse HEAD` with each run.
+# This PR does not record the original tau2 commit; exact historical data/API
+# compatibility therefore remains unverified.
 
-python data_prep_airline.py   # -> train.parquet / test.parquet
+python data_prep_airline.py --n_val 20   # 30 train / 20 test for the 50-task airline dataset
 python test_tau2_loop_offline.py   # CPU-only sanity check, see Tests below
 ```
 
@@ -80,13 +85,14 @@ python test_tau2_loop_offline.py   # CPU-only sanity check, see Tests below
 
 ```python
 from peft import PeftModel
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 base = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-7B-Instruct", torch_dtype="auto")
 merged = PeftModel.from_pretrained(
     base, "yuyu0529nya/qwen2.5-7b-tau2-airline-sft-lora"
 ).merge_and_unload()
 merged.save_pretrained("./models/qwen25-7b-sft-airline")   # -> POLICY_MODEL
+AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct").save_pretrained("./models/qwen25-7b-sft-airline")
 ```
 
 ### User simulator: pick one
@@ -95,24 +101,32 @@ The user simulator drives the other half of every dialogue, so it dominates both
 determinism.
 
 * **Local (no API key, fully offline):** `bash example/serve_usersim_7b.sh` serves a local 7B on a
-  second GPU; point `TAU2_USER_API_BASE` at it. Deterministic at `TAU2_USER_TEMPERATURE=0`.
-* **Hosted:** set `USERSIM_BACKEND=openrouter` + `TAU2_USER_LLM`, and put your key in
-  `$ROOT/.tau2_env`. The numbers above used `openrouter/meta-llama/llama-3.3-70b-instruct`.
+  second GPU; use `USERSIM_GPU=1` for the server and `GPU=0` for training, then point
+  `TAU2_USER_API_BASE` at it. Temperature 0 reduces sampling noise; it does not guarantee bitwise determinism.
+* **Hosted:** set `USERSIM_BACKEND=openrouter` + `TAU2_USER_LLM`, and export `OPENROUTER_API_KEY` in the shell before launching.
+  The launcher preserves the hosted model and skips the local `/models` probe. The numbers above used `openrouter/meta-llama/llama-3.3-70b-instruct`.
   Frees the second GPU, costs money, adds provider-side nondeterminism.
 
 **The user simulator is part of your experiment.** Changing it changes your numbers; keep it fixed
 across any comparison you care about.
 
+The setup commands above are run from `tau2_airline/`. The model directory must
+contain both merged weights and tokenizer files. `SEED` controls data shuffling and
+rollout sampling; neither the hosted API nor GPU scheduling is made deterministic by it.
+The launcher defaults now match the documented 20-step, 4-trial evaluation protocol;
+the corrected entrypoint has not yet been rerun on GPU.
+
 ## Run
 
 ```bash
-LR=1e-4 TRAIN_BS=24 ROLLOUT_N=12 EPOCHS=20 TEST_FREQ=5 \
+GPU=0 LR=1e-4 TRAIN_BS=24 ROLLOUT_N=12 MAX_STEPS=20 TEST_FREQ=5 \
+SEED=42 VAL_N=4 VAL_TEMP=0.5 \
 POLICY_MODEL=./models/qwen25-7b-sft-airline \
 bash example/run_tau2_grpo_7b.sh
 ```
 
 Everything is env-var driven; see the header of `example/run_tau2_grpo_7b.sh`. Notable knobs:
-`LR`, `TRAIN_BS`, `ROLLOUT_N`, `PPO_MINI`, `EPOCHS`, `TEST_FREQ`, `GPU_UTIL`, `MAX_MODEL_LEN`,
+`LR`, `TRAIN_BS`, `ROLLOUT_N`, `PPO_MINI`, `MAX_STEPS`, `SEED`, `VAL_N`, `VAL_TEMP`, `TEST_FREQ`, `GPU_UTIL`, `MAX_MODEL_LEN`,
 `MAX_PROMPT`, `MAX_RESP`, `PARAM_OFFLOAD`, `POLICY_MODEL`, `EXP_NAME`.
 
 ## Design notes
@@ -144,17 +158,26 @@ is required.
 
 ```bash
 python test_tau2_loop_offline.py   # CPU only, no GPU, no API key
+python -m pytest -q test_launchers_offline.py test_failure_paths_offline.py
 ```
 
 - **A — bridge plumbing:** seeded messages, system prompt, tool schemas, tool execution + id match, user-simulator stop signal.
 - **B — reward fidelity:** premature termination → 0.0; replaying the gold actions → 1.0 with the expected DB/COMMUNICATE breakdown.
 - **C — concurrency isolation:** 8 concurrent trajectories, all 8 DBs distinct.
 
-GPU is needed only for policy token generation and the local user-simulator server.
+The failure-path suite executes the recipe loop with CPU dependency/service stubs. It checks
+that infrastructure failures, empty generations and missing/misaligned log-probs raise instead
+of producing synthetic reward-zero examples; normal turn-limit outcomes remain valid. Successful
+user/tool turns keep masks and log-probs aligned. These checks do not replace GPU/Ray validation.
+
+Unexpected infrastructure failures abort the current rollout batch with a plain RuntimeError;
+the original traceback is logged in the worker. There is no automatic retry in the recipe. This
+avoids training on fabricated EOS tokens or labeling a simulator outage as policy failure.
+Resolve the underlying service error before restarting the run.
 
 ## Honest limits
 
 - **20 held-out tasks.** One task is worth 5 percentage points. Treat single-point moves as noise; the ±0.05 band above was measured, not assumed.
 - **30 training tasks**, `TRAIN_BS=24` → ~1 optimizer step per epoch. This is a small-data regime.
-- **2 seeds**, not 5. Enough to show 0.5625 was not a lucky draw; not enough for tight error bars.
-- The reported numbers use a hosted 70B user simulator with provider fallback enabled, so they are not bit-reproducible; the local-usersim path is the deterministic one.
+- **2 training seeds.** The gains appear in both runs, but these runs do not provide tight uncertainty estimates.
+- The reported numbers use a hosted 70B user simulator with provider fallback enabled, so they are not bit-reproducible; the local-usersim path reduces provider variability.

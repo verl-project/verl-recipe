@@ -11,7 +11,7 @@ Routing to the custom loop is done via config
 per-row ``agent_name`` column is required.
 
 Usage:
-    python data_prep_airline.py --out_dir ./data/tau2_airline --n_val 10
+    python data_prep_airline.py --out_dir ./data/tau2_airline --n_val 20
 """
 
 import argparse
@@ -51,7 +51,7 @@ def main():
     ap.add_argument("--domain", default="airline")
     ap.add_argument("--split", default=None, help="tau2 task split name, or None for all")
     ap.add_argument("--out_dir", default="./data/tau2_airline")
-    ap.add_argument("--n_val", type=int, default=10, help="hold out this many tasks for val")
+    ap.add_argument("--n_val", type=int, default=20, help="hold out this many tasks for val")
     args = ap.parse_args()
 
     rows = build_rows(args.domain, args.split)
