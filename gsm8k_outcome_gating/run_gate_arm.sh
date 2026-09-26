@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Single-arm launcher — GSM8K x Qwen2.5-1.5B-Instruct, GRPO + LoRA(r=32), 1 GPU.
-# This is the launcher that produced every number in README.md (machine-specific
-# absolute paths replaced by env vars; hydra flags unchanged). Ran on a single
+# Based on the launcher for the reported runs; reward wiring and failure handling
+# have since been revised and still require a GPU smoke rerun. Original runs used one
 # RTX 5090: hybrid engine, rollout TP=1, no flash-attn (sdpa fallback).
 #
 # Env knobs:
@@ -18,15 +18,21 @@
 #   PRECHECK_MAX  refuse to start if GPU already uses more MiB (default: 15000)
 #   HF_MIRROR=1   route HF downloads through hf-mirror.com
 #   The gate itself (read by the hook / reward inside Ray workers):
-#   GATE_SHAPED=1 route the gsm8k reward through gate_shaped_reward.py
+#   Shaped reward is configured through reward.custom_reward_function.path.
 #   GATE_MODE     none | std | outcome                  (which arm)
 #   GATE_LAMBDA   phantom strength                      (default: 0.30)
 #   GATE_PHANTOM  short | long                          (default: short)
 #   REALSEED      inject rollout.seed + data.seed       (default: off)
 # ==============================================================================
-set -xeuo pipefail
+set -euo pipefail
 
-ROOT=${GATE_ROOT:-$(pwd)/work}
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+ROOT=$(mkdir -p "${GATE_ROOT:-$(pwd)/work}" && cd "${GATE_ROOT:-$(pwd)/work}" && pwd)
+export GATE_MODE=${GATE_MODE:-none}
+export GATE_LAMBDA=${GATE_LAMBDA:-0.30}
+export GATE_PHANTOM=${GATE_PHANTOM:-short}
+case "$GATE_MODE" in none|std|outcome) ;; *) echo "Invalid GATE_MODE: $GATE_MODE" >&2; exit 2 ;; esac
+case "$GATE_PHANTOM" in short|long) ;; *) echo "Invalid GATE_PHANTOM: $GATE_PHANTOM" >&2; exit 2 ;; esac
 VENV=${VERL_VENV:-$ROOT/venv}
 
 # ---- keep every cache / tmp off the system disk ----
@@ -52,6 +58,9 @@ if [ "${used}" -gt "${PRECHECK_MAX:-15000}" ]; then
 fi
 
 source "$VENV/bin/activate"
+# Explicit import makes missing/failed startup wiring a fatal error in the driver.
+# Python otherwise only prints sitecustomize exceptions and continues execution.
+python3 -c 'import gate_hook; gate_hook.install()'
 cd "$ROOT"
 
 MODEL_PATH=${MODEL_PATH:-$ROOT/models/qwen25-1.5b-instruct}
@@ -60,6 +69,11 @@ TEST_FILE=$ROOT/data/gsm8k/test.parquet
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=${ADV:-grpo} \
+    reward.custom_reward_function.path="$HERE/gate_shaped_reward.py" \
+    reward.custom_reward_function.name=compute_score \
+    +ray_kwargs.ray_init.runtime_env.env_vars.GATE_MODE="$GATE_MODE" \
+    +ray_kwargs.ray_init.runtime_env.env_vars.GATE_LAMBDA="'$GATE_LAMBDA'" \
+    +ray_kwargs.ray_init.runtime_env.env_vars.GATE_PHANTOM="$GATE_PHANTOM" \
     data.train_files="$TRAIN_FILE" \
     data.val_files="$TEST_FILE" \
     data.train_batch_size=32 \
@@ -103,7 +117,8 @@ python3 -m verl.trainer.main_ppo \
     trainer.nnodes=1 \
     trainer.project_name=gate_study \
     trainer.experiment_name=${EXP:-gate_grpo} \
-    trainer.default_local_dir=$ROOT/ckpts/gate_study \
+    trainer.default_local_dir="$ROOT/ckpts/${EXP:-gate_grpo}" \
+    trainer.resume_mode=disable \
     trainer.save_freq=-1 \
     trainer.test_freq=5 \
     trainer.total_epochs=1 \

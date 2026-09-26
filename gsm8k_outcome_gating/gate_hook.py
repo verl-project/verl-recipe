@@ -3,14 +3,14 @@ gate_hook — the "correct test" for outcome-gating, wired into veRL's compute_a
 
 The scientific question (the user's own next-step, from the tau2 work):
     Under a SHAPED reward, an all-FAIL group can have std>0 (different partial credit per
-    failed rollout). DAPO's std-based dynamic sampling KEEPS such a group (std>0) and GRPO then
+    failed rollout). Filtering on the shaped score KEEPS such a group (std>0) and GRPO then
     fabricates a "phantom advantage" inside it — rewarding the least-bad failure (e.g. the
     shortest give-up). A BINARY-OUTCOME gate drops the group (all same outcome) and kills the
-    phantom. So binary-outcome gating catches exactly what DAPO's std filter misses.
+    phantom. Official DAPO recipes use binary acc and already avoid this failure mode.
 
 GATE_MODE env selects the arm:
     none    — plain GRPO (control)
-    std     — DAPO-style: zero advantage on groups whose reward std ≈ 0
+    std     — shaped-score filter: zero advantage on groups whose reward std ≈ 0
     outcome — binary-outcome gate: zero advantage on groups whose OUTCOME is all-same
 
 ★ Design choice that matters: we ZERO THE ADVANTAGES of gated rows, we do NOT zero response_mask.
@@ -27,15 +27,18 @@ from __future__ import annotations
 
 import os
 
-STD_EPS = 1e-6  # a group with reward spread below this is "no contrast" (DAPO would drop it)
-
-
-def _enabled() -> bool:
-    return os.environ.get("GATE_MODE") in ("none", "std", "outcome")
+STD_EPS = 1e-6  # numerical tolerance used in this experiment
+VALID_MODES = ("none", "std", "outcome")
 
 
 def partition(index, outcome, reward, mode):
     """Return (drop_row_ids, stats). index/outcome/reward are per-row lists (len = n_rows)."""
+    if mode not in VALID_MODES:
+        raise ValueError(f"Unknown gate mode {mode!r}; expected one of {VALID_MODES}")
+    if not (len(index) == len(outcome) == len(reward)):
+        raise ValueError("Gate inputs must have matching lengths")
+    if any(x not in (0, 1) for x in outcome):
+        raise ValueError("outcome_binary must contain only 0 or 1")
     groups = {}
     for i, uid in enumerate(index):
         groups.setdefault(uid, []).append(i)
@@ -85,22 +88,25 @@ def zero_adv(adv, drop_rows):
 
 def _row_outcomes(data):
     """Per-row (reward_scalar, binary_outcome). outcome from the raw success signal, not shaped."""
-    # outcome_binary: exposed by the shaped reward via extra_info if present; else threshold scores.
+    # A shaped scalar cannot safely reconstruct correctness (e.g. a correct score of 0.5).
     ntb = data.non_tensor_batch
     scores = data.batch["token_level_scores"]
     row_reward = scores.sum(dim=-1) if scores.dim() > 1 else scores
     row_reward = row_reward.detach().cpu().tolist()
-    if "outcome_binary" in ntb:
-        outcome = [int(x) for x in ntb["outcome_binary"]]
-    else:
-        outcome = [1 if r > 0.5 else 0 for r in row_reward]  # fallback: shaped>0.5 ~ pass
+    if "outcome_binary" not in ntb:
+        raise RuntimeError("gate_hook requires explicit outcome_binary; check the custom reward wiring")
+    outcome = list(ntb["outcome_binary"])
+    if any(x not in (0, 1) for x in outcome):
+        raise ValueError("outcome_binary must contain only 0 or 1")
     return row_reward, outcome
 
 
 def install():
-    if not _enabled():
+    mode = os.environ.get("GATE_MODE")
+    if mode is None:
         return
-    mode = os.environ["GATE_MODE"]
+    if mode not in VALID_MODES:
+        raise ValueError(f"Unknown GATE_MODE {mode!r}; expected one of {VALID_MODES}")
     if mode == "none":
         print("[gate] GATE_MODE=none — plain GRPO, no hook installed", flush=True)
         return

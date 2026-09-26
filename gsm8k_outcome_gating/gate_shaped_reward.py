@@ -5,13 +5,13 @@ Shaped GSM8K reward for the outcome-gating "correct test".
 
 The length term is the phantom: among FAILURES it rewards the *shortest* wrong answer (give up
 faster) — the documented Goodhart trap (the search-agent's 24→7-char answer-length collapse). So
-an all-fail group has std>0 (different lengths → different reward), which DAPO's std filter keeps
+an all-fail group has std>0 (different lengths → different reward), which shaped-score filtering keeps
 and GRPO turns into a phantom gradient; the binary-outcome gate drops it.
 
 Exposes `outcome_binary` (the UNSHAPED correctness) via the score dict so the gate groups on the
 real outcome, not the shaped scalar. veRL's reward manager returns the scalar as the token-level
-score; the extra key rides along in extra_info handling where supported, else the gate falls back
-to thresholding — but we ALSO stash it so the run log can be audited.
+score; the extra key rides through reward_extra_info. Missing correctness metadata is an error,
+so the hook never guesses correctness by thresholding a shaped score.
 
 compute_score(data_source, solution_str, ground_truth, extra_info=None) -> dict|float
 """

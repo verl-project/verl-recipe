@@ -1,6 +1,6 @@
 # gsm8k_outcome_gating — why the group-filter *metric* is safety-critical under shaped rewards
 
-A small, fully-reproducible study of **when group filtering actually matters in GRPO**,
+A small experimental study of **when group filtering actually matters in GRPO**,
 run on a single RTX 5090 with Qwen2.5-1.5B-Instruct + LoRA on GSM8K (~50 min per arm).
 
 **TL;DR** — `filter_groups.metric` decides whether dynamic sampling protects you or not.
@@ -15,8 +15,8 @@ phantom gradient destroy the policy in 40 steps:
 | shaped reward, λ=0.30 (n=3) | 0.102 ± 0.126 | 0.037 ± 0.007 | **0.753 ± 0.006** |
 
 All three arms start from the same val@0 ≈ 0.715. Same model, same data, same
-hyperparameters — the only difference is which groups' advantage is removed. **~19× on a
-config field**, plus the dose-response and direction-asymmetry boundaries below.
+hyperparameters — the only difference is which groups' advantage is removed. The binary-outcome arm ends 71.6 percentage points above the shaped-score arm
+in this experiment. The dose-response and direction checks below delimit the observation.
 
 ## 1. The phantom
 
@@ -39,11 +39,12 @@ Then an all-fail group has `std > 0` (different partial credit per failure), the
 That group's gradient says nothing about solving the task; it says *"fail the way the
 shaping prefers."* We call this a **phantom advantage**.
 
-So the contribution here is not a flaw in DAPO — it is a measurement of how much that one
-config field is worth (~19×), why the safe choice is safe, and where its boundaries lie.
-**Practical rule: any project that adds reward shaping must expose a binary correctness
-signal decoupled from the shaped reward, and filter on that** — otherwise dynamic sampling
-degrades silently, with no error and no warning.
+This recipe isolates the filter-metric choice under a deliberately constructed reward.
+It is an advantage-zeroing ablation, not a full DAPO dynamic-sampling implementation:
+there is no refill/resampling of dropped groups, and KL regularization remains active.
+For binary-verifiable tasks, preserve a separate correctness signal and evaluate whether
+outcome-based filtering helps. The experiment does not establish that discarding all-same
+outcome groups is optimal for every shaped reward or partially successful trajectory.
 
 The shaped reward here makes the phantom concrete and tunable:
 
@@ -55,7 +56,7 @@ Among failures the shortest wrong answer scores best — "give up fast". This re
 failure mode we first hit in a search-agent setup where answer length collapsed from ~24
 to ~7 characters; here it is dialed in with a single knob λ.
 
-## 2. Design: a confound-free comparison
+## 2. Design: keeping the loss denominator fixed
 
 Three arms, selected by `GATE_MODE`, all inside a wrapper around verl's
 `compute_advantage` ([gate_hook.py](gate_hook.py)):
@@ -73,7 +74,7 @@ Two design points that matter:
   scale invariance then largely cancels it. (We measured this separately: under *binary*
   rewards, mask-drop gating is a no-op that merely disguises a learning-rate change.)
   Zeroing advantages leaves the denominator untouched, so the arms differ **only** in
-  which groups' gradient is removed.
+  which groups' policy-gradient advantage is zeroed. Separate KL-loss gradients remain active.
 - **The gate groups on the raw outcome, not the shaped scalar.** The reward function
   returns `{"score": shaped, "outcome_binary": outcome, "acc": outcome}`; the extra keys
   ride through verl's `reward_extra_info` into `non_tensor_batch` (visible in logs as
@@ -113,9 +114,9 @@ are single runs):
 | shaped-score | 0.033 | 0.037 ± 0.007 | 0.021 |
 | binary-outcome | 0.764 | 0.753 ± 0.006 | 0.736 |
 
-- **No safe dose.** Even λ=0.10 fully collapses both baselines within 40 steps; λ only
+- **All tested nonzero doses collapsed in these baseline runs.** Even λ=0.10 fully collapses both baselines within 40 steps; λ only
   sets the collapse speed (mid-run EM orders monotonically with λ).
-- **The binary-outcome filter is immune at every dose.** Its mild slope (0.764 → 0.736) is consistent
+- **The binary-outcome runs avoided collapse at the three tested doses.** Its mild slope (0.764 → 0.736) is consistent
   with the residual, *legitimate* length penalty that shaping applies to correct answers
   inside live groups.
 - At λ=0.50 plain GRPO reaches EM 0.000 with mean response length **1.0 token** — the
@@ -135,8 +136,7 @@ are single runs):
 | binary-outcome | 0.753 ± 0.006 ✅ | 0.754 ✅ |
 
 Nobody collapses: mean length drifts up ~15% and then saturates, EM is untouched. The
-asymmetry is informative: a phantom is lethal only when its shortcut **destroys task
-structure** (truncation deletes the answer itself; padding leaves it intact, and in
+asymmetry suggests that the shortcut's effect on task structure matters here (truncation deletes the answer itself; padding leaves it intact, and in
 mixed groups the +1.0 for a correct answer dwarfs the shaping term, so the phantom
 never steers). Footnote: the binary-outcome arm shows the *tightest* length curve of the
 three — outcome-based filtering suppresses even the harmless style drift.
@@ -163,14 +163,29 @@ three — outcome-based filtering suppresses even the harmless style drift.
 
 ## 7. Reproduce
 
+The reward uses the pinned version's supported `reward.custom_reward_function.path`
+extension. `data.custom_reward_function` is not the correct configuration key.
+`RewardLoopWorker` calls `load_reward_manager`, which loads this custom function;
+editing verl's built-in GSM8K reward is unnecessary. The installer only wires the
+advantage hook through a `.pth` file and `sitecustomize` in a dedicated venv.
+If an earlier installer patched `gsm8k.py`, compare its `.bak` file and restore the
+original manually before reinstalling. The updated installer refuses to overwrite it.
+
+The launcher forwards gate settings explicitly to Ray workers and checks the hook
+in the driver. The chain scripts stop on a failed arm and never stop Ray clusters
+or kill other training jobs. The revised launcher/reward wiring needs a GPU smoke
+run before claiming that the published curves have been reproduced through it.
+
+
 ```bash
 # 0) pinned verl (see REQUIRED_VERL.txt), plus a venv with vllm 0.11.0 / torch 2.8.0
 pip install "verl @ git+https://github.com/verl-project/verl.git@e52747a403f55044578d9435069825f949b549bf"
 
 # 1) offline sanity (no GPU needed)
 python test_gate_offline.py
+python -m pytest -q test_gate_regressions.py test_launchers_offline.py
 
-# 2) wire the gate into the venv (reversible; inert without GATE_* env vars)
+# 2) wire the gate into the venv (reversible; the hook is inactive without GATE_MODE)
 ./install_gate.sh /path/to/venv/bin/python
 
 # 3) data + model under $GATE_ROOT
@@ -193,7 +208,7 @@ Per-arm curves land in `$GATE_ROOT/gate_results/*.md`; raw logs in `$GATE_ROOT/*
 | [gate_hook.py](gate_hook.py) | advantage-zeroing filter around `compute_advantage` (`GATE_MODE` selects the metric) |
 | [gate_shaped_reward.py](gate_shaped_reward.py) | shaped GSM8K reward (`GATE_LAMBDA`, `GATE_PHANTOM`) |
 | [sitecustomize.py](sitecustomize.py) | loads the hook inside every Ray worker |
-| [install_gate.sh](install_gate.sh) | one-shot wiring (.pth + built-in reward branch), documented + reversible |
+| [install_gate.sh](install_gate.sh) | advantage-hook import wiring only (.pth), with no verl source edits |
 | [run_gate_arm.sh](run_gate_arm.sh) | single-arm launcher (all hydra flags) |
 | [run_gate_chain.sh](run_gate_chain.sh) / [run_lambda_chain.sh](run_lambda_chain.sh) / [run_phantom_chain.sh](run_phantom_chain.sh) | Experiments 1 / 2 / 3 |
 | [test_gate_offline.py](test_gate_offline.py) | no-GPU tests for partitioning, zeroing, both phantom directions |
