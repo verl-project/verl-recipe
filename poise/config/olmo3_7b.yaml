@@ -1,0 +1,23 @@
+hydra:
+  searchpath:
+    - pkg://verl.trainer.config
+
+defaults:
+  - poise
+  - _self_
+
+actor_rollout_ref:
+  model:
+    path: allenai/Olmo-3-7B-Instruct-DPO
+  rollout:
+    gpu_memory_utilization: 0.60
+
+trainer:
+  experiment_name: olmo3-7b-instruct-dpo
+
+poise:
+  layer: 7
+  pool_tokens: 32
+  prompt_pca_dim: 16
+  response_pca_dim: 128
+  ridge_alpha: 1000.0
