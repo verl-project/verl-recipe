@@ -1,0 +1,6 @@
+# ObsSpec requires the fork's world-model co-training and speculative rollout support.
+UPSTREAM=https://github.com/kylemontgomery1/verl.git
+MODE=pinned_commit
+COMMIT=6208bc63bd6e2e4da4530e24109f46e98f85a706
+PIP_INSTALL=pip install verl@git+https://github.com/kylemontgomery1/verl.git@6208bc63bd6e2e4da4530e24109f46e98f85a706
+NOTES=Keep this recipe checkout at recipe/obsspec when installing the pinned core.

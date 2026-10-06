@@ -82,6 +82,7 @@ The script requires only `bash`, `git`, `awk`, and `pip`/`pip3` on `PATH`. It do
 | langgraph_agent | [`recipe/langgraph_agent/REQUIRED_VERL.txt`](langgraph_agent/REQUIRED_VERL.txt) |
 | minicpmo | [`recipe/minicpmo/REQUIRED_VERL.txt`](minicpmo/REQUIRED_VERL.txt) |
 | nemo_gym | [`recipe/nemo_gym/REQUIRED_VERL.txt`](nemo_gym/REQUIRED_VERL.txt) |
+| obsspec | [`recipe/obsspec/REQUIRED_VERL.txt`](obsspec/REQUIRED_VERL.txt) |
 | open_math_reasoning | [`recipe/open_math_reasoning/REQUIRED_VERL.txt`](open_math_reasoning/REQUIRED_VERL.txt) |
 | partial_rollout | [`recipe/partial_rollout/REQUIRED_VERL.txt`](partial_rollout/REQUIRED_VERL.txt) |
 | prime | [`recipe/prime/REQUIRED_VERL.txt`](prime/REQUIRED_VERL.txt) |
@@ -100,6 +101,8 @@ The script requires only `bash`, `git`, `awk`, and `pip`/`pip3` on `PATH`. It do
 | verl_tinker | [`recipe/verl_tinker/REQUIRED_VERL.txt`](verl_tinker/REQUIRED_VERL.txt) |
 
 ## Available Recipes (high level)
+
+- [obsspec](./obsspec/): Co-train a policy and an observation-prediction world model for speculative tool execution.
 
 - [retool](https://github.com/verl-project/verl-recipe/tree/main/retool): Reinforcement Learning for Strategic Tool Use in LLMs
 - [langgraph_agent](https://github.com/verl-project/verl-recipe/tree/main/langgraph_agent): A tiny example to demonstrate multi-turn rollout with [LangGraph ReactAgent](https://langchain-ai.github.io/langgraph/agents/overview/) to solve math expression.

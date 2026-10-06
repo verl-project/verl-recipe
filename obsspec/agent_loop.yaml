@@ -1,0 +1,2 @@
+- name: terminal_obsspec_agent
+  _target_: recipe.obsspec.agent_loop.TerminalObsSpecAgentLoop
