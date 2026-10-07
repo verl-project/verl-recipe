@@ -10,6 +10,7 @@
 #   loss_per_token = op(vocab_parallel_logits, teacher_topk_logps, teacher_topk_indices)
 
 import math
+import warnings
 from typing import Any, Optional
 
 import torch
@@ -33,6 +34,32 @@ def _clamp01_open(x: float, eps: float = 1e-6) -> float:
     if x > 1.0 - eps:
         return 1.0 - eps
     return x
+
+
+_JSD_ENDPOINT_BETA_WARNED = False
+
+
+def _warn_jsd_endpoint_beta(beta: float) -> None:
+    """Warn once per process when the JSD mixture weight is near an endpoint.
+
+    The ``jsd`` loss clamps ``beta`` into the open interval (1e-6, 1-1e-6),
+    so endpoint values shrink the loss toward ~0 instead of approaching a
+    pure KL divergence (see verl-recipe issue #151).
+    """
+    global _JSD_ENDPOINT_BETA_WARNED
+    if _JSD_ENDPOINT_BETA_WARNED:
+        return
+    if beta >= 0.99 or beta <= 0.01:
+        _JSD_ENDPOINT_BETA_WARNED = True
+        warnings.warn(
+            f"JSD distill loss: beta={beta} is at/near an endpoint of [0, 1]. "
+            "The 'jsd' mode clamps beta into (1e-6, 1-1e-6), so the loss "
+            "collapses toward ~0 there instead of approaching a pure KL "
+            "divergence. Use name='kl' for pure forward KL, name='rkl' for "
+            "pure reverse KL, or name='kl_rkl' to blend them.",
+            UserWarning,
+            stacklevel=2,
+        )
 
 
 def mylog(message: str, filename: str = "distill_loss.log"):
@@ -439,7 +466,9 @@ def vocab_parallel_kl_rkl_divergence(
 class _VocabParallelJSDivergence(torch.autograd.Function):
     @staticmethod
     def forward(ctx, vocab_parallel_logits, target_topk_logps, target_topk_indices, beta: float):
-        beta = min(max(float(beta), 1e-6), 1.0 - 1e-6)
+        beta = float(beta)
+        _warn_jsd_endpoint_beta(beta)
+        beta = min(max(beta, 1e-6), 1.0 - 1e-6)
         one_minus_beta = 1.0 - beta
         eps = 1e-20
 
@@ -605,7 +634,10 @@ class VocabParallelDistillLoss(torch.nn.Module):
 
     Params:
       - rkl_ratio: only used when name == "kl_rkl"
-      - beta:      only used when name == "jsd"
+      - beta:      only used when name == "jsd". Note: values at/near the
+                   endpoints of [0, 1] make the jsd loss collapse toward ~0
+                   instead of approaching a pure KL; use "kl"/"rkl"/"kl_rkl"
+                   for pure or blended KL objectives.
     """
 
     def __init__(self, name: str = "kl", rkl_ratio: float = 0.1, beta: float = 0.5):
@@ -613,6 +645,13 @@ class VocabParallelDistillLoss(torch.nn.Module):
         self.name = str(name).lower()
         self.rkl_ratio = float(rkl_ratio)
         self.beta = float(beta)
+        if self.name in (
+            "jsd",
+            "jensen_shannon",
+            "jensen-shannon",
+            "jensen_shannon_divergence",
+        ):
+            _warn_jsd_endpoint_beta(self.beta)
 
     def forward(self, vocab_parallel_logits, teacher_topk_logps, teacher_topk_indices):
         n = self.name
