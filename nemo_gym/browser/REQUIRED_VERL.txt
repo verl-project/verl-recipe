@@ -1,0 +1,11 @@
+UPSTREAM=https://github.com/verl-project/verl.git
+MODE=rolling
+BRANCH=main
+VERL_COMMIT=30119a253087bff86c12d329d2d8dd43c589705f
+PIP_INSTALL=pip install verl@git+https://github.com/verl-project/verl.git@30119a253087bff86c12d329d2d8dd43c589705f
+GIT_SETUP=git clone https://github.com/verl-project/verl.git && cd verl && git checkout 30119a253087bff86c12d329d2d8dd43c589705f && git submodule update --init --recursive recipe
+RECIPE_SUBMODULE_COMMIT=e7f889574b8301cc0f0fc1d57c6d67f31ffeb689
+RECIPE_FOLDER=nemo_gym/browser
+RECIPE_FOLDER_LAST_COMMIT=
+NOTES=Pins a newer verl than the sibling nemo_gym recipe (695ac0eb): this recipe needs the V1 trainer and vLLM 0.18, and runs on the verlai/verl:vllm018.latest image. It also needs a NeMo Gym checkout that provides resources_servers/interactive_browser (NVIDIA-NeMo/Gym#1865). RECIPE_FOLDER_LAST_COMMIT is filled in on merge.
+REFRESH=Recompute: (cd verl && git rev-parse HEAD); (cd verl/recipe && git rev-parse HEAD); (cd verl/recipe && git log -1 --format=%H -- nemo_gym/browser)
