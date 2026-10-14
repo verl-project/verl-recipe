@@ -1,0 +1,11 @@
+# HACPO — rolling; exact core and recipe-submodule commits from the tested workspace
+UPSTREAM=https://github.com/verl-project/verl.git
+MODE=rolling
+BRANCH=main
+VERL_COMMIT=bf48903d93e4618531d3bbae96551a889007dd8b
+PIP_INSTALL=pip install verl@git+https://github.com/verl-project/verl.git@bf48903d93e4618531d3bbae96551a889007dd8b
+GIT_SETUP=git clone https://github.com/verl-project/verl.git && cd verl && git checkout bf48903d93e4618531d3bbae96551a889007dd8b && git submodule update --init --recursive recipe
+RECIPE_SUBMODULE_COMMIT=e7f889574b8301cc0f0fc1d57c6d67f31ffeb689
+RECIPE_FOLDER=hacpo
+NOTES=Tested against the pinned core commit. HACPO is a new recipe on top of the listed recipe-submodule snapshot and uses V1 TrainingWorker custom losses, TransferQueue replay, named hybrid rollout replicas, and CheckpointEngineManager.
+REFRESH=Recompute: (cd verl && git rev-parse HEAD); (cd verl && git ls-tree HEAD recipe); (cd verl/recipe && git log -1 --format=%H -- hacpo)
