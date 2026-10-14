@@ -1,0 +1,3 @@
+VERL_COMMIT=56d18ec631dcb125c7818ad381886aefd761ae23
+PIP_INSTALL=pip install verl@git+https://github.com/verl-project/verl.git@56d18ec631dcb125c7818ad381886aefd761ae23
+GIT_SETUP=git clone https://github.com/verl-project/verl.git && cd verl && git checkout 56d18ec631dcb125c7818ad381886aefd761ae23
