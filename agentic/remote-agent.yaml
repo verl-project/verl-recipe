@@ -1,0 +1,2 @@
+- name: remote_agent
+  _target_: recipe.agentic.agent_loop.remote_agent_loop.RemoteAgentLoop
