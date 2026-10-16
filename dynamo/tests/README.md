@@ -32,6 +32,9 @@ Gateway with a fake model backend to check token alignment, program cleanup,
 retries, timeouts and cancellation. Install the Uni-Agent/verl versions in the
 [0.24 guide](../THUNDERAGENT_VLLM024.md); this module skips when Uni-Agent is absent.
 
+[test_agent_identity.py](test_agent_identity.py) checks the coding-agent header
+precedence that names subagent programs; it needs only Starlette.
+
 [check_continuations.py](check_continuations.py) checks all recipe shell/Slurm
 scripts recursively by default; optional arguments select file/glob paths:
 

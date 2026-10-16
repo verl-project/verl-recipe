@@ -168,15 +168,42 @@ VARIANT=ta RAY_DATA_HOME=/path/to/verl-data bash recipe/dynamo/run_uniagent_vari
 
 Use `VARIANT=dynamo` for the built-in KV-router baseline or `VARIANT=global`
 for native verl vLLM. V1 supports ThunderAgent in `colocate_async` and
-`separate_async`. ThunderAgent GPU validation covers vLLM; SGLang routing
-validation is still pending.
+`separate_async`. ThunderAgent GPU validation covers vLLM; the Uni-Agent Gateway
+adapter accepts `engine: sglang` (tool parsing follows the engine), but its
+SGLang GPU validation is still pending.
+
+`thunderagent.enabled=true` launches Dynamo's Python ThunderAgent prototype as a
+separate router process. With a Dynamo that ships the builtin plugin (main since
+2026-09-23), set `thunderagent.native=true` as well: the recipe keeps
+`router_mode=kv` and passes the plugin's policy file as `--router-policy-config`,
+so programs are scheduled inside the KV router with no extra process; admission
+parameters go under `thunderagent.native_parameters`. The startup probe retries a
+404 from the completions route for `thunderagent.health_probe_timeout_s` (default 60).
 
 For current multi-turn Uni-Agent, use the
 [dedicated launcher](run_uniagent_thunderagent_vllm024.sh). Its recipe Gateway
 adapter releases ThunderAgent programs on session completion or abort, with
-bounded retries and timeouts. Uni-Agent source changes are unnecessary. Keep
-model calls serial within a session; independent sessions run concurrently.
+bounded retries and timeouts. Keep model calls serial within a program;
+independent programs and sessions run concurrently.
 See the [guide](THUNDERAGENT_VLLM024.md) for the version pins and cleanup scope.
+
+### Subagent programs (Claude Code)
+
+A Claude Code rollout that dispatches subagents is a tree of programs: every
+subagent turn carries its own `x-claude-code-agent-id`. The Gateway terminates
+those headers, so the adapter ([uniagent_gateway.py](uniagent_gateway.py)) reads
+them itself ([agent_identity.py](agent_identity.py)), with Uni-Agent unmodified:
+
+- each turn's program is named after the agent that sent it, with the dispatcher
+  as `X-Dynamo-Parent-Session-ID`; the trajectory's request id stays the routing
+  key, and turns are serialized per program, so parallel subagents are accepted;
+- a subagent is released when its final answer is produced, a dispatcher's idle
+  subagents when it takes its next turn, and the rest of the tree, children
+  first, at session close; a turn still in flight at close is cancelled through
+  to the frontend first.
+
+Subagents are off by default in the Uni-Agent Claude Code recipe; enable them
+in the Task Config with `agent.enable_subagents: true`.
 
 ## Results
 

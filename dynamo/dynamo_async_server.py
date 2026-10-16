@@ -36,6 +36,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -1722,8 +1723,11 @@ class DynamoHttpServer:
 
         try:
             request_id = request_id or f"dynamo-{time.time_ns()}"
-            payload = self._build_frontend_completion_payload(prompt_ids, sampling_params, request_id)
-            status, body_text = await self._frontend_post(payload, request_id)
+            # request_id is the trajectory's affinity key, reused by every turn; the
+            # frontend needs a unique id per request (subagent turns run concurrently).
+            http_request_id = f"{request_id}-{uuid.uuid4().hex}"
+            payload = self._build_frontend_completion_payload(prompt_ids, sampling_params, http_request_id)
+            status, body_text = await self._frontend_post(payload, request_id, http_request_id)
             if status == 400 and "Unsupported parameter" in body_text:
                 fallback_payload = self._drop_frontend_extension_fields(payload)
                 if fallback_payload is not payload:
@@ -1734,7 +1738,7 @@ class DynamoHttpServer:
                         sorted(set(payload) - set(fallback_payload)),
                     )
                     payload = fallback_payload
-                    status, body_text = await self._frontend_post(payload, request_id)
+                    status, body_text = await self._frontend_post(payload, request_id, http_request_id)
             if status != 200:
                 raise RuntimeError(
                     "Dynamo frontend /v1/completions failed "
@@ -1790,16 +1794,21 @@ class DynamoHttpServer:
             self._http_session = aiohttp.ClientSession(connector=connector)
             return self._http_session
 
-    async def _frontend_post(self, payload: dict[str, Any], request_id: str) -> tuple[int, str]:
-        """POST one completion to the frontend; return ``(status, body_text)``."""
+    async def _frontend_post(
+        self, payload: dict[str, Any], request_id: str, http_request_id: Optional[str] = None
+    ) -> tuple[int, str]:
+        """POST one completion; return ``(status, body_text)``. ``http_request_id`` is this request's unique id."""
         import aiohttp
 
+        headers = self._frontend_headers(request_id)
+        if http_request_id is not None:
+            headers["X-Request-Id"] = http_request_id
         session = await self._get_http_session()
         timeout = aiohttp.ClientTimeout(total=self._frontend_request_timeout_s())
         async with session.post(
             self._frontend_completions_url(),
             json=payload,
-            headers=self._frontend_headers(request_id),
+            headers=headers,
             timeout=timeout,
         ) as resp:
             return resp.status, await resp.text()
