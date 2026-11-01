@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ReTool Stage 1 (Cold-Start Multi-Turn SFT) | Qwen3-30B-A3B (MoE) | ReTool-SFT
-# TorchTitan Engine (SimpleFSDP=16, CP=1, EP=1) | TPU v5p (2x2x4 = 16 Chips)
+# TorchTitan Engine (SimpleFSDP=32, CP=1, EP=1) | TPU v6e-8 (4x v6e-8 = 32 Chips)
 #
 # Usage (from a clean verl checkout root):
 #   bash recipe/retool/run_qwen3_30b_a3b_sft_tpu.sh
@@ -33,9 +33,19 @@ if [[ "${RAY_JOB_SUBMITTED:-0}" != "1" ]] && ! python3 -m hydra --help >/dev/nul
     trap cleanup_pf EXIT INT TERM
 
     if [[ -z "${RAY_ADDRESS:-}" ]]; then
-        export KUBECONFIG="${KUBECONFIG:-${HOME}/.kube/kubeconfig_bodaborg_v5p_nap}"
-        RAY_NAMESPACE="${RAY_NAMESPACE:-trellis}"
-        RAY_CLUSTER_NAME="${RAY_CLUSTER_NAME:-verl-nap-aaskhat-retool}"
+        if [[ -z "${KUBECONFIG:-}" ]]; then
+            if [[ -f "/tmp/kc_v7x" ]] && KUBECONFIG=/tmp/kc_v7x kubectl get svc -n "${RAY_NAMESPACE:-default}" "${RAY_CLUSTER_NAME:-verl-nap-aaskhat-v7x}-head-svc" >/dev/null 2>&1; then
+                export KUBECONFIG="/tmp/kc_v7x"
+                RAY_CLUSTER_NAME="${RAY_CLUSTER_NAME:-verl-nap-aaskhat-v7x}"
+                export TPU_ACCELERATOR_TYPE="${TPU_ACCELERATOR_TYPE:-tpu7x}"
+            elif [[ -f "/tmp/kc_v6e" ]]; then
+                export KUBECONFIG="/tmp/kc_v6e"
+                RAY_CLUSTER_NAME="${RAY_CLUSTER_NAME:-ray-tpu-v6e-cluster}"
+                export TPU_ACCELERATOR_TYPE="${TPU_ACCELERATOR_TYPE:-v6e-8}"
+            fi
+        fi
+        RAY_NAMESPACE="${RAY_NAMESPACE:-default}"
+        RAY_CLUSTER_NAME="${RAY_CLUSTER_NAME:-ray-tpu-v6e-cluster}"
         RAY_DASHBOARD_PORT="${RAY_DASHBOARD_PORT:-$((28300 + RANDOM % 500))}"
         kubectl port-forward -n "${RAY_NAMESPACE}" "svc/${RAY_CLUSTER_NAME}-head-svc" "${RAY_DASHBOARD_PORT}:8265" >/dev/null 2>&1 &
         PF_PID=$!
@@ -97,13 +107,14 @@ for k, v in os.environ.items():
         env_vars[k] = v
 
 py_modules = []
-for candidate in (
-    os.path.join(os.environ.get("VERL_ROOT", "."), "..", "verl-hardware-plugin", "verl_hardware_plugin"),
-    os.path.expanduser("~/verl-hardware-plugin/verl_hardware_plugin"),
-):
-    if os.path.isdir(candidate):
-        py_modules.append(os.path.abspath(candidate))
-        break
+if os.environ.get("VERL_UPLOAD_HARDWARE_PLUGIN", "0") == "1":
+    for candidate in (
+        os.path.join(os.environ.get("VERL_ROOT", "."), "..", "verl-hardware-plugin", "verl_hardware_plugin"),
+        os.path.expanduser("~/verl-hardware-plugin/verl_hardware_plugin"),
+    ):
+        if os.path.isdir(candidate):
+            py_modules.append(os.path.abspath(candidate))
+            break
 
 runtime_env = {
     "env_vars": env_vars,
@@ -125,16 +136,18 @@ fi
 
 export VERL_PLATFORM=tpu
 export VERL_USE_EXTERNAL_MODULES=verl_hardware_plugin
-export TPU_ACCELERATOR_TYPE="${TPU_ACCELERATOR_TYPE:-v5p}"
+export TPU_ACCELERATOR_TYPE="${TPU_ACCELERATOR_TYPE:-v6e-8}"
 export RAY_OVERRIDE_JOB_RUNTIME_ENV=1
 export PYTHONUNBUFFERED=1
 export RAY_memory_monitor_refresh_ms=0
 export RAY_memory_usage_threshold=0.99
 
-RECIPE_LIBTPU_FLAGS=("--xla_tpu_use_enhanced_launch_barrier=false")
-if [[ "${TPU_ACCELERATOR_TYPE}" == "v5p" ]]; then
-    RECIPE_LIBTPU_FLAGS+=("--xla_tpu_scoped_vmem_limit_kib=32768")
-fi
+RECIPE_LIBTPU_FLAGS=(
+    "--xla_tpu_use_enhanced_launch_barrier=false"
+    "--xla_tpu_enable_bitcast_reduce_fusion_graduation=false"
+    "--xla_tpu_enable_sublane_major_scaling_bitcast_fusion=false"
+    "--xla_tpu_bf16_emission_mode=PROMOTE_F32"
+)
 for flag in "${RECIPE_LIBTPU_FLAGS[@]}"; do
     if [[ " ${LIBTPU_INIT_ARGS:-} " != *" ${flag%%=*}="* ]]; then
         LIBTPU_INIT_ARGS="${LIBTPU_INIT_ARGS:+${LIBTPU_INIT_ARGS} }${flag}"
@@ -157,30 +170,37 @@ export WANDB_PROJECT="${WANDB_PROJECT:-verl-torchtpu-grpo-test}"
 export WANDB_MODE="${WANDB_MODE:-online}"
 
 project_name="${PROJECT_NAME:-${WANDB_PROJECT:-verl-torchtpu-grpo-test}}"
-experiment_name="${EXPERIMENT_NAME:-multiturn-sft-qwen3-30b-a3b-v5p}"
+experiment_name="${EXPERIMENT_NAME:-multiturn-sft-qwen3-30b-a3b-tpu}"
 
 RAY_DATA_HOME="${RAY_DATA_HOME:-/data/jialei}"
-SFT_CKPT_ROOT="${SFT_CKPT_ROOT:-/data/aaskhat}"
+SFT_CKPT_ROOT="${SFT_CKPT_ROOT:-/tmp}"
 TRAIN_DATA="${TRAIN_DATA:-${RAY_DATA_HOME}/dataset/ReTool-SFT/data/train-00000-of-00001.parquet}"
 EVAL_DATA="${EVAL_DATA:-${RAY_DATA_HOME}/dataset/ReTool-SFT/data/train-00000-of-00001.parquet}"
 MODEL_PATH="${MODEL_PATH:-${RAY_DATA_HOME}/assets/hf/Qwen3-30B-A3B}"
 SAVE_PATH="${SAVE_PATH:-${SFT_CKPT_ROOT}/checkpoint/${experiment_name}}"
 
-# TPU v5p 2x2x4 slice topology: 4 hosts x 4 chips = 16 trainer chips.
-export NNODES_TRAINER="${NNODES_TRAINER:-4}"
-export N_CHIPS_TRAINER="${N_CHIPS_TRAINER:-4}"
+# Default TPU topology: 4 hosts x 8 chips = 32 trainer chips on v6e-8, or 1 host x 8 TensorCores on tpu7x 2x2x1.
+if [[ -z "${NNODES_TRAINER:-}" ]]; then
+    if [[ "${TPU_ACCELERATOR_TYPE}" == v6e* ]]; then
+        export NNODES_TRAINER=4
+    else
+        export NNODES_TRAINER=1
+    fi
+fi
+export N_CHIPS_TRAINER="${N_CHIPS_TRAINER:-8}"
 TOTAL_TRAINER_CHIPS=$((NNODES_TRAINER * N_CHIPS_TRAINER))
 
 TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-1}"
 EXPERT_PARALLEL_SIZE="${EXPERT_PARALLEL_SIZE:-1}"
 CONTEXT_PARALLEL_SIZE="${CONTEXT_PARALLEL_SIZE:-1}"
 DATA_PARALLEL_SHARD_SIZE="${DATA_PARALLEL_SHARD_SIZE:-$((TOTAL_TRAINER_CHIPS / (TENSOR_PARALLEL_SIZE * CONTEXT_PARALLEL_SIZE)))}"
-TPU_EAGER_MODE="${TPU_EAGER_MODE:-DEFER_NEVER}"
+TPU_EAGER_MODE="${TPU_EAGER_MODE:-DEFER_AND_FUSE}"
+OPTIM_IMPL="${OPTIM_IMPL:-foreach}"
 USE_SIMPLE_FSDP="${USE_SIMPLE_FSDP:-True}"
 USE_DYNAMIC_BSZ="${USE_DYNAMIC_BSZ:-False}"
 PAD_TO_LENGTH_BUCKET="${PAD_TO_LENGTH_BUCKET:-2048}"
 
-# Train at 16384 max_length with SimpleFSDP=16, CP=1 on 16 TPU v5p chips
+# Train at 16384 max_length with SimpleFSDP=32, CP=1 on 32 TPU v6e chips
 # (6 epochs x 62 steps/epoch at train_batch_size=32 = 372 total steps)
 MAX_LENGTH="${MAX_LENGTH:-16384}"
 TRUNCATION="${TRUNCATION:-right}"
@@ -229,10 +249,12 @@ python3 -m verl.trainer.sft_trainer_ray \
     +engine.engine_kwargs.tpu.use_splash_attention=True \
     +engine.engine_kwargs.tpu.use_simple_fsdp="${USE_SIMPLE_FSDP}" \
     +engine.engine_kwargs.tpu.tpu_eager_mode="${TPU_EAGER_MODE}" \
+    +engine.engine_kwargs.tpu.optim_impl="${OPTIM_IMPL}" \
     +engine.engine_kwargs.tpu.use_fused_linear_cross_entropy=True \
     engine.pad_to_length=True \
     engine.pad_to_length_bucket="${PAD_TO_LENGTH_BUCKET}" \
     engine.activation_checkpoint=full \
+    engine.reshard_after_forward=always \
     engine.attn_type=varlen \
     engine.max_seq_len="${MAX_LENGTH}" \
     optim=torchtitan \

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ReTool Stage 2 (Multi-Turn DAPO RL with Code Interpreter) | Qwen3-30B-A3B (MoE)
-# TorchTitan Trainer (SimpleFSDP=16, CP=1, EP=1) + 2x Async vLLM Rollout Replicas (2 x TP=16, tpu-sync Weight Sync)
-# TPU v5p (1x Trainer + 2x Rollout 2x2x4 Slices = 48 Chips)
+# TorchTitan Trainer (SimpleFSDP=32, CP=1, EP=1) + Async vLLM Rollout (TP=8, tpu-sync Weight Sync)
+# TPU v6e-8 (4x Trainer v6e-8 Slices + Rollout v6e-8 Slice(s))
 #
 # Usage (from a clean verl checkout root):
 #   bash recipe/retool/run_qwen3_30b_a3b_dapo_tpu.sh
@@ -34,11 +34,21 @@ if [[ "${RAY_JOB_SUBMITTED:-0}" != "1" ]] && ! python3 -m hydra --help >/dev/nul
     trap cleanup_pf EXIT INT TERM
 
     if [[ -z "${RAY_ADDRESS:-}" ]]; then
-        export KUBECONFIG="${KUBECONFIG:-${HOME}/.kube/kubeconfig_bodaborg_v5p_nap}"
-        RAY_NAMESPACE="${RAY_NAMESPACE:-trellis}"
-        RAY_CLUSTER_NAME="${RAY_CLUSTER_NAME:-verl-nap-aaskhat-retool}"
+        if [[ -z "${KUBECONFIG:-}" ]]; then
+            if [[ -f "/tmp/kc_v7x" ]] && KUBECONFIG=/tmp/kc_v7x kubectl get svc -n "${RAY_NAMESPACE:-default}" "${RAY_CLUSTER_NAME:-verl-nap-aaskhat-v7x}-head-svc" >/dev/null 2>&1; then
+                export KUBECONFIG="/tmp/kc_v7x"
+                RAY_CLUSTER_NAME="${RAY_CLUSTER_NAME:-verl-nap-aaskhat-v7x}"
+                export TPU_ACCELERATOR_TYPE="${TPU_ACCELERATOR_TYPE:-tpu7x}"
+            elif [[ -f "/tmp/kc_v6e" ]]; then
+                export KUBECONFIG="/tmp/kc_v6e"
+                RAY_CLUSTER_NAME="${RAY_CLUSTER_NAME:-ray-tpu-v6e-cluster}"
+                export TPU_ACCELERATOR_TYPE="${TPU_ACCELERATOR_TYPE:-v6e-8}"
+            fi
+        fi
+        RAY_NAMESPACE="${RAY_NAMESPACE:-default}"
+        RAY_CLUSTER_NAME="${RAY_CLUSTER_NAME:-verl-nap-aaskhat-v7x}"
         RAY_DASHBOARD_PORT="${RAY_DASHBOARD_PORT:-$((28300 + RANDOM % 500))}"
-        kubectl port-forward -n "${RAY_NAMESPACE}" "svc/${RAY_CLUSTER_NAME}-head-svc" "${RAY_DASHBOARD_PORT}:8265" >/dev/null 2>&1 &
+        kubectl ${KUBECTL_CONTEXT:+--context=${KUBECTL_CONTEXT}} port-forward -n "${RAY_NAMESPACE}" "svc/${RAY_CLUSTER_NAME}-head-svc" "${RAY_DASHBOARD_PORT}:8265" >/dev/null 2>&1 &
         PF_PID=$!
         for _ in {1..20}; do
             if curl -fsS --max-time 2 "http://127.0.0.1:${RAY_DASHBOARD_PORT}/api/version" >/dev/null 2>&1; then
@@ -65,11 +75,19 @@ forward_keys = [
     "ROLLOUT_TP",
     "ROLLOUT_EP",
     "ROLLOUT_MAX_NUM_SEQS",
+    "ROLLOUT_MAX_NUM_BATCHED_TOKENS",
     "ROLLOUT_GPU_MEMORY_UTILIZATION",
     "ROLLOUT_LOG_STATS",
     "CONTEXT_PARALLEL_SIZE",
+    "PAD_TO_LENGTH_BUCKET",
     "ACTOR_MAX_TOKEN_LEN_PER_GPU",
     "LOG_PROB_MAX_TOKEN_LEN_PER_GPU",
+    "ACTOR_OPTIMIZER_OFFLOAD",
+    "ACTOR_PARAM_OFFLOAD",
+    "CHECKPOINT_BACKEND",
+    "NUM_WARMUP_BATCHES",
+    "VERIFY_PARITY",
+    "VAL_MAX_SAMPLES",
     "ENABLE_THINKING",
     "MAX_PROMPT_LENGTH",
     "MAX_RESPONSE_LENGTH",
@@ -93,6 +111,7 @@ forward_keys = [
     "SFT_CKPT_ROOT",
     "SFT_EXPERIMENT_NAME",
     "MODEL_PATH",
+    "FUNCTION_TOOL_PATH",
     "CKPTS_DIR",
     "ROLLOUT_DATA_DIR",
     "VALIDATION_DATA_DIR",
@@ -103,6 +122,7 @@ forward_keys = [
     "WANDB_ENTITY",
     "WANDB_PROJECT",
     "WANDB_MODE",
+    "WANDB_BASE_URL",
 ]
 env_vars = {
     "PYTHONPATH": ".",
@@ -120,13 +140,14 @@ for k, v in os.environ.items():
         env_vars[k] = v
 
 py_modules = []
-for candidate in (
-    os.path.join(os.environ.get("VERL_ROOT", "."), "..", "verl-hardware-plugin", "verl_hardware_plugin"),
-    os.path.expanduser("~/verl-hardware-plugin/verl_hardware_plugin"),
-):
-    if os.path.isdir(candidate):
-        py_modules.append(os.path.abspath(candidate))
-        break
+if os.environ.get("VERL_UPLOAD_HARDWARE_PLUGIN", "0") == "1":
+    for candidate in (
+        os.path.join(os.environ.get("VERL_ROOT", "."), "..", "verl-hardware-plugin", "verl_hardware_plugin"),
+        os.path.expanduser("~/verl-hardware-plugin/verl_hardware_plugin"),
+    ):
+        if os.path.isdir(candidate):
+            py_modules.append(os.path.abspath(candidate))
+            break
 
 runtime_env = {
     "env_vars": env_vars,
@@ -148,16 +169,18 @@ fi
 
 export VERL_PLATFORM=tpu
 export VERL_USE_EXTERNAL_MODULES=verl_hardware_plugin
-export TPU_ACCELERATOR_TYPE="${TPU_ACCELERATOR_TYPE:-v5p}"
+export TPU_ACCELERATOR_TYPE="${TPU_ACCELERATOR_TYPE:-tpu7x}"
 export RAY_OVERRIDE_JOB_RUNTIME_ENV=1
 export PYTHONUNBUFFERED=1
 export RAY_memory_monitor_refresh_ms=0
 export RAY_memory_usage_threshold=0.99
 
-RECIPE_LIBTPU_FLAGS=("--xla_tpu_use_enhanced_launch_barrier=false")
-if [[ "${TPU_ACCELERATOR_TYPE}" == "v5p" ]]; then
-    RECIPE_LIBTPU_FLAGS+=("--xla_tpu_scoped_vmem_limit_kib=32768")
-fi
+RECIPE_LIBTPU_FLAGS=(
+    "--xla_tpu_use_enhanced_launch_barrier=false"
+    "--xla_tpu_enable_bitcast_reduce_fusion_graduation=false"
+    "--xla_tpu_enable_sublane_major_scaling_bitcast_fusion=false"
+    "--xla_tpu_bf16_emission_mode=PROMOTE_F32"
+)
 for flag in "${RECIPE_LIBTPU_FLAGS[@]}"; do
     if [[ " ${LIBTPU_INIT_ARGS:-} " != *" ${flag%%=*}="* ]]; then
         LIBTPU_INIT_ARGS="${LIBTPU_INIT_ARGS:+${LIBTPU_INIT_ARGS} }${flag}"
@@ -188,14 +211,21 @@ dapo_math_17k="${DATA_ROOT}/dataset/BytedTsinghua-SIA/DAPO-Math-17k"
 aime_2024="${DATA_ROOT}/dataset/Maxwell-Jia/AIME_2024"
 aime_2025="${DATA_ROOT}/dataset/yentinglin/aime_2025"
 
-sft_experiment_name="${SFT_EXPERIMENT_NAME:-multiturn-sft-qwen3-30b-a3b-v5p}"
+sft_experiment_name="${SFT_EXPERIMENT_NAME:-multiturn-sft-qwen3-30b-a3b-tpu}"
 DEFAULT_SFT_SRC="${SFT_CKPT_ROOT}/checkpoint/${sft_experiment_name}/global_step_372/huggingface"
-model_path="${MODEL_PATH:-${DEFAULT_SFT_SRC}}"
+if [[ -n "${MODEL_PATH:-}" ]]; then
+    model_path="${MODEL_PATH}"
+elif [[ -d "${DEFAULT_SFT_SRC}" ]]; then
+    model_path="${DEFAULT_SFT_SRC}"
+else
+    model_path="${RAY_DATA_HOME}/assets/hf/Qwen3-30B-A3B"
+fi
 
 train_files="['${dapo_math_17k}']"
 test_files="['${aime_2025}', '${aime_2024}']"
 
 retool_py_path="pkg://recipe.retool.retool"
+function_tool_path="${FUNCTION_TOOL_PATH:-recipe/retool/retool.py}"
 
 project_name="${PROJECT_NAME:-${WANDB_PROJECT:-verl-torchtpu-grpo-test}}"
 experiment_name="${EXPERIMENT_NAME:-qwen3-30b-a3b_retool_dapo_tpu}"
@@ -225,17 +255,22 @@ ppo_mini_batch_size="${PPO_MINI_BATCH_SIZE:-64}"
 n_resp_per_prompt="${N_RESP_PER_PROMPT:-16}"
 n_resp_per_prompt_val="${N_RESP_PER_PROMPT_VAL:-8}"
 
-# ================= TPU v5p slice topology & MoE parallelism =================
-export NNODES_TRAINER="${NNODES_TRAINER:-4}"
-export N_CHIPS_TRAINER="${N_CHIPS_TRAINER:-4}"
-export NNODES_ROLLOUT="${NNODES_ROLLOUT:-8}"
-export N_CHIPS_ROLLOUT="${N_CHIPS_ROLLOUT:-4}"
+# ================= TPU topology & MoE parallelism =================
+if [[ -z "${NNODES_TRAINER:-}" ]]; then
+    if [[ "${TPU_ACCELERATOR_TYPE}" == v6e* ]]; then
+        export NNODES_TRAINER=4
+    else
+        export NNODES_TRAINER=1
+    fi
+fi
+export N_CHIPS_TRAINER="${N_CHIPS_TRAINER:-8}"
+export NNODES_ROLLOUT="${NNODES_ROLLOUT:-1}"
+export N_CHIPS_ROLLOUT="${N_CHIPS_ROLLOUT:-8}"
 
 TOTAL_TRAINER_CHIPS=$((NNODES_TRAINER * N_CHIPS_TRAINER))
 
-# 2 x 2x2x4 TPU v5p rollout slices -> 2 vLLM replicas with TP=16, EP=16.
-ROLLOUT_TP="${ROLLOUT_TP:-16}"
-ROLLOUT_EP="${ROLLOUT_EP:-${ROLLOUT_TP}}"
+ROLLOUT_TP="${ROLLOUT_TP:-8}"
+ROLLOUT_EP="${ROLLOUT_EP:-1}"
 ROLLOUT_BLOCK_SIZE="${ROLLOUT_BLOCK_SIZE:-256}"
 ROLLOUT_ENABLE_PREFIX_CACHING="${ROLLOUT_ENABLE_PREFIX_CACHING:-True}"
 PARAMETER_SYNC_STEP="${PARAMETER_SYNC_STEP:-$((train_batch_size / ppo_mini_batch_size))}"
@@ -251,17 +286,20 @@ DATA_PARALLEL_SHARD_SIZE="${DATA_PARALLEL_SHARD_SIZE:-${DEFAULT_DP_SHARD}}"
 
 USE_SIMPLE_FSDP="${USE_SIMPLE_FSDP:-True}"
 USE_DYNAMIC_BSZ="${USE_DYNAMIC_BSZ:-True}"
+ACTOR_OPTIMIZER_OFFLOAD="${ACTOR_OPTIMIZER_OFFLOAD:-True}"
+ACTOR_PARAM_OFFLOAD="${ACTOR_PARAM_OFFLOAD:-False}"
 PAD_TO_LENGTH_BUCKET="${PAD_TO_LENGTH_BUCKET:-2048}"
 ACTOR_MAX_TOKEN_LEN_PER_GPU="${ACTOR_MAX_TOKEN_LEN_PER_GPU:-20480}"
 LOG_PROB_MAX_TOKEN_LEN_PER_GPU="${LOG_PROB_MAX_TOKEN_LEN_PER_GPU:-20480}"
 actor_max_token_len_per_gpu="${ACTOR_MAX_TOKEN_LEN_PER_GPU}"
 log_prob_max_token_len_per_gpu="${LOG_PROB_MAX_TOKEN_LEN_PER_GPU}"
 torchtitan_max_seq_len=$(( (actor_max_token_len_per_gpu > log_prob_max_token_len_per_gpu ? actor_max_token_len_per_gpu : log_prob_max_token_len_per_gpu) * CONTEXT_PARALLEL_SIZE ))
-TPU_EAGER_MODE="${TPU_EAGER_MODE:-DEFER_NEVER}"
+TPU_EAGER_MODE="${TPU_EAGER_MODE:-DEFER_AND_FUSE}"
+OPTIM_IMPL="${OPTIM_IMPL:-foreach}"
 CHECKPOINT_BACKEND="${CHECKPOINT_BACKEND:-tpu-sync}"
 VERIFY_PARITY="${VERIFY_PARITY:-off}"
-ROLLOUT_GPU_MEMORY_UTILIZATION="${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.85}"
-ROLLOUT_MAX_NUM_SEQS="${ROLLOUT_MAX_NUM_SEQS:-512}"
+ROLLOUT_GPU_MEMORY_UTILIZATION="${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.55}"
+ROLLOUT_MAX_NUM_SEQS="${ROLLOUT_MAX_NUM_SEQS:-64}"
 ROLLOUT_MAX_NUM_BATCHED_TOKENS="${ROLLOUT_MAX_NUM_BATCHED_TOKENS:-4096}"
 ROLLOUT_LOG_STATS="${ROLLOUT_LOG_STATS:-True}"
 if [[ "${ROLLOUT_LOG_STATS}" == "True" || "${ROLLOUT_LOG_STATS}" == "true" ]]; then
@@ -296,19 +334,14 @@ RESUME_MODE="${RESUME_MODE:-auto}"
 SAVE_CONTENTS="${SAVE_CONTENTS:-model,optimizer,extra}"
 
 EXTRA_ARGS=()
+if [[ -n "${VAL_MAX_SAMPLES:-}" ]]; then
+    EXTRA_ARGS+=("data.val_max_samples=${VAL_MAX_SAMPLES}")
+fi
 if [[ -n "${ROLLOUT_DATA_DIR:-}" ]]; then
     EXTRA_ARGS+=("trainer.rollout_data_dir=${ROLLOUT_DATA_DIR}")
 fi
 if [[ -n "${VALIDATION_DATA_DIR:-}" ]]; then
     EXTRA_ARGS+=("trainer.validation_data_dir=${VALIDATION_DATA_DIR}")
-fi
-if [[ "${TPU_ACCELERATOR_TYPE}" == "v5p" ]]; then
-    export USE_MOE_SPARSE_CORE="${USE_MOE_SPARSE_CORE:-0}"
-    export VLLM_RAY_EXTRA_ENV_VARS_TO_COPY="${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY:+${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY},}USE_MOE_SPARSE_CORE"
-    EXTRA_ARGS+=(
-        "+ray_kwargs.ray_init.runtime_env.env_vars.USE_MOE_SPARSE_CORE='${USE_MOE_SPARSE_CORE}'"
-        "+ray_kwargs.ray_init.runtime_env.env_vars.VLLM_RAY_EXTRA_ENV_VARS_TO_COPY='${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY}'"
-    )
 fi
 
 python3 -m verl.trainer.main_ppo \
@@ -318,6 +351,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.v1.separate_async.parameter_sync_step="${PARAMETER_SYNC_STEP}" \
     trainer.v1.sampler.max_off_policy_threshold="${MAX_OFF_POLICY_THRESHOLD}" \
     transfer_queue.enable=True \
+    transfer_queue.backend.SimpleStorage.total_storage_size=100000 \
     model_engine=torchtitan \
     algorithm.adv_estimator="${adv_estimator}" \
     algorithm.use_kl_in_reward="${use_kl_in_reward}" \
@@ -339,6 +373,7 @@ python3 -m verl.trainer.main_ppo \
     +data.pad_mode=no_padding \
     data.custom_cls.path="${retool_py_path}" \
     data.custom_cls.name=CustomRLHFDataset \
+    data.function_tool_path="${function_tool_path}" \
     reward.custom_reward_function.path="${retool_py_path}" \
     reward.custom_reward_function.name=compute_score \
     actor_rollout_ref.actor.strategy=torchtitan \
@@ -370,6 +405,7 @@ python3 -m verl.trainer.main_ppo \
     +actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.use_splash_attention=True \
     +actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.tpu_eager_mode="${TPU_EAGER_MODE}" \
     +actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.use_simple_fsdp="${USE_SIMPLE_FSDP}" \
+    +actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.optim_impl="${OPTIM_IMPL}" \
     +actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.use_fused_linear_cross_entropy=True \
     actor_rollout_ref.actor.torchtitan.pad_to_length=True \
     actor_rollout_ref.actor.torchtitan.pad_to_length_bucket="${PAD_TO_LENGTH_BUCKET}" \
@@ -380,6 +416,9 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.torchtitan.pipeline_parallel_size=1 \
     actor_rollout_ref.actor.torchtitan.attn_type=varlen \
     actor_rollout_ref.actor.torchtitan.activation_checkpoint=full \
+    actor_rollout_ref.actor.torchtitan.reshard_after_forward=always \
+    actor_rollout_ref.actor.torchtitan.optimizer_offload="${ACTOR_OPTIMIZER_OFFLOAD}" \
+    actor_rollout_ref.actor.torchtitan.param_offload="${ACTOR_PARAM_OFFLOAD}" \
     actor_rollout_ref.actor.torchtitan.max_seq_len="${torchtitan_max_seq_len}" \
     actor_rollout_ref.ref.torchtitan.use_torch_compile=True \
     actor_rollout_ref.ref.torchtitan.max_seq_len="${torchtitan_max_seq_len}" \
@@ -407,7 +446,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.multi_turn.enable=True \
     actor_rollout_ref.rollout.multi_turn.max_user_turns="${max_turns}" \
     actor_rollout_ref.rollout.multi_turn.max_assistant_turns="${max_turns}" \
-    actor_rollout_ref.rollout.multi_turn.function_tool_path="${retool_py_path}" \
+    actor_rollout_ref.rollout.multi_turn.function_tool_path="${function_tool_path}" \
     actor_rollout_ref.rollout.multi_turn.format=hermes \
     actor_rollout_ref.rollout.gpu_memory_utilization="${ROLLOUT_GPU_MEMORY_UTILIZATION}" \
     actor_rollout_ref.rollout.n="${n_resp_per_prompt}" \
