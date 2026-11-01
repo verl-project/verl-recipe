@@ -11,52 +11,64 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import logging
 import re
-from typing import Any
+import sys
 
 import datasets
 from recipe.retool.retool_dataset_utils import map_fn, map_fn2
-from recipe.retool.sandbox_fusion_tools import SandboxFusionTool
 
-from verl.tools.base_tool import OpenAIFunctionToolSchema
+from verl.tools.function_tool import function_tool
 from verl.utils.dataset import RLHFDataset
 from verl.utils.reward_score import math_dapo
-from verl.utils.rollout_trace import rollout_trace_op
 
 logger = logging.getLogger(__name__)
 
+_CODE_PATTERN = re.compile(r"```python(.*?)```", re.DOTALL)
+_DEFAULT_TIMEOUT_S = 30.0
 
-class CustomSandboxFusionTool(SandboxFusionTool):
-    def __init__(self, config: dict, tool_schema: OpenAIFunctionToolSchema):
-        super().__init__(config, tool_schema)
-        self.code_pattern = re.compile(r"```python(.*?)```", re.DOTALL)
 
-    @rollout_trace_op
-    async def execute(self, instance_id: str, parameters: dict[str, Any], **kwargs) -> tuple[str, float, dict]:
-        code = parameters["code"]
-        matches = self.code_pattern.findall(code)
-        if matches:
-            code = matches[0].strip()
+@function_tool
+async def code_interpreter(code: str) -> str:
+    """A tool for executing code.
 
-        # NOTE: some script may not explicitly print result, we need to add a print statement to the end of the script
-        lines = code.split("\n")
-        for i, line in reversed(list(enumerate(lines))):
-            if line == "":
-                continue
-            if not lines[i].startswith("print"):
-                lines[i] = f"print({line})"
-            break
-        code = "\n".join(lines)
+    Args:
+        code: The code to execute.
+    """
+    if not isinstance(code, str):
+        code = str(code)
 
-        timeout = parameters.get("timeout", self.default_timeout)
-        language = parameters.get("language", self.default_language)
-        if not isinstance(code, str):
-            code = str(code)
+    matches = _CODE_PATTERN.findall(code)
+    if matches:
+        code = matches[0].strip()
 
-        result = await self.execution_pool.execute.remote(self.execute_code, instance_id, code, timeout, language)
-        # sandbox has no score or metrics, use Nones
-        return result, None, None
+    # NOTE: some script may not explicitly print result, we need to add a print statement to the end of the script
+    lines = code.split("\n")
+    for i, line in reversed(list(enumerate(lines))):
+        if line == "":
+            continue
+        if not lines[i].startswith("print"):
+            lines[i] = f"print({line})"
+        break
+    code = "\n".join(lines)
+
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-I",
+        "-c",
+        code,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_DEFAULT_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        return "TimeoutError: Code execution timed out."
+
+    return (stdout + stderr).decode("utf-8", errors="replace")
 
 
 class CustomRLHFDataset(RLHFDataset):
