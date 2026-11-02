@@ -98,6 +98,7 @@ forward_keys = [
     "CLIP_GRAD",
     "TRAIN_BATCH_SIZE",
     "PPO_MINI_BATCH_SIZE",
+    "DATALOADER_NUM_WORKERS",
     "TOTAL_TRAINING_STEPS",
     "TOTAL_EPOCHS",
     "TEST_FREQ",
@@ -252,6 +253,7 @@ clip_grad="${CLIP_GRAD:-0.0625}"
 
 train_batch_size="${TRAIN_BATCH_SIZE:-64}"
 ppo_mini_batch_size="${PPO_MINI_BATCH_SIZE:-64}"
+dataloader_num_workers="${DATALOADER_NUM_WORKERS:-0}"
 n_resp_per_prompt="${N_RESP_PER_PROMPT:-16}"
 n_resp_per_prompt_val="${N_RESP_PER_PROMPT_VAL:-8}"
 
@@ -363,6 +365,7 @@ python3 -m verl.trainer.main_ppo \
     data.val_files="${test_files}" \
     data.return_raw_chat=True \
     data.train_batch_size="${train_batch_size}" \
+    data.dataloader_num_workers="${dataloader_num_workers}" \
     data.max_prompt_length="${max_prompt_length}" \
     data.max_response_length="${max_response_length}" \
     +data.max_length="${max_model_len}" \
