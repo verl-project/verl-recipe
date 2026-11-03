@@ -45,7 +45,7 @@ if [[ "${RAY_JOB_SUBMITTED:-0}" != "1" ]] && ! python3 -m hydra --help >/dev/nul
             fi
         fi
         RAY_NAMESPACE="${RAY_NAMESPACE:-default}"
-        RAY_CLUSTER_NAME="${RAY_CLUSTER_NAME:-ray-tpu-v6e-cluster}"
+        RAY_CLUSTER_NAME="${RAY_CLUSTER_NAME:-verl-nap-aaskhat-v7x}"
         RAY_DASHBOARD_PORT="${RAY_DASHBOARD_PORT:-$((28300 + RANDOM % 500))}"
         kubectl port-forward -n "${RAY_NAMESPACE}" "svc/${RAY_CLUSTER_NAME}-head-svc" "${RAY_DASHBOARD_PORT}:8265" >/dev/null 2>&1 &
         PF_PID=$!
@@ -70,6 +70,8 @@ forward_keys = [
     "NNODES_TRAINER",
     "N_CHIPS_TRAINER",
     "CONTEXT_PARALLEL_SIZE",
+    "PAD_TO_LENGTH_BUCKET",
+    "USE_DYNAMIC_BSZ",
     "MAX_LENGTH",
     "TRAIN_BATCH_SIZE",
     "TOTAL_EPOCHS",
@@ -107,7 +109,7 @@ for k, v in os.environ.items():
         env_vars[k] = v
 
 py_modules = []
-if os.environ.get("VERL_UPLOAD_HARDWARE_PLUGIN", "0") == "1":
+if os.environ.get("VERL_UPLOAD_HARDWARE_PLUGIN", "1") == "1":
     for candidate in (
         os.path.join(os.environ.get("VERL_ROOT", "."), "..", "verl-hardware-plugin", "verl_hardware_plugin"),
         os.path.expanduser("~/verl-hardware-plugin/verl_hardware_plugin"),
@@ -136,7 +138,7 @@ fi
 
 export VERL_PLATFORM=tpu
 export VERL_USE_EXTERNAL_MODULES=verl_hardware_plugin
-export TPU_ACCELERATOR_TYPE="${TPU_ACCELERATOR_TYPE:-v6e-8}"
+export TPU_ACCELERATOR_TYPE="${TPU_ACCELERATOR_TYPE:-tpu7x}"
 export RAY_OVERRIDE_JOB_RUNTIME_ENV=1
 export PYTHONUNBUFFERED=1
 export RAY_memory_monitor_refresh_ms=0

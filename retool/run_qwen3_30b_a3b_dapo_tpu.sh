@@ -80,10 +80,13 @@ forward_keys = [
     "ROLLOUT_LOG_STATS",
     "CONTEXT_PARALLEL_SIZE",
     "PAD_TO_LENGTH_BUCKET",
+    "USE_DYNAMIC_BSZ",
     "ACTOR_MAX_TOKEN_LEN_PER_GPU",
     "LOG_PROB_MAX_TOKEN_LEN_PER_GPU",
     "ACTOR_OPTIMIZER_OFFLOAD",
     "ACTOR_PARAM_OFFLOAD",
+    "OPTIM_IMPL",
+    "FUSE_QKV",
     "CHECKPOINT_BACKEND",
     "NUM_WARMUP_BATCHES",
     "VERIFY_PARITY",
@@ -141,7 +144,7 @@ for k, v in os.environ.items():
         env_vars[k] = v
 
 py_modules = []
-if os.environ.get("VERL_UPLOAD_HARDWARE_PLUGIN", "0") == "1":
+if os.environ.get("VERL_UPLOAD_HARDWARE_PLUGIN", "1") == "1":
     for candidate in (
         os.path.join(os.environ.get("VERL_ROOT", "."), "..", "verl-hardware-plugin", "verl_hardware_plugin"),
         os.path.expanduser("~/verl-hardware-plugin/verl_hardware_plugin"),
@@ -287,9 +290,9 @@ DEFAULT_DP_SHARD=$((TOTAL_TRAINER_CHIPS / (TENSOR_PARALLEL_SIZE * CONTEXT_PARALL
 DATA_PARALLEL_SHARD_SIZE="${DATA_PARALLEL_SHARD_SIZE:-${DEFAULT_DP_SHARD}}"
 
 USE_SIMPLE_FSDP="${USE_SIMPLE_FSDP:-True}"
-USE_DYNAMIC_BSZ="${USE_DYNAMIC_BSZ:-True}"
+USE_DYNAMIC_BSZ="${USE_DYNAMIC_BSZ:-False}"
 ACTOR_OPTIMIZER_OFFLOAD="${ACTOR_OPTIMIZER_OFFLOAD:-True}"
-ACTOR_PARAM_OFFLOAD="${ACTOR_PARAM_OFFLOAD:-False}"
+ACTOR_PARAM_OFFLOAD="${ACTOR_PARAM_OFFLOAD:-True}"
 PAD_TO_LENGTH_BUCKET="${PAD_TO_LENGTH_BUCKET:-2048}"
 ACTOR_MAX_TOKEN_LEN_PER_GPU="${ACTOR_MAX_TOKEN_LEN_PER_GPU:-20480}"
 LOG_PROB_MAX_TOKEN_LEN_PER_GPU="${LOG_PROB_MAX_TOKEN_LEN_PER_GPU:-20480}"
@@ -297,7 +300,8 @@ actor_max_token_len_per_gpu="${ACTOR_MAX_TOKEN_LEN_PER_GPU}"
 log_prob_max_token_len_per_gpu="${LOG_PROB_MAX_TOKEN_LEN_PER_GPU}"
 torchtitan_max_seq_len=$(( (actor_max_token_len_per_gpu > log_prob_max_token_len_per_gpu ? actor_max_token_len_per_gpu : log_prob_max_token_len_per_gpu) * CONTEXT_PARALLEL_SIZE ))
 TPU_EAGER_MODE="${TPU_EAGER_MODE:-DEFER_AND_FUSE}"
-OPTIM_IMPL="${OPTIM_IMPL:-foreach}"
+OPTIM_IMPL="${OPTIM_IMPL:-fused_opt_states_bf16}"
+FUSE_QKV="${FUSE_QKV:-True}"
 CHECKPOINT_BACKEND="${CHECKPOINT_BACKEND:-tpu-sync}"
 VERIFY_PARITY="${VERIFY_PARITY:-off}"
 ROLLOUT_GPU_MEMORY_UTILIZATION="${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.55}"
@@ -409,7 +413,9 @@ python3 -m verl.trainer.main_ppo \
     +actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.tpu_eager_mode="${TPU_EAGER_MODE}" \
     +actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.use_simple_fsdp="${USE_SIMPLE_FSDP}" \
     +actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.optim_impl="${OPTIM_IMPL}" \
+    +actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.fuse_qkv="${FUSE_QKV}" \
     +actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.use_fused_linear_cross_entropy=True \
+    +actor_rollout_ref.ref.torchtitan.engine_kwargs.tpu.fuse_qkv="${FUSE_QKV}" \
     actor_rollout_ref.actor.torchtitan.pad_to_length=True \
     actor_rollout_ref.actor.torchtitan.pad_to_length_bucket="${PAD_TO_LENGTH_BUCKET}" \
     actor_rollout_ref.actor.torchtitan.tensor_parallel_size="${TENSOR_PARALLEL_SIZE}" \
