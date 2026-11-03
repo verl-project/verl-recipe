@@ -161,6 +161,8 @@ REF=(
 ROLLOUT=(
     actor_rollout_ref.rollout.name=vllm
     actor_rollout_ref.rollout.mode=async
+    # Ray actors do not inherit the launch directory; keep the tool config path absolute.
+    actor_rollout_ref.rollout.multi_turn.tool_config_path="${SCRIPT_DIR}/configs/image_zoom_in_tool_config.yaml"
     actor_rollout_ref.rollout.n=${ROLLOUT_N}
     actor_rollout_ref.rollout.tensor_model_parallel_size=${GEN_TP}
     actor_rollout_ref.rollout.gpu_memory_utilization=${ROLLOUT_GPU_MEM_UTIL}
