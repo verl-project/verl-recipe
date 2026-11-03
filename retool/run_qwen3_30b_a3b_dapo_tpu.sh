@@ -229,7 +229,7 @@ train_files="['${dapo_math_17k}']"
 test_files="['${aime_2025}', '${aime_2024}']"
 
 retool_py_path="pkg://recipe.retool.retool"
-function_tool_path="${FUNCTION_TOOL_PATH:-recipe/retool/retool.py}"
+function_tool_path="${FUNCTION_TOOL_PATH:-recipe/retool/code_interpreter_tool.py}"
 
 project_name="${PROJECT_NAME:-${WANDB_PROJECT:-verl-torchtpu-grpo-test}}"
 experiment_name="${EXPERIMENT_NAME:-qwen3-30b-a3b_retool_dapo_tpu}"
