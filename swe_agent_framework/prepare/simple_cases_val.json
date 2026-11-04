@@ -1,0 +1,74 @@
+[
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `greet.py`, the `greet` function returns 'Goodbye' instead of 'Hello'. Fix it.",
+    "repo_content": {"greet.py": "def greet(name):\n    return f'Goodbye, {name}!'\n"},
+    "expected_patch": "diff --git a/greet.py b/greet.py\n--- a/greet.py\n+++ b/greet.py\n@@ -1,2 +1,2 @@\n def greet(name):\n-    return f'Goodbye, {name}!'\n+    return f'Hello, {name}!'"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "The `clamp` function in `numutil.py` should restrict a value between min_val and max_val, but the comparisons are swapped. Fix it.",
+    "repo_content": {"numutil.py": "def clamp(value, min_val, max_val):\n    if value < min_val:\n        return max_val\n    if value > max_val:\n        return min_val\n    return value\n"},
+    "expected_patch": "diff --git a/numutil.py b/numutil.py\n--- a/numutil.py\n+++ b/numutil.py\n@@ -1,6 +1,6 @@\n def clamp(value, min_val, max_val):\n     if value < min_val:\n-        return max_val\n+        return min_val\n     if value > max_val:\n-        return min_val\n+        return max_val\n     return value"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "The `is_palindrome` function in `checker.py` doesn't ignore case. Fix it so 'Racecar' is recognized as a palindrome.",
+    "repo_content": {"checker.py": "def is_palindrome(s):\n    return s == s[::-1]\n"},
+    "expected_patch": "diff --git a/checker.py b/checker.py\n--- a/checker.py\n+++ b/checker.py\n@@ -1,2 +1,3 @@\n def is_palindrome(s):\n-    return s == s[::-1]\n+    s = s.lower()\n+    return s == s[::-1]"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `modulo.py`, the `modulo` function returns a / b (float division) instead of a % b (modulo). Fix the operator.",
+    "repo_content": {"modulo.py": "def modulo(a, b):\n    return a / b\n"},
+    "expected_patch": "diff --git a/modulo.py b/modulo.py\n--- a/modulo.py\n+++ b/modulo.py\n@@ -1,2 +1,2 @@\n def modulo(a, b):\n-    return a / b\n+    return a % b"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `bool_flip.py`, the `flip` function returns the same boolean value instead of flipping it. Fix it to return `not b`.",
+    "repo_content": {"bool_flip.py": "def flip(b):\n    return b\n"},
+    "expected_patch": "diff --git a/bool_flip.py b/bool_flip.py\n--- a/bool_flip.py\n+++ b/bool_flip.py\n@@ -1,2 +1,2 @@\n def flip(b):\n-    return b\n+    return not b"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `area_circle.py`, the `circle_area` function computes 2 * pi * r (circumference) instead of pi * r * r (area). Fix the formula.",
+    "repo_content": {"area_circle.py": "import math\n\ndef circle_area(r):\n    return 2 * math.pi * r\n"},
+    "expected_patch": "diff --git a/area_circle.py b/area_circle.py\n--- a/area_circle.py\n+++ b/area_circle.py\n@@ -1,4 +1,4 @@\n import math\n \n def circle_area(r):\n-    return 2 * math.pi * r\n+    return math.pi * r * r"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `to_int.py`, the `to_int` function converts the string to float instead of int. Fix it.",
+    "repo_content": {"to_int.py": "def to_int(s):\n    return float(s)\n"},
+    "expected_patch": "diff --git a/to_int.py b/to_int.py\n--- a/to_int.py\n+++ b/to_int.py\n@@ -1,2 +1,2 @@\n def to_int(s):\n-    return float(s)\n+    return int(s)"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `head.py`, the `head` function returns the last 3 elements instead of the first 3. Fix the slicing.",
+    "repo_content": {"head.py": "def head(lst, n=3):\n    return lst[-n:]\n"},
+    "expected_patch": "diff --git a/head.py b/head.py\n--- a/head.py\n+++ b/head.py\n@@ -1,2 +1,2 @@\n def head(lst, n=3):\n-    return lst[-n:]\n+    return lst[:n]"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `is_empty.py`, the `is_empty` function returns True when the list is non-empty and False when empty. The logic is inverted. Fix it.",
+    "repo_content": {"is_empty.py": "def is_empty(lst):\n    return len(lst) > 0\n"},
+    "expected_patch": "diff --git a/is_empty.py b/is_empty.py\n--- a/is_empty.py\n+++ b/is_empty.py\n@@ -1,2 +1,2 @@\n def is_empty(lst):\n-    return len(lst) > 0\n+    return len(lst) == 0"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `safe_get.py`, the `safe_get` function returns None even when the key exists in the dictionary. Fix it to return the value when the key is found.",
+    "repo_content": {"safe_get.py": "def safe_get(d, key, default=None):\n    if key in d:\n        return None\n    return default\n"},
+    "expected_patch": "diff --git a/safe_get.py b/safe_get.py\n--- a/safe_get.py\n+++ b/safe_get.py\n@@ -1,4 +1,4 @@\n def safe_get(d, key, default=None):\n     if key in d:\n-        return None\n+        return d[key]\n     return default"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `concat.py`, the `concat` function puts a space between the two strings instead of concatenating them directly. Fix it to return a + b without any separator.",
+    "repo_content": {"concat.py": "def concat(a, b):\n    return a + ' ' + b\n"},
+    "expected_patch": "diff --git a/concat.py b/concat.py\n--- a/concat.py\n+++ b/concat.py\n@@ -1,2 +1,2 @@\n def concat(a, b):\n-    return a + ' ' + b\n+    return a + b"
+  },
+  {
+    "difficulty": "easy",
+    "problem_statement": "In `max_of_two.py`, the `max_of_two` function returns the smaller of the two values instead of the larger. Fix the comparison.",
+    "repo_content": {"max_of_two.py": "def max_of_two(a, b):\n    if a < b:\n        return a\n    return b\n"},
+    "expected_patch": "diff --git a/max_of_two.py b/max_of_two.py\n--- a/max_of_two.py\n+++ b/max_of_two.py\n@@ -1,4 +1,4 @@\n def max_of_two(a, b):\n-    if a < b:\n-        return a\n-    return b\n+    if a > b:\n+        return a\n+    return b"
+  }
+]
