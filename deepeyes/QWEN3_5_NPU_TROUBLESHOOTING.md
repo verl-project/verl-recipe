@@ -57,9 +57,10 @@
 
 ### 8. HDK 25.2.0 无法进行 ACL graph capture
 
-- 现象：`capture_end ... error code 507903`，CANN plog 报 `207005 driver error:resource alloc fail`；同一节点部分或全部 vLLM 副本失败。
-- 根因：142 节点 HDK 25.2.0 低于 CANN 9.1.0 镜像要求（138 的 25.5.2 正常）。
-- 处理：`actor_rollout_ref.rollout.enforce_eager=True`。彻底修复需将 142 驱动升级到 ≥25.5。
+- 现象：`capture_end ... error code 507903`，CANN plog 报 `rtStreamWaitEvent: ErrCode=207005, desc=[driver error:resource alloc fail]`；单实例同样失败。
+- 概念：HDK 是宿主侧昇腾驱动包（驱动 + 固件 + npu-smi/hccn_tool），挂载在容器 `/usr/local/Ascend/driver`；CANN 是镜像内软件栈（runtime/acl/HCCL/算子，版本 9.1.0）。两者独立版本化；CANN 的图捕获 API 最终调用驱动的流/事件捕获与资源分配。
+- 根因：142 的 HDK 25.2.0（固件 7.7.0.3）低于 CANN 9.1.0 镜像配套的驱动版本。同一镜像在 138（HDK 25.5.2、固件 7.8.0.7）可正常 capture；plog 中 207005/507903 均为驱动/运行时错误，并非 CANN 不支持该 API。
+- 处理：`actor_rollout_ref.rollout.enforce_eager=True`。彻底修复需将 142 的驱动与固件升级到 ≥25.5（与 138 一致）。
 
 ### 9. FRACTAL_NZ 导致权重同步 wake_up 失败
 
