@@ -624,7 +624,7 @@ rollout 与训练共享每节点的 8 卡。
 
 ## 11. 本次验证记录（2026-10-26，8×910B3 / CANN 9.1.0）
 
-- 环境：独立 venv `/home/l00894230/qwen35-env`（torch 2.9.0 + torch_npu 2.9.0 +
+- 环境：独立 venv `$HOME/qwen35-env`（torch 2.9.0 + torch_npu 2.9.0 +
   vllm 0.18.0 `VLLM_TARGET_DEVICE=empty` + vllm-ascend 0.18.0 + transformers 5.3.0.dev0@cc7ab9be
   + verl `main`）。已有 conda 环境未改动。
 - 数据：DeepEyes `data_0.1.2_visual_toolbox_v2.parquet`（0.99 GB）取 512 条 → 480 train / 32 val；
@@ -664,10 +664,10 @@ export HF_DATASETS_CACHE=$HF_HOME/datasets
 export RAY_TMPDIR=/path/to/big-disk/ray_tmp
 export LLM_AS_A_JUDGE_BASE=http://127.0.0.1:18000/v1
 export ASCEND_RT_VISIBLE_DEVICES=4,5,6,7
-export PYTHON=/home/l00894230/qwen35-env/bin/python
+export PYTHON=$HOME/qwen35-env/bin/python
 export RAY_NOSET_VISIBLE_DEVICES=0
 
-MODEL_PATH=/home/l00894230/models/Qwen3.5-4B \
+MODEL_PATH=$HOME/models/Qwen3.5-4B \
 TRAIN_FILE=/tmp/deepeyes-smoke/train.parquet \
 VAL_FILE=/tmp/deepeyes-smoke/val.parquet \
 TRAIN_BATCH_SIZE=8 PPO_MINI_BATCH_SIZE=8 ROLLOUT_N=2 \
