@@ -1,0 +1,47 @@
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+data:
+  return_raw_chat: true
+  prompt_key: instance_id
+  train_harbor_dir: /home/verl/swe-bench-verified
+  val_harbor_dir: /home/verl/swe-bench-verified
+  harbor_cache_dir: "~/.cache/verl/agentic/harbor"
+  harbor_data_source: "harbor"
+  harbor_ability: "agent"
+  harbor_overwrite: false
+  harbor_train_limit: null
+  harbor_val_limit: null
+
+proxy_server:
+  host: "192.168.219.45"
+  port: 80
+  tool_format: "hermes"
+  llm_proxy_ip: null
+
+remote_agent:
+  agent_name: swe-agent
+  agent_import_path: null
+  model_name: openai/qwen-max
+  agent_kwargs:
+    total_cost_limit: 0
+    per_instance_cost_limit: 0
+  max_retries: null
+  retry_base_delay: null
+  task_path_template: null
+  environment_overrides: null
+  environment_import_path: "harbor.environments.ack:ACKEnvironment"
+  environment_kwargs: 
+    namespace: default # ensure the network between proxy and agent
+    image_pull_secret: acr-registry
+    use_buildkit: true
+    buildkit_address: buildkit-service:1234
+  use_local_trial: true
+  proxy_server_url: http://llm-proxy-server
+  harbor_server_url: null
+  harbor_timeout: null
