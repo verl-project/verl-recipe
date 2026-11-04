@@ -1,0 +1,16 @@
+hydra:
+  searchpath:
+    - pkg://verl.trainer.config
+
+defaults:
+  - poise
+  - _self_
+
+actor_rollout_ref:
+  model:
+    path: Qwen/Qwen3-4B
+  rollout:
+    gpu_memory_utilization: 0.70
+
+trainer:
+  experiment_name: qwen3-4b
