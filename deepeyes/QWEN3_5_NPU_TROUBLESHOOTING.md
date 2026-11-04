@@ -83,8 +83,8 @@
 
 - 现象：`Chat completion request failed: ... Read timed out (read timeout=60.0)`；14 小时内出现 184 次。
 - 影响：超时请求重试 3 次后 acc=0，污染奖励（约 3.6%），并拖慢 rollout 尾部。
-- 根因：judge 模型默认 `max_tokens=2048`，个别回复不按格式输出，长时间占用推理引擎，并发请求排队超过 60s。正常请求实测 0.58s。
-- 处理：judge 侧限制生成长度（`--override-generation-config '{"max_tokens": 512}'`）；或客户端设置 `max_tokens`、提高超时。
+- 根因：judge 模型默认 `max_tokens=2048`，个别回复不按格式输出（`Judgement format error` 37 次），长时间占用推理引擎，并发请求排队超过 60s。judge 端观测 `Running: 1–3, Waiting: 0`，算力不是瓶颈；瓶颈在客户端并发（4 个 RewardLoopWorker 串行请求）与长尾生成。关闭 thinking 后正常请求实测 0.11s（3 tokens）。
+- 处理：judge 侧限制生成长度：`--override-generation-config '{"max_new_tokens": 64}'`。vLLM 的 override 只识别 `max_new_tokens`（会映射为全局默认 `max_tokens`）；或客户端设置 `max_tokens`、提高超时。
 
 ### 13. 节点被其他容器占用
 
@@ -107,11 +107,12 @@
 
 配置：8 卡（142），`train_batch_size=64`、`rollout.n=8`、`max_response_length=16384`，eager 推理。
 
-- 单步约 4850s（81 分钟）；517 步约 28 天。
-- 构成（按日志时间戳实测）：
-  - rollout（生成 + 实时判分）：40–50 分钟；
-  - actor 更新（NPU）：约 5 分钟；
-  - 权重同步（共享内存 + vLLM 装载）：25–30 分钟。
+- 单步 79–92 分钟（进度条累计平均 4850s/步）；517 步约 28 天。
+- 构成（按日志中 pending/running 时间戳实测）：
+  - rollout（生成 + 逐条判分，判分与生成交错）：40–50 分钟；
+  - actor 更新（NPU）：约 5–10 分钟；
+  - 权重同步（共享内存 + vLLM 装载）：约 25–30 分钟；
+  - 两者合计（rollout 结束到下一步 rollout 开始）：29–44 分钟。
 - 主要瓶颈：
   1. 权重同步依赖共享内存（HDK 25.2.0 无 IPC）；
   2. rollout 使用 eager 模式（HDK 25.2.0 无 ACL graph）；
