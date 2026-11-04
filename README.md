@@ -97,6 +97,7 @@ The script requires only `bash`, `git`, `awk`, and `pip`/`pip3` on `PATH`. It do
 | sppo | [`recipe/sppo/REQUIRED_VERL.txt`](sppo/REQUIRED_VERL.txt) |
 | swe_agent | [`recipe/swe_agent/REQUIRED_VERL.txt`](swe_agent/REQUIRED_VERL.txt) |
 | tmax | [`recipe/tmax/REQUIRED_VERL.txt`](tmax/REQUIRED_VERL.txt) |
+| tpr | [`recipe/tpr/REQUIRED_VERL.txt`](tpr/REQUIRED_VERL.txt) |
 | verl_tinker | [`recipe/verl_tinker/REQUIRED_VERL.txt`](verl_tinker/REQUIRED_VERL.txt) |
 
 ## Available Recipes (high level)
@@ -107,6 +108,7 @@ The script requires only `bash`, `git`, `awk`, and `pip`/`pip3` on `PATH`. It do
 - [partial_rollout](./partial_rollout/): synchronous RL with cross-step rollout interruption + resume to reclaim long-tail GPU bubbles ([APRIL](https://arxiv.org/pdf/2509.18521)-style).
 - [verl_tinker](./verl_tinker/): Tinker-compatible HTTP server backed by VeRL actors, with separate Tinker cookbook client examples.
 - [specRL/rl_spec](./specRL/rl_spec/): accelerating RL rollout with a co-adapted diffusion drafter ([DFlash](https://github.com/z-lab/dflash)), via Split-KV context parallelism for drafter training and entropy-boosted anchor sampling.
+- [tpr](./tpr/): training-side tree prefix reuse for multi-trajectory PPO training.
 - TBA...
 
 ## Contribution

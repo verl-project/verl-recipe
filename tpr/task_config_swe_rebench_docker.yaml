@@ -1,0 +1,26 @@
+# Uni-Agent Docker sandbox. The PPO training container needs Docker CLI
+# configured for sandbox startup.
+- name: swe_rebench
+  sandbox:
+    provider: docker
+    runtime_timeout: 7200
+    sandbox_kwargs:
+      pull_policy: missing
+      pull_timeout: 1200
+      start_timeout: 120
+      run_args:
+        - --platform=linux/amd64
+  agent:
+    name: claude_code
+    max_turns: 100
+    run_timeout: 3600
+  prompt_template:
+    - role: user
+      content: |-
+        Read the following task description and resolve the issue in the current directory.
+
+        Task description:
+        {problem_statement}
+
+        Inspect the code, make minimal correct changes, and verify them.
+        Do not modify tests or commit changes. Summarize the result.
