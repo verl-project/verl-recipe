@@ -1,5 +1,5 @@
 tools:
-  - class_name: "recipe.retool.retool.CustomSandboxFusionTool"
+  - class_name: "recipe.retool.sandbox_fusion_tool.CustomSandboxFusionTool"
     config:
       sandbox_fusion_url: "http://localhost:8080/run_code"
       num_workers: 128

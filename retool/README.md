@@ -7,10 +7,12 @@ See [`REQUIRED_VERL.txt`](REQUIRED_VERL.txt) for the upstream repository, instal
 [ReTool: Reinforcement Learning for Strategic Tool Use in LLMs](https://arxiv.org/abs/2504.11536)
 
 ## Overview
-- Base model: [Qwen/Qwen2.5-32B-Instruct](https://huggingface.co/Qwen/Qwen2.5-32B-Instruct)
+- Models:
+  - GPU: [Qwen/Qwen2.5-32B-Instruct](https://huggingface.co/Qwen/Qwen2.5-32B-Instruct)
+  - TPU (`torch_tpu` + `torchtitan`): [Qwen/Qwen3-30B-A3B](https://huggingface.co/Qwen/Qwen3-30B-A3B)
 - SFT dataset: [JoeYing/ReTool-SFT](https://huggingface.co/datasets/JoeYing/ReTool-SFT)
 - RL dataset: [BytedTsinghua-SIA/DAPO-Math-17k](https://huggingface.co/datasets/BytedTsinghua-SIA/DAPO-Math-17k)
-- Val dataset: [yentinglin/aime_2025](https://huggingface.co/datasets/yentinglin/aime_2025)
+- Val datasets: [Maxwell-Jia/AIME_2024](https://huggingface.co/datasets/Maxwell-Jia/AIME_2024), [yentinglin/aime_2025](https://huggingface.co/datasets/yentinglin/aime_2025)
 
 ## How it works
 
@@ -22,7 +24,7 @@ See [`REQUIRED_VERL.txt`](REQUIRED_VERL.txt) for the upstream repository, instal
     
 2.  Dynamic Interaction and Policy Optimization (RL).
     
-     With the verl Reinforcement Learning framework, the model dynamically inserts code blocks during inference and interacts with the sandbox environment in real-time, generating a hybrid trajectory of natural language thinking and code snippets, sending the code to the sandbox for asynchronous execution when code termination markers are detected, and the execution results (success outputs/errors) are fed back to the model for guiding the subsequent inference. This "think-execute-feedback" cycle, together with the design of rewards based on the accuracy of the final answer, enables the model to independently optimize the Tool call strategy, and improves the reasoning efficiency and computational accuracy.
+     With the verl Reinforcement Learning framework, the model dynamically inserts code blocks during inference and interacts with the tool environment in real-time, generating a hybrid trajectory of natural language thinking and code snippets, executing Python code when tool call markers are detected, and feeding execution results (success outputs/errors) back to the model for guiding the subsequent inference. This "think-execute-feedback" cycle, together with the design of rewards based on the accuracy of the final answer, enables the model to independently optimize the Tool call strategy, and improves the reasoning efficiency and computational accuracy.
 
 ## Installation
 
@@ -36,7 +38,7 @@ pip install verl==0.6.1
 python3 recipe/retool/retool_sft_preprocess.py
 ```
 
-2. Training
+2. Training (GPU - Qwen2.5-32B)
 ```bash
 bash recipe/retool/run_qwen2-32b_sft.sh
 ```
@@ -45,9 +47,14 @@ After 6 epoches, validation metrics:
 - val-core/aime_2025/acc/mean@30: 0.24
 - val-aux/num_turns/mean: 7.2
 
+3. Training (TPU - Qwen3-30B-A3B MoE)
+```bash
+bash recipe/retool/run_qwen3_30b_a3b_sft_tpu.sh
+```
+
 ## RL
 
-### GRPO
+### GRPO / DAPO (GPU - Qwen2.5-32B)
 ```bash
 bash recipe/retool/run_qwen2-32b_dapo.sh
 ```
@@ -56,7 +63,12 @@ After 150 steps, validation metrics:
 - val-core/aime_2025/acc/mean@30: 0.6
 - val-aux/num_turns/mean: 10
 
-### PPO
+### GRPO / DAPO (TPU - Qwen3-30B-A3B MoE)
+```bash
+bash recipe/retool/run_qwen3_30b_a3b_dapo_tpu.sh
+```
+
+### PPO (GPU - Qwen2.5-32B)
 
 ```bash
 bash recipe/retool/run_qwen2-32b_ppo.sh
