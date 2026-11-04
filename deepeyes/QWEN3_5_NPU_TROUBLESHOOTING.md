@@ -119,6 +119,14 @@
   3. judge 超时拖慢 rollout 尾部。
 - 提速路径：升级 142 驱动后预计每步 30–40 分钟；或使用 16 卡训练（rollout 与更新近似减半）。
 
+## 复现所需的本地改动与启动开关
+
+- `verl/workers/utils/padding.py`：采用上游 #8413 的 `nested_tensor_from_jagged(..., jagged_dim=token)`。
+- `verl/utils/tensordict_utils.py::index_select_tensor_dict`：nested `unbind` 失败时按 `values`/`offsets` 还原样本。
+- conda env：`transformers==5.12.1`、`qwen-vl-utils==0.0.14 --no-deps`。
+- 训练开关：`actor_rollout_ref.rollout.enforce_eager=True`、`+actor_rollout_ref.rollout.engine_kwargs.vllm.additional_config.weight_nz_mode=0`。
+- judge 启动：`--override-generation-config '{"max_new_tokens": 64}'`。
+
 ## 参考
 
 - verl PR #8413：position_ids packing 修复。
