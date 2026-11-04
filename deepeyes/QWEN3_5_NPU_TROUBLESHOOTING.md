@@ -83,8 +83,8 @@
 
 - 现象：`Chat completion request failed: ... Read timed out (read timeout=60.0)`；14 小时内出现 184 次。
 - 影响：超时请求重试 3 次后 acc=0，污染奖励（约 3.6%），并拖慢 rollout 尾部。
-- 根因：judge 模型默认 `max_tokens=2048`，个别回复不按格式输出（`Judgement format error` 37 次），长时间占用推理引擎，并发请求排队超过 60s。judge 端观测 `Running: 1–3, Waiting: 0`，算力不是瓶颈；瓶颈在客户端并发（4 个 RewardLoopWorker 串行请求）与长尾生成。关闭 thinking 后正常请求实测 0.11s（3 tokens）。
-- 处理：judge 侧限制生成长度：`--override-generation-config '{"max_new_tokens": 64}'`。vLLM 的 override 只识别 `max_new_tokens`（会映射为全局默认 `max_tokens`）；或客户端设置 `max_tokens`、提高超时。
+- 根因：OpenAI 请求的默认生成长度取剩余上下文（`max_model_len - prompt_len`），个别回复不按格式输出（`Judgement format error` 37 次）可持续生成数千 token（实测单请求 2408 tokens / 29s），占用推理引擎，并发请求排队超过 60s。judge 端观测 `Running: 1–3, Waiting: 0`，算力不是瓶颈；瓶颈在客户端并发（4 个 RewardLoopWorker 串行请求）与长尾生成。关闭 thinking 后正常请求实测 0.11s（3 tokens）。
+- 处理：已验证 judge 侧 `--override-generation-config '{"max_new_tokens": 64}'` 生效（thinking-on 生成被截断到 64 tokens，单请求 1.08s，`finish_reason=length`）；正式 judge 已用该参数重启。客户端在请求中设置 `max_tokens` 或提高超时同样有效，但需要重启训练进程。
 - 已应用：2026-11-04 02:07 在 actor 更新窗口内重启 judge（未造成奖励失败）。验证：长回复被截断为 64 tokens（0.87s），正常请求 0.10s；重启后未再出现 60s 超时。
 
 ### 13. 节点被其他容器占用
