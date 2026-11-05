@@ -1,0 +1,6 @@
+# ASFT recipe — verl version pin
+UPSTREAM=https://github.com/verl-project/verl.git
+MODE=rolling_main
+NOTES=Recipe is self-contained under recipe/asft and does not patch core verl. Tested against verl main on 2026-05-08; the trainer mirrors verl 0.6.x FSDP SFT trainer with sft/dft/asft loss modes.
+ROLLING_PIP_INSTALL=pip install verl@git+https://github.com/verl-project/verl.git@main
+RECIPE_FOLDER=asft
