@@ -42,7 +42,7 @@
 
 - 现象：启动日志出现 2 条 `Failed to initialize tools (tool_config_path=recipe/deepeyes/configs/image_zoom_in_tool_config.yaml, ...): [Errno 2] No such file or directory: '/workspace/recipe/...'`（训练集与验证集各一次）。
 - 根因：`data.tool_config_path` 继承 `actor_rollout_ref.rollout.multi_turn.tool_config_path` 的相对路径；Ray actor 的 cwd 是集群启动目录 `/workspace`（主驱动是 `/workspace/verl`），相对路径解析失败。agent loop 加载工具时会走 `resolve_config_path` 回退到 verl 项目根目录，因此 rollout 的工具调用不受影响；只有 `RLHFDataset` 直接使用原始路径，导致过滤时 `tool_schemas=None`（长度估计未计入 tool schema token，少量边界 prompt 会略微超长；rollout `max_model_len=24576`，不会因此报错）。
-- 处理：`RLHFDataset` 加载工具前也调用 `resolve_config_path`（与 agent loop 一致）；启动脚本同时显式设置 `actor_rollout_ref.rollout.multi_turn.tool_config_path="${SCRIPT_DIR}/configs/image_zoom_in_tool_config.yaml"`。
+- 处理（配置解决，不改代码）：启动脚本显式设置 `data.tool_config_path=/workspace/verl/recipe/deepeyes/configs/image_zoom_in_tool_config.yaml`（绝对路径），同时保留 `actor_rollout_ref.rollout.multi_turn.tool_config_path="${SCRIPT_DIR}/configs/image_zoom_in_tool_config.yaml"`。已用 `--cfg job` 验证组合后的 `data.tool_config_path` 与 rollout 侧均为绝对路径、工具可正常加载。上游代码修复方案见 issue #8554。
 
 ### 6. 数据过滤缺少 qwen_vl_utils
 
@@ -110,7 +110,7 @@
 
 - 现象：每次重启都重新过滤 33137 条训练与 256 条验证 prompt（96 进程约 13–16 分钟），期间 NPU 空闲。
 - 根因：过滤由数据集构造时的 `filter_overlong_prompts` 执行；HF `datasets.filter` 的结果缓存按函数 fingerprint 命中，而 verl 传入的闭包捕获了 tokenizer/processor 和数据集对象，fingerprint 跨进程不稳定，导致每次启动都全量重算并另写一份分片缓存。实测同一 `train.parquet` 一天内三次启动（03:49 / 04:38 / 08:02）产生三套 96 分片过滤缓存（约 2.6 GB）。
-- 处理：`maybe_filter_out_long_prompts` 传入稳定 `new_fingerprint`（原始文件 size+mtime、`max_prompt_length`、各 key、tokenizer/processor 名称与 vocab/chat template、tool schemas 的 sha256 前 16 位）。已验证同一输入跨进程指纹一致、缓存命中后不再渲染分词；注意分片名含 `_of_{num_proc}`，`filter_overlong_prompts_workers` 变化会 miss。
+- 处理（配置解决，不改代码）：用数据集自身的过滤逻辑一次性生成 `train.filtered_8192.parquet`、`val.filtered_8192.parquet`（`recipe/deepeyes/scripts/prefilter_deepeyes.py`，64 进程），启动时 `data.train_files`/`data.val_files` 指向过滤后文件并设 `data.filter_overlong_prompts=False`。实测该数据在 8192 限制下过滤前后均为 33137 / 256 行（一条未丢）；已用数据集类加载校验（含 image_zoom_in_tool、system/user 消息正常）。注意：tokenizer、tool schema 或 `max_prompt_length` 变化时需重新生成过滤文件。上游代码修复方案见 issue #8552。
 
 ### 17. CPU-only Ray actor 报 PlatformNPU 未可用
 
@@ -179,8 +179,8 @@ actor_rollout_ref.actor.use_torch_compile=True
 
 - `verl/workers/utils/padding.py`：采用上游 #8413 的 `nested_tensor_from_jagged(..., jagged_dim=token)`。
 - `verl/utils/tensordict_utils.py::index_select_tensor_dict`：nested `unbind` 失败时按 `values`/`offsets` 还原样本。
-- `verl/utils/dataset/rl_dataset.py`：`maybe_filter_out_long_prompts` 传入稳定 `new_fingerprint` 复用跨启动过滤缓存；加载工具前用 `resolve_config_path` 解析相对路径。
-- `verl/experimental/agent_loop/tool_parser.py`：参数值 `...` 被 `ast.literal_eval` 解析为 `Ellipsis` 时保留原字符串。
+- `verl/experimental/agent_loop/tool_parser.py`：参数值 `...` 被 `ast.literal_eval` 解析为 `Ellipsis` 时保留原字符串（配置层无等效开关）。
+- 数据与配置（不改代码）：先用 `recipe/deepeyes/scripts/prefilter_deepeyes.py` 生成 `train/val.filtered_8192.parquet`，启动时 `data.train_files`/`data.val_files` 指向过滤后文件、`data.filter_overlong_prompts=False`，并设置绝对路径 `data.tool_config_path`。
 - conda env：`transformers==5.12.1`、`qwen-vl-utils==0.0.14 --no-deps`。
 - 训练开关：`actor_rollout_ref.rollout.enforce_eager=True`、`+actor_rollout_ref.rollout.engine_kwargs.vllm.additional_config.weight_nz_mode=0`。
 - judge 启动：`--override-generation-config '{"max_new_tokens": 64}'`。
