@@ -1,0 +1,6 @@
+# drkernel — Ascend DR.Kernel kernel-generation RL + KernelGYM reward server
+# The recipe depends on the verl.experimental.fully_async_policy API as it stood at PR#6020.
+UPSTREAM=https://github.com/verl-project/verl.git
+MODE=pinned_commit
+COMMIT=284d03888e5161521e4b4c0bdf502ab7175ffda7
+PIP_INSTALL=pip install verl@git+https://github.com/verl-project/verl.git@284d03888e5161521e4b4c0bdf502ab7175ffda7
