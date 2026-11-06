@@ -1,0 +1,37 @@
+tools:
+  - class_name: recipe.nemo_gym.browser.browser_agent_loop.BrowserTool
+    config:
+      # Base URL of the interactive_browser resources server started by `gym env start`.
+      # Falls back to $NEMO_GYM_BROWSER_URL when unset.
+      resources_server_url: null
+      # Client deadlines. Keep them above what the environment itself may spend,
+      # so a client-side give-up never leaves a session the server still creates.
+      seed_timeout_s: 120.0
+      step_timeout_s: 35.0
+      verify_timeout_s: 90.0
+      max_observation_chars: 8000
+    tool_schema:
+      type: function
+      function:
+        name: browser
+        description: Operate a live browser.
+        parameters:
+          type: object
+          properties:
+            action:
+              type: string
+              description: One of observe, navigate, click, type, finish.
+            url:
+              type: string
+              description: Target URL for navigate.
+            element_id:
+              type: integer
+              description: Element id from the most recent observation, for click and type.
+            text:
+              type: string
+              description: Text to type, for type.
+            answer:
+              type: string
+              description: Final answer to report, for finish.
+          required:
+            - action
