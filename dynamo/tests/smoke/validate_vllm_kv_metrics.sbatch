@@ -15,11 +15,11 @@
 # README's `sbatch train_30b_rl_dynamo_kv_metrics.sh` cannot work. Orchestration
 # here is lifted from retool_ab.sbatch, which is the proven path on this cluster.
 #
-# Usage: sbatch --export=ALL,STEPS=3 recipe/dynamo/tests/smoke/validate_vllm_kv_metrics.sbatch
+# Usage: CONTAINER=/path/to/retool.sqsh sbatch --export=ALL,STEPS=3 recipe/dynamo/tests/smoke/validate_vllm_kv_metrics.sbatch
 set -x
 B=/workspace
 V=$B/verl_dynamo/verl
-CONTAINER=$B/images/verl_vllm024.dev2.sqsh
+: "${CONTAINER:?Set CONTAINER to a prepared ReTool container image (.sqsh)}"
 STEPS=${STEPS:-3}
 
 nodes=($(scontrol show hostnames "$SLURM_JOB_NODELIST"))
