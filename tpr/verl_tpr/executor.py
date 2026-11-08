@@ -26,7 +26,13 @@ from torch import Tensor, nn
 
 from verl_tpr.context import KVPair, TPRAttentionContext, use_tpr_attention_context
 
-from .ring import RingCPBackend, SequenceShard, resolve_cp_group
+from .ring import (
+    RingCPBackend,
+    SequenceShard,
+    make_ring_sequence_shard,
+    resolve_cp_group,
+)
+from .ring_layout import make_cp1_sp_sequence_shard
 from .state import KVStack, PastKVAnchors
 from .tree import SegmentId, SegmentPlan, SegmentSpec
 
@@ -207,22 +213,35 @@ def validate_replay_plan(
     cp_size: int = 1,
     active_segment_ids: frozenset[SegmentId] | None = None,
 ) -> None:
-    """Fail before model execution when native TP+SP cannot split a segment.
+    """Validate each Segment's physical sequence alignment before collectives.
 
-    Unlike Ring CP's virtual padding, this path must not change native GEMM
-    shapes by silently padding an odd local sequence.
+    CP>1 uses joint Zigzag Ring / native SP alignment. CP1 owns the full
+    Segment and uses contiguous trailing padding only when native SP is on.
     """
     config = getattr(prepared_model.model, "config", None)
     tp_size = getattr(config, "tensor_model_parallel_size", 1)
-    if cp_size == 1 and tp_size > 1 and getattr(config, "sequence_parallel", False):
-        for segment in plan.segments.values():
-            if active_segment_ids is not None and segment.segment_id not in active_segment_ids:
-                continue
-            if segment.length % tp_size:
-                raise ValueError(
-                    f"segment {segment.segment_id} length={segment.length} must be divisible by "
-                    f"TP={tp_size} for sequence_parallel=True with CP=1; native GEMM shapes are not padded"
-                )
+    if tp_size <= 1 or not getattr(config, "sequence_parallel", False):
+        return
+    for segment in plan.segments.values():
+        if active_segment_ids is not None and segment.segment_id not in active_segment_ids:
+            continue
+        if cp_size > 1:
+            physical_length = make_ring_sequence_shard(
+                segment.length,
+                cp_rank=0,
+                cp_size=cp_size,
+                sp_tp_size=tp_size,
+            ).local_length
+        else:
+            physical_length = make_cp1_sp_sequence_shard(
+                segment.length,
+                sp_tp_size=tp_size,
+            ).local_length
+        if physical_length % tp_size:
+            raise ValueError(
+                f"segment {segment.segment_id} logical_length={segment.length} "
+                f"has physical local_length={physical_length} not divisible by TP={tp_size}"
+            )
 
 
 class SegmentExecutor:
@@ -288,6 +307,10 @@ class SegmentExecutor:
         self.kv_stack = KVStack() if kv_stack is None else kv_stack
         self.loss_scale_func = loss_scale_func
         self.cp_group = cp_group
+        config = getattr(prepared_model.model, "config", None)
+        self.sp_tp_size = (
+            getattr(config, "tensor_model_parallel_size", 1) if getattr(config, "sequence_parallel", False) else 1
+        )
         if cp_group is None:
             if ring_runtime is not None:
                 raise ValueError("ring_runtime requires a cp_group")
@@ -302,12 +325,18 @@ class SegmentExecutor:
                     raise TypeError("ring_runtime must be a RingCPBackend")
                 if (ring_runtime.parallel_size, ring_runtime.parallel_rank) != (self.cp_size, self.cp_rank):
                     raise ValueError("RingCPBackend coordinates do not match initialized CP group")
+                if ring_runtime.sp_tp_size != self.sp_tp_size:
+                    raise ValueError(
+                        "RingCPBackend TP/SP alignment does not match the prepared model: "
+                        f"expected {self.sp_tp_size}, got {ring_runtime.sp_tp_size}"
+                    )
                 self.ring_runtime = ring_runtime
             else:
                 self.ring_runtime = RingCPBackend(
                     cp_group,
                     parallel_size=self.cp_size,
                     parallel_rank=self.cp_rank,
+                    sp_tp_size=self.sp_tp_size,
                 )
             for segment in plan.segments.values():
                 try:
@@ -494,6 +523,7 @@ class SegmentExecutor:
             ),
             attention_backend=attention_backend,
             compact_new_kv=no_grad,
+            local_physical_suffix_length=(shard.local_length if not self.cp_enabled and self.sp_tp_size > 1 else None),
         )
         rope_context = (
             disable_bound_context_parallel_sharding(self.model.rotary_pos_emb) if self.cp_enabled else nullcontext()
@@ -536,6 +566,11 @@ class SegmentExecutor:
 
     def _segment_shard(self, segment: SegmentSpec) -> SequenceShard:
         if not self.cp_enabled:
+            if self.sp_tp_size > 1:
+                return make_cp1_sp_sequence_shard(
+                    segment.length,
+                    sp_tp_size=self.sp_tp_size,
+                )
             return SequenceShard.full(segment.length)
         if self.ring_runtime is None:
             raise RuntimeError("CP execution is missing its backend")

@@ -98,14 +98,47 @@ class PastKVAnchors:
         return _concatenate_kv(tuple((entry.shard, entry.key_values) for entry in self.entries))
 
 
+def _logical_cp1_kv_tensor(tensor: Tensor, shard: SequenceShard) -> Tensor:
+    """Trim CP1's trailing physical padding without breaking autograd."""
+
+    if shard.cp_size != 1:
+        raise RuntimeError("logical CP1 KV trimming requires a size-one shard")
+    if shard.valid_local_length != shard.global_length:
+        raise RuntimeError(
+            "CP1 Prefix shard must own every logical token: "
+            f"valid={shard.valid_local_length}, logical={shard.global_length}"
+        )
+    if shard.local_length == shard.global_length:
+        return tensor
+    return tensor[: shard.global_length]
+
+
 def _concatenate_kv(entries: tuple[tuple[SequenceShard, Mapping[int, KVPair]], ...]) -> Mapping[int, KVPair]:
     if any(shard.cp_size != 1 for shard, _ in entries):
         raise RuntimeError("sharded KV must be consumed through a context-parallel attention backend")
-    if len(entries) <= 1:
-        return entries[0][1] if entries else MappingProxyType({})
+    if not entries:
+        return MappingProxyType({})
+    if len(entries) == 1:
+        shard, key_values = entries[0]
+        if shard.local_length == shard.global_length:
+            return key_values
+        return MappingProxyType(
+            {
+                layer: tuple(_logical_cp1_kv_tensor(tensor, shard) for tensor in pair)
+                for layer, pair in key_values.items()
+            }
+        )
+
+    # Trim each Segment's tail before concatenating its logical Prefix KV.
     return MappingProxyType(
         {
-            layer: tuple(torch.cat([kv[layer][index] for _, kv in entries], dim=0) for index in (0, 1))
+            layer: tuple(
+                torch.cat(
+                    [_logical_cp1_kv_tensor(key_values[layer][index], shard) for shard, key_values in entries],
+                    dim=0,
+                )
+                for index in (0, 1)
+            )
             for layer in entries[0][1]
         }
     )

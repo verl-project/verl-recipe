@@ -1,4 +1,4 @@
-"""TPR-aware Megatron activation recomputation.
+"""Experimental TPR-aware Full Uniform(1) activation recomputation.
 
 Do not patch global Megatron/MindSpeed code.  On a TPR model instance, replace
 only TransformerBlock._checkpointed_forward.  Keep the *native* Megatron
@@ -6,7 +6,8 @@ tensor_parallel.checkpoint (including its TP RNG handling) but make each
 layer's external K/V explicit checkpoint outputs.  Each replay gets a fresh
 TPR collector; the prefix anchors and CP backend remain shared references.
 
-Scope: dense FA, Megatron full/uniform/1 recomputation, PP=1.
+Scope: dense FA, full/uniform/1, PP=1. Pre-integration NPU gates passed;
+the combined PR7-Main path still needs fresh NPU revalidation.
 """
 
 from __future__ import annotations
@@ -34,7 +35,7 @@ def validate_tpr_recompute_config(config: Any) -> bool:
         or getattr(config, "recompute_method", None) != "uniform"
         or getattr(config, "recompute_num_layers", None) != 1
     ):
-        raise NotImplementedError("TPR recompute supports only full/uniform/1")
+        raise NotImplementedError("TPR recompute prototype supports only full/uniform/1")
     if getattr(config, "fp8", None) not in (False, None) or getattr(config, "fp4", None):
         raise NotImplementedError("TPR recompute does not support FP8/FP4")
     if getattr(config, "cpu_offloading", False) or getattr(config, "swap_attention", False):

@@ -108,7 +108,7 @@ The script requires only `bash`, `git`, `awk`, and `pip`/`pip3` on `PATH`. It do
 - [partial_rollout](./partial_rollout/): synchronous RL with cross-step rollout interruption + resume to reclaim long-tail GPU bubbles ([APRIL](https://arxiv.org/pdf/2509.18521)-style).
 - [verl_tinker](./verl_tinker/): Tinker-compatible HTTP server backed by VeRL actors, with separate Tinker cookbook client examples.
 - [specRL/rl_spec](./specRL/rl_spec/): accelerating RL rollout with a co-adapted diffusion drafter ([DFlash](https://github.com/z-lab/dflash)), via Split-KV context parallelism for drafter training and entropy-boosted anchor sampling.
-- [tpr](./tpr/): training-side tree prefix reuse for multi-trajectory PPO training.
+- [tpr](./tpr/): pluggable Tree Prefix Reuse execution path for VERL Megatron Actor training; includes a Uni-Agent example.
 - TBA...
 
 ## Contribution

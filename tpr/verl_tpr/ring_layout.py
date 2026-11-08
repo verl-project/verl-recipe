@@ -178,6 +178,31 @@ def round_up_sequence_length(logical_length: int, alignment: int) -> int:
     return ((logical_length + alignment - 1) // alignment) * alignment
 
 
+def make_cp1_sp_sequence_shard(
+    global_length: int,
+    *,
+    sp_tp_size: int,
+) -> SequenceShard:
+    """Return a contiguous CP1 shard padded for native Megatron TP+SP.
+
+    CP1 owns the complete logical Segment. When sequence parallelism is
+    enabled, its physical sequence must be divisible by TP so Megatron can
+    scatter the sequence dimension evenly across TP ranks. Padding is kept
+    as a trailing physical range and excluded by the logical length.
+    """
+
+    _validate_integer("global_length", global_length, minimum=1)
+    _validate_integer("sp_tp_size", sp_tp_size, minimum=1)
+    padded_length = round_up_sequence_length(global_length, sp_tp_size)
+    return SequenceShard(
+        global_length,
+        ((0, padded_length),),
+        cp_rank=0,
+        cp_size=1,
+        padded_length=padded_length,
+    )
+
+
 def iter_valid_sequence_slices(
     shard: SequenceShard,
 ) -> tuple[tuple[SequenceRange, slice], ...]:
@@ -291,8 +316,14 @@ def make_ring_sequence_shard(
     cp_rank: int,
     cp_size: int,
     padded_length: int | None = None,
+    sp_tp_size: int = 1,
 ) -> SequenceShard:
-    """Return MindSpeed's symmetric two-range causal Ring shard."""
+    """Return a Zigzag Ring shard with optional native TP/SP alignment.
+
+    `sp_tp_size=1` keeps the existing Ring CP layout when sequence parallelism
+    is disabled. With SP, every CP-local physical segment must also be
+    divisible by the tensor-parallel size.
+    """
 
     if not isinstance(global_length, int) or isinstance(global_length, bool) or global_length <= 0:
         raise ValueError(f"global_length must be a positive integer, got {global_length!r}")
@@ -300,12 +331,17 @@ def make_ring_sequence_shard(
         raise ValueError(f"Ring CP requires cp_size greater than one, got {cp_size!r}")
     if not isinstance(cp_rank, int) or isinstance(cp_rank, bool) or not 0 <= cp_rank < cp_size:
         raise ValueError(f"cp_rank must be in [0, {cp_size}), got {cp_rank!r}")
+    _validate_integer("sp_tp_size", sp_tp_size, minimum=1)
     chunk_count = 2 * cp_size
+    # Zigzag Ring needs two equal chunks per CP rank. Megatron native SP
+    # further partitions each CP-local segment over TP, so both constraints
+    # apply to the same physical length.
+    alignment = math.lcm(chunk_count, cp_size * sp_tp_size)
     if padded_length is None:
-        padded_length = round_up_sequence_length(global_length, chunk_count)
-    if padded_length < global_length or padded_length % chunk_count != 0:
+        padded_length = round_up_sequence_length(global_length, alignment)
+    if padded_length < global_length or padded_length % alignment != 0:
         raise ValueError(
-            f"padded_length must cover {global_length} and be divisible by {chunk_count}, got {padded_length}"
+            f"padded_length must cover {global_length} and be divisible by {alignment}, got {padded_length}"
         )
     chunk_length = padded_length // chunk_count
     first_start = cp_rank * chunk_length

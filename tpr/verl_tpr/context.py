@@ -123,6 +123,8 @@ class TPRAttentionContext:
     attention_backend: TPRAttentionBackend | None = None
 
     compact_new_kv: bool = False
+    # CP1 SP may pad the physical suffix; suffix_length stays logical.
+    local_physical_suffix_length: int | None = None
     _new_key_values: dict[int, KVPair] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -132,6 +134,11 @@ class TPRAttentionContext:
         ):
             if type(value) is not int or value < minimum:
                 raise ValueError(f"{name} must be an integer >= {minimum}, got {value!r}")
+        if self.local_physical_suffix_length is not None:
+            if type(self.local_physical_suffix_length) is not int or self.local_physical_suffix_length < 1:
+                raise ValueError("local_physical_suffix_length must be a positive integer")
+            if self.attention_backend is None and self.local_physical_suffix_length < self.suffix_length:
+                raise ValueError("CP1 local physical suffix length cannot be shorter than its logical Segment")
         if not isinstance(self.compact_new_kv, bool):
             raise TypeError("compact_new_kv must be a bool")
         if self.prefix_length == 0:
@@ -166,7 +173,9 @@ class TPRAttentionContext:
 
     @property
     def local_suffix_length(self) -> int:
-        return self.suffix_length if self.attention_backend is None else self.attention_backend.local_suffix_length
+        if self.attention_backend is not None:
+            return self.attention_backend.local_suffix_length
+        return self.suffix_length if self.local_physical_suffix_length is None else self.local_physical_suffix_length
 
     def new_collector(self) -> TPRAttentionContext:
         """Collect checkpoint K/V while sharing immutable prefix state.
@@ -181,6 +190,7 @@ class TPRAttentionContext:
             suffix_rotary_pos_emb=self.suffix_rotary_pos_emb,
             attention_backend=self.attention_backend,
             compact_new_kv=False,
+            local_physical_suffix_length=self.local_physical_suffix_length,
         )
 
     @property

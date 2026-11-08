@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "verl-tpr"
+version = "0.1.0.dev0"
+description = "Tree Prefix Reuse execution path for VERL Megatron Actor training"
+requires-python = ">=3.10,<3.13"
+license = {text = "Apache-2.0"}
+# Dependencies (VERL, Megatron, torch and the NPU stack) belong to the
+# supported VERL environment; this package does not install or replace them.
+dependencies = []
+
+[tool.setuptools]
+packages = ["verl_tpr"]
