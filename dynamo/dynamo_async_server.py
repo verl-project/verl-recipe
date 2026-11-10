@@ -1192,7 +1192,7 @@ class DynamoHttpServer:
     def _spawn_sglang_sidecar_shard(
         self,
         *,
-        spec: "_DynamoWorkerSpec",
+        spec: _DynamoWorkerSpec,
         spec_idx: int,
         n_specs: int,
         served_model_name: str,

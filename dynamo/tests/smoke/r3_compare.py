@@ -160,10 +160,7 @@ def compare_one(ref: dict, cand: dict, prompt_len: int, layers: int, topk: int, 
     a, b = ref_r[:rows], cand_r[:rows]
     exact = np.all(a == b, axis=-1)  # (rows, layers)
     as_set = np.all(np.sort(a, axis=-1) == np.sort(b, axis=-1), axis=-1)
-    msg = (
-        f"routed_experts {rows} rows x {layers} layers: exact {exact.mean():.4%}, "
-        f"same top-k set {as_set.mean():.4%}"
-    )
+    msg = f"routed_experts {rows} rows x {layers} layers: exact {exact.mean():.4%}, same top-k set {as_set.mean():.4%}"
     if not as_set.all():
         pos, layer = np.argwhere(~as_set)[0]
         res.fail(msg + f"; first set mismatch at position {pos} layer {layer}: {a[pos, layer]} vs {b[pos, layer]}")

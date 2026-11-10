@@ -112,7 +112,9 @@ def sglang_launch_mode(sglang_cfg: Optional[dict]) -> str:
     """
     mode = str((sglang_cfg or {}).get("launch_mode") or LAUNCH_MODE_WORKER).strip().lower()
     if mode not in _LAUNCH_MODES:
-        raise ValueError(f"rollout.engine_kwargs.dynamo.sglang.launch_mode must be one of {_LAUNCH_MODES}, got {mode!r}")
+        raise ValueError(
+            f"rollout.engine_kwargs.dynamo.sglang.launch_mode must be one of {_LAUNCH_MODES}, got {mode!r}"
+        )
     return mode
 
 

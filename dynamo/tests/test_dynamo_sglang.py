@@ -1495,9 +1495,7 @@ def test_r3_reads_text_config_for_multimodal_wrappers():
 )
 def test_r3_completed_turn_without_exact_routing_raises(meta, match):
     with pytest.raises(RuntimeError, match=match):
-        _r3_server()._sglang_generate_response_to_token_output(
-            _sglang_response([5, 6, 2], **meta), True, prompt_len=4
-        )
+        _r3_server()._sglang_generate_response_to_token_output(_sglang_response([5, 6, 2], **meta), True, prompt_len=4)
 
 
 def test_r3_aborted_partial_keeps_tokens_only_with_routing():
