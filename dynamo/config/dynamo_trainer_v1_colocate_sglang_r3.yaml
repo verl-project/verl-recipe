@@ -1,0 +1,76 @@
+# V1 colocate_async on Megatron with rollout routing replay (R3) through the
+# Dynamo SGLang sidecar and the frontend's native /generate.
+#
+# R3 needs all three rollout switches below; the server refuses any other
+# combination at launch:
+#   * engine=sglang + sglang.launch_mode=sidecar: stock SGLang engine with
+#     --enable-return-routed-experts, fronted by dynamo.sglang.sidecar
+#   * generate_api=generate: SGLang's own /generate body, whose
+#     meta_info.routed_experts carries the per-token expert ids
+#   * rollout.enable_rollout_routing_replay=true
+# and the actor replays them with megatron.router_replay.mode=R3.
+#
+# Parallelism defaults fit Qwen3-30B-A3B-class MoE on 1 node x 8 H100 (the
+# layout of the 8gpu_64k Uni-Agent run); override for other models.
+
+hydra:
+  searchpath:
+    - pkg://verl/trainer/config
+
+defaults:
+  - ppo_megatron_trainer
+  - dynamo_base
+  - _self_
+
+trainer:
+  use_v1: true
+  v1:
+    trainer_mode: colocate_async
+    colocate_async:
+      num_warmup_batches: 1
+
+transfer_queue:
+  enable: true
+
+actor_rollout_ref:
+  hybrid_engine: true
+  model:
+    use_remove_padding: true
+  actor:
+    use_dynamic_bsz: true
+    use_kl_loss: false
+    megatron:
+      use_mbridge: true
+      param_offload: true
+      optimizer_offload: true
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 2
+      context_parallel_size: 1
+      expert_model_parallel_size: 4
+      expert_tensor_parallel_size: 1
+      router_replay:
+        mode: R3
+      override_transformer_config:
+        moe_grouped_gemm: true
+        moe_permute_fusion: true
+        moe_token_dispatcher_type: alltoall
+        moe_router_dtype: fp32
+        recompute_method: uniform
+        recompute_granularity: full
+        recompute_num_layers: 1
+  rollout:
+    tensor_model_parallel_size: 4
+    free_cache_engine: true
+    enable_sleep_mode: true
+    calculate_log_probs: true
+    enable_rollout_routing_replay: true
+    agent:
+      agent_loop_manager_class: null
+    engine_kwargs:
+      dynamo:
+        engine: sglang
+        generate_api: generate
+        sglang:
+          launch_mode: sidecar
+        thunderagent:
+          enabled: false

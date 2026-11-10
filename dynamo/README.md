@@ -194,8 +194,17 @@ base64 int32 reshaped to `(seq, num_hidden_layers, num_experts_per_tok)`, coveri
 sequence (`prompt + output - 1` rows, checked). Partial-rollout resumes are stitched by
 verl's `FullyAsyncLLMServerClient`, which keeps only the new rows. An aborted attempt
 without complete routing is dropped and retried, so a gap cannot shift later positions.
-[`tests/smoke/r3_compare.py`](tests/smoke/r3_compare.py) compares token ids, logprobs and
-routed experts against a stock SGLang server.
+[`config/dynamo_trainer_v1_colocate_sglang_r3.yaml`](config/dynamo_trainer_v1_colocate_sglang_r3.yaml)
+sets all of these and Megatron `router_replay.mode=R3`. Its smoke,
+[`tests/smoke/smoke_dynamo_v1_colocate_sglang_r3.sh`](tests/smoke/smoke_dynamo_v1_colocate_sglang_r3.sh),
+runs 3 GSM8K steps on a 30B-A3B MoE on 8 GPUs. To check the routing path on its own,
+[`tests/smoke/run_r3_compare.sh`](tests/smoke/run_r3_compare.sh) starts a stock SGLang server
+and the sidecar stack side by side. It then runs
+[`r3_compare.py`](tests/smoke/r3_compare.py) to compare token ids, logprobs and routed experts
+on the same greedy requests.
+
+Loading a large checkpoint from network storage can exceed the default 600 s startup budget.
+Raise it with `VERL_DYNAMO_FE_READY_TIMEOUT`, which also sets the sidecar's gRPC deadline.
 
 - **V1:** keep `agent.agent_loop_manager_class=null` to use TransferQueue.
   Current Uni-Agent instead uses the [Gateway adapter](uniagent_gateway.py).
