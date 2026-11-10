@@ -1183,3 +1183,224 @@ def test_facade_imports_without_vllm(monkeypatch):
     # the vLLM subclass still exists, but instantiating it must say why it cannot work
     with pytest.raises(RuntimeError, match="needs the vLLM package"):
         mod.VllmDynamoServerAdapter()
+
+
+# --------------------------------------------------------------------------- #
+# native /generate data plane (engine_kwargs.dynamo.generate_api=generate)
+# --------------------------------------------------------------------------- #
+
+
+def _native_server(dynamo_cfg=None, **rollout_cfg):
+    cfg = {"engine": "sglang", "generate_api": "generate", "sglang": {"launch_mode": "sidecar"}}
+    cfg.update(dynamo_cfg or {})
+    rollout = {"prompt_length": 100, "response_length": 50}
+    rollout.update(rollout_cfg)
+    server = _make_server(cfg, **rollout)
+    server.global_steps = 3
+    server.model_config.tokenizer = SimpleNamespace(eos_token_id=2, pad_token_id=0)
+    return server
+
+
+def _sglang_response(output_ids, finish="stop", logprobs=True, **meta):
+    meta_info = {"finish_reason": finish if isinstance(finish, dict) else {"type": finish}}
+    meta_info["completion_tokens"] = len(output_ids)
+    if logprobs:
+        meta_info["output_token_logprobs"] = [[-0.5 - i, tok, None] for i, tok in enumerate(output_ids)]
+    meta_info.update(meta)
+    return {"output_ids": list(output_ids), "meta_info": meta_info}
+
+
+def test_generate_api_defaults_to_completions_and_is_validated():
+    assert _make_server({"engine": "sglang"})._generate_api() == "completions"
+    assert _native_server()._use_native_generate() is True
+    with pytest.raises(ValueError, match="generate_api"):
+        _make_server({"engine": "sglang", "generate_api": "chat"})._generate_api()
+    # vLLM's /inference/v1/generate is a different body; refuse rather than mis-speak it
+    with pytest.raises(ValueError, match="engine=sglang only"):
+        _make_server({"engine": "vllm", "generate_api": "generate"})._generate_api()
+
+
+def test_native_payload_mirrors_verl_sglang_request():
+    server = _native_server()
+    payload = server._build_frontend_generate_payload(
+        [1, 2, 3],
+        {
+            "temperature": 1.0,
+            "top_p": 0.9,
+            "top_k": -1,
+            "repetition_penalty": 1.0,
+            "logprobs": True,
+            "max_tokens": 20,
+            "prompt_logprobs": None,
+            "nvext": {"extra_fields": ["engine_data"]},
+            "stop_token_ids": [7],
+            "seed": None,
+        },
+        "traj-1-abc",
+    )
+    assert payload == {
+        "rid": "traj-1-abc",
+        "input_ids": [1, 2, 3],
+        "sampling_params": {
+            "max_new_tokens": 20,
+            "temperature": 1.0,
+            "top_p": 0.9,
+            "top_k": -1,
+            "repetition_penalty": 1.0,
+            "stop_token_ids": [7],
+        },
+        "return_logprob": True,
+        "stream": False,
+    }
+
+
+@pytest.mark.parametrize(
+    "prompt_len,sampling,expected",
+    [
+        (10, {}, 50),  # default: response_length
+        (120, {}, 30),  # default bounded by the remaining budget (100 + 50 - 120)
+        (120, {"max_tokens": 40}, 30),  # explicit budget bounded too
+        (10, {"max_new_tokens": 7, "max_tokens": 40}, 7),  # SGLang's own name wins
+        (200, {}, 1),  # never below 1, as on the completions path
+    ],
+)
+def test_native_max_new_tokens_matches_the_completions_budget(prompt_len, sampling, expected):
+    server = _native_server()
+    payload = server._build_frontend_generate_payload(list(range(prompt_len)), dict(sampling), "r")
+    assert payload["sampling_params"]["max_new_tokens"] == expected
+    assert "max_tokens" not in payload["sampling_params"]
+
+
+def test_native_response_keeps_engine_ids_and_checked_logprobs():
+    out = _native_server()._sglang_generate_response_to_token_output(_sglang_response([5, 6, 2]), True)
+    assert out.token_ids == [5, 6, 2]
+    assert out.log_probs == [-0.5, -1.5, -2.5]
+    assert out.stop_reason == "completed"
+    assert out.extra_fields == {"global_steps": 3}
+    length = _native_server()._sglang_generate_response_to_token_output(
+        _sglang_response([5, 6], finish={"type": "length", "length": 2}, logprobs=False), False
+    )
+    assert length.log_probs is None and length.stop_reason == "completed"
+
+
+def test_native_plain_abort_keeps_partial_tokens_for_resume():
+    """pause_generation(mode=abort) during a weight sync: keep what was sampled."""
+    server = _native_server()
+    out = server._sglang_generate_response_to_token_output(
+        _sglang_response([5, 6], finish={"type": "abort", "message": "Abort before"}), True
+    )
+    assert out.token_ids == [5, 6] and out.stop_reason == "aborted"
+    empty = server._sglang_generate_response_to_token_output(_sglang_response([], finish="abort"), True)
+    assert empty.token_ids == [] and empty.log_probs == [] and empty.stop_reason == "aborted"
+    assert empty.extra_fields == {}
+
+
+def test_native_error_abort_raises():
+    finish = {"type": "abort", "message": "input too long", "status_code": 400, "err_type": "BadRequest"}
+    with pytest.raises(RuntimeError, match="input too long"):
+        _native_server()._sglang_generate_response_to_token_output(_sglang_response([5], finish=finish), False)
+
+
+def test_native_empty_completion_is_loud_not_a_fake_eos():
+    with pytest.raises(RuntimeError, match="no output_ids"):
+        _native_server()._sglang_generate_response_to_token_output(_sglang_response([], finish="stop"), False)
+
+
+def test_native_truncated_sequence_is_refused():
+    data = _sglang_response([5, 6], finish="stop", completion_tokens=3)
+    with pytest.raises(RuntimeError, match="completion_tokens=3"):
+        _native_server()._sglang_generate_response_to_token_output(data, False)
+
+
+def test_native_logprobs_must_align_with_output_ids():
+    data = _sglang_response([5, 6], finish="stop")
+    data["meta_info"]["output_token_logprobs"][1][1] = 9
+    with pytest.raises(RuntimeError, match="does not match"):
+        _native_server()._sglang_generate_response_to_token_output(data, True)
+    short = _sglang_response([5, 6], finish="stop")
+    short["meta_info"]["output_token_logprobs"] = short["meta_info"]["output_token_logprobs"][:1]
+    with pytest.raises(RuntimeError, match="does not cover"):
+        _native_server()._sglang_generate_response_to_token_output(short, True)
+    # an aborted response with inconsistent logprobs is dropped for a retry, not trained on
+    short["meta_info"]["finish_reason"] = {"type": "abort"}
+    out = _native_server()._sglang_generate_response_to_token_output(short, True)
+    assert out.token_ids == [] and out.stop_reason == "aborted"
+
+
+@pytest.mark.parametrize("output_ids", [["5"], [5.0], [True], "56"])
+def test_native_non_integer_output_ids_are_rejected(output_ids):
+    data = _sglang_response([], finish="stop", logprobs=False)
+    data["output_ids"] = output_ids
+    with pytest.raises(RuntimeError, match="not a list of token ids"):
+        _native_server()._sglang_generate_response_to_token_output(data, False)
+
+
+def test_native_unknown_finish_reason_is_rejected():
+    with pytest.raises(RuntimeError, match="unknown finish_reason"):
+        _native_server()._sglang_generate_response_to_token_output(_sglang_response([5], finish=None), False)
+
+
+@pytest.mark.asyncio
+async def test_generate_dispatches_to_native_route_with_same_headers():
+    server = _native_server()
+    server._server_address = "10.0.0.1"
+    server._server_port = 8000
+    server._generation_resumed = asyncio.Event()
+    server._generation_resumed.set()
+    posts = []
+
+    async def fake_post(payload, request_id, http_request_id=None, url=None):
+        posts.append((payload, request_id, http_request_id, url))
+        return 200, json.dumps(_sglang_response([5, 2]))
+
+    server._frontend_post = fake_post
+    out = await server.generate([1, 2, 3], {"logprobs": True, "temperature": 1.0}, "traj-7")
+    assert out.token_ids == [5, 2] and out.log_probs == [-0.5, -1.5]
+    payload, request_id, http_request_id, url = posts[0]
+    assert url == "http://10.0.0.1:8000/generate"
+    # trajectory id stays the affinity/session key; each request gets a unique id
+    assert request_id == "traj-7" and http_request_id.startswith("traj-7-")
+    assert payload["rid"] == http_request_id and payload["input_ids"] == [1, 2, 3]
+
+
+@pytest.mark.asyncio
+async def test_native_frontend_error_during_pause_is_reported_as_aborted():
+    server = _native_server()
+    server._server_address = "10.0.0.1"
+    server._server_port = 8000
+    server._generation_resumed = asyncio.Event()
+    server._generation_resumed.set()
+
+    async def failing_post(payload, request_id, http_request_id=None, url=None):
+        server._generation_resumed.clear()  # abort_all_requests ran while in flight
+        return 503, "engine paused"
+
+    server._frontend_post = failing_post
+    out = await server.generate([1], {"logprobs": True}, "traj-8")
+    assert out.token_ids == [] and out.stop_reason == "aborted"
+
+
+def test_frontend_mounts_native_generate_only_when_selected(monkeypatch, tmp_path):
+    started = []
+
+    class _Proc:
+        def __init__(self, cmd, env=None, stdout=None, stderr=None):
+            started.append(env)
+
+    monkeypatch.setattr("recipe.dynamo.dynamo_async_server.subprocess.Popen", _Proc)
+    monkeypatch.setenv("VERL_DYNAMO_LOG_DIR", str(tmp_path))
+    monkeypatch.delenv("DYN_SGLANG_ENABLE_GENERATE", raising=False)
+    for cfg, expected in (({}, None), ({"generate_api": "generate"}, "1")):
+        server = _make_server({"engine": "sglang", **cfg})
+        server.replica_rank = 0
+        server._frontend_process = None
+        server._frontend_port = 8000
+        server._router_mode = "round-robin"
+        server._namespace = "ns"
+        server._allocated_tcp_ports = set()
+        server._server_address = "127.0.0.1"
+        server._dynamo_env_vars = lambda: {}
+        server._frontend_router_args = lambda: []
+        server._start_frontend()
+        server._frontend_log_fp.close()
+        assert started[-1].get("DYN_SGLANG_ENABLE_GENERATE") == expected

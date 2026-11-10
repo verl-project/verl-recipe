@@ -139,6 +139,7 @@ The shared defaults are in [dynamo_base.yaml](config/dynamo_base.yaml).
 | `request_completion_token_ids` | Return exact generated token IDs for RL |
 | `enable_worker_system_metrics` | Required for SGLang's `dynamo.sglang` worker control routes |
 | `sglang.launch_mode` | `worker` (default, `dynamo.sglang`) or `sidecar` (see below) |
+| `generate_api` | `completions` (default, `/v1/completions`) or `generate` (SGLang-native `/generate`, SGLang only) |
 | `free_engine_on_train` | Must match `rollout.free_cache_engine` |
 
 ### SGLang sidecar mode
@@ -172,6 +173,17 @@ until `continue_generation`, which resume sends only after every released tag is
 restored. A request routed during that window waits; it does not reach freed memory.
 The sidecar treats only a closed engine-state stream as engine loss, so pausing does
 not make it exit.
+
+`generate_api: generate` sends each turn to the frontend's SGLang-native `/generate`
+(the recipe sets `DYN_SGLANG_ENABLE_GENERATE=1` on the frontend) with the body verl's
+native SGLang server builds: `input_ids`, `sampling_params` passed through with the
+budget as `max_new_tokens`, and `return_logprob`. The response is SGLang's own
+`output_ids` and `meta_info`: token ids come straight from the engine, every
+`output_token_logprobs` entry must name the same token, and a plain `abort` keeps its
+partial tokens for partial-rollout resume (an abort with `status_code` raises).
+`request_completion_token_ids` is not needed on this path. Session headers are
+unchanged; ThunderAgent's one-token session-final request still uses
+`/v1/completions`, which the sidecar also serves.
 
 - **V1:** keep `agent.agent_loop_manager_class=null` to use TransferQueue.
   Current Uni-Agent instead uses the [Gateway adapter](uniagent_gateway.py).

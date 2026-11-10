@@ -116,6 +116,17 @@ ENGINE_VLLM = "vllm"
 ENGINE_SGLANG = "sglang"
 _SUPPORTED_ENGINES = (ENGINE_VLLM, ENGINE_SGLANG)
 
+# Frontend data-plane API for token generation (engine_kwargs.dynamo.generate_api).
+# "completions": OpenAI /v1/completions with token-id prompts and nvext token-id
+# extensions (default). "generate": the engine-native /generate route, which takes
+# input_ids and returns the engine's own output_ids/meta_info -- SGLang's format
+# today. The frontend mounts it only with DYN_SGLANG_ENABLE_GENERATE set.
+GENERATE_API_COMPLETIONS = "completions"
+GENERATE_API_NATIVE = "generate"
+_GENERATE_APIS = (GENERATE_API_COMPLETIONS, GENERATE_API_NATIVE)
+_SGLANG_ENABLE_GENERATE_ENV = "DYN_SGLANG_ENABLE_GENERATE"
+_SGLANG_GENERATE_PATH = "/generate"
+
 
 @dataclass(frozen=True)
 class _DynamoWorkerSpec:
@@ -332,6 +343,25 @@ class DynamoHttpServer:
     def _sglang_cfg(self) -> dict:
         """Return ``rollout.engine_kwargs.dynamo.sglang`` dict (or empty)."""
         return self._dynamo_cfg().get("sglang", {}) or {}
+
+    def _generate_api(self) -> str:
+        """``engine_kwargs.dynamo.generate_api``: ``completions`` (default) or ``generate``.
+
+        ``generate`` speaks SGLang's native request/response body, so it is refused
+        for vLLM, whose ``/inference/v1/generate`` is a different format.
+        """
+        api = str(self._dynamo_cfg().get("generate_api") or GENERATE_API_COMPLETIONS).strip().lower()
+        if api not in _GENERATE_APIS:
+            raise ValueError(f"rollout.engine_kwargs.dynamo.generate_api must be one of {_GENERATE_APIS}, got {api!r}")
+        if api == GENERATE_API_NATIVE and not self._is_sglang():
+            raise ValueError(
+                "rollout.engine_kwargs.dynamo.generate_api=generate is implemented for engine=sglang only; "
+                "vLLM's native /inference/v1/generate has a different request/response format."
+            )
+        return api
+
+    def _use_native_generate(self) -> bool:
+        return self._generate_api() == GENERATE_API_NATIVE
 
     def _sglang_launch_mode(self) -> str:
         """``worker`` (dynamo.sglang, default) or ``sidecar`` (stock SGLang + dynamo.sglang.sidecar)."""
@@ -956,7 +986,12 @@ class DynamoHttpServer:
             # values. A launch-time refusal is the only place it can be caught, which
             # is why an explicit `false` is still honoured (opt out knowingly) while
             # the *unset* default is rejected.
-            if is_sglang and self._dynamo_cfg().get("request_completion_token_ids") is None:
+            # The native /generate path reads output_ids directly and never needs it.
+            if (
+                is_sglang
+                and not self._use_native_generate()
+                and self._dynamo_cfg().get("request_completion_token_ids") is None
+            ):
                 raise ValueError(
                     "engine=sglang requires request_completion_token_ids to be set "
                     "explicitly. Add\n"
@@ -1560,6 +1595,9 @@ class DynamoHttpServer:
         # exits rc=1 — allocate a free port per pool.
         if "DYN_RL_PORT" not in env:
             env["DYN_RL_PORT"] = str(self._allocate_tcp_port(bind_wildcard=True))
+        # The frontend mounts SGLang's native /generate only on request.
+        if self._use_native_generate():
+            env[_SGLANG_ENABLE_GENERATE_ENV] = "1"
 
         cmd = [
             sys.executable,
@@ -1891,6 +1929,10 @@ class DynamoHttpServer:
             # at once, so the id the frontend tracks per request must be unique.
             # The caller's id stays as a readable prefix.
             http_request_id = f"{request_id}-{uuid.uuid4().hex}"
+            if self._use_native_generate():
+                return await self._generate_native(
+                    prompt_ids, sampling_params, request_id, http_request_id, include_log_probs
+                )
             payload = self._build_frontend_completion_payload(prompt_ids, sampling_params, http_request_id)
             status, body_text = await self._frontend_post(payload, request_id, http_request_id)
             if status == 400 and "Unsupported parameter" in body_text:
@@ -1932,6 +1974,191 @@ class DynamoHttpServer:
         host = f"[{self._server_address}]" if is_valid_ipv6_address(self._server_address) else self._server_address
         return f"http://{host}:{self._server_port}/v1/completions"
 
+    # ------------------------------------------------------------------ #
+    # native /generate (engine_kwargs.dynamo.generate_api=generate; SGLang format)
+    # ------------------------------------------------------------------ #
+
+    def _frontend_generate_url(self) -> str:
+        assert self._server_port is not None, "frontend server not ready"
+        host = f"[{self._server_address}]" if is_valid_ipv6_address(self._server_address) else self._server_address
+        return f"http://{host}:{self._server_port}{_SGLANG_GENERATE_PATH}"
+
+    async def _generate_native(
+        self,
+        prompt_ids,
+        sampling_params: dict[str, Any],
+        request_id: str,
+        http_request_id: str,
+        include_log_probs: bool,
+    ):
+        """One SGLang-native ``/generate`` round trip through the Dynamo frontend.
+
+        Same headers as the completions path (``X-Request-Id`` plus the session
+        headers ThunderAgent/affinity add via ``_frontend_headers``), so routing and
+        admission see the request exactly as before. Errors propagate to
+        ``generate()``, which maps a failure during an engine pause to "aborted".
+        """
+        payload = self._build_frontend_generate_payload(prompt_ids, sampling_params, http_request_id)
+        status, body_text = await self._frontend_post(
+            payload, request_id, http_request_id, url=self._frontend_generate_url()
+        )
+        if status != 200:
+            raise RuntimeError(
+                f"Dynamo frontend {_SGLANG_GENERATE_PATH} failed status={status} body={body_text[:2000]!r} "
+                f"payload_summary={self._native_payload_debug_summary(payload)}"
+            )
+        return self._sglang_generate_response_to_token_output(json.loads(body_text), include_log_probs)
+
+    def _native_max_new_tokens(self, sampling_params: dict[str, Any], prompt_len: int) -> int:
+        """Remaining-budget clamp shared with the completions path's rule.
+
+        An explicit ``max_tokens``/``max_new_tokens`` is honoured but bounded by
+        ``prompt_length + response_length - len(prompt)`` (tool observations grow
+        the prompt between turns); the default is ``response_length`` under the
+        same bound. Never below 1, as on the completions path.
+        """
+        max_tokens = sampling_params.pop("max_new_tokens", None)
+        if max_tokens is None:
+            max_tokens = sampling_params.pop("max_tokens", None)
+        else:
+            sampling_params.pop("max_tokens", None)
+        budget = self.config.prompt_length + self.config.response_length - prompt_len
+        if max_tokens is None:
+            max_tokens = min(self.config.response_length, budget)
+        return int(max(1, min(int(max_tokens), max(1, budget))))
+
+    def _build_frontend_generate_payload(
+        self, prompt_ids, sampling_params: dict[str, Any], request_id: str
+    ) -> dict[str, Any]:
+        """SGLang ``GenerateReqInput`` for a token prompt, as verl's native server builds it.
+
+        Sampling keys pass through unchanged (verl's names -- temperature, top_p,
+        top_k, repetition_penalty, stop_token_ids... -- are SGLang's). Only the
+        budget is renamed to ``max_new_tokens``, ``logprobs`` becomes the top-level
+        ``return_logprob``, and the recipe/OpenAI-only keys are dropped. The client
+        ``rid`` is correlation only: the frontend mints its own engine request ID.
+        """
+        from verl.utils.tokenizer import normalize_token_ids
+
+        input_ids = normalize_token_ids(prompt_ids)
+        sp = dict(sampling_params)
+        native_sp: dict[str, Any] = {"max_new_tokens": self._native_max_new_tokens(sp, len(input_ids))}
+        return_logprob = bool(sp.pop("logprobs", False))
+        for key in ("prompt_logprobs", "nvext"):
+            sp.pop(key, None)
+        native_sp.update({key: value for key, value in sp.items() if value is not None})
+        return {
+            "rid": str(request_id),
+            "input_ids": input_ids,
+            "sampling_params": native_sp,
+            "return_logprob": return_logprob,
+            "stream": False,
+        }
+
+    @staticmethod
+    def _native_payload_debug_summary(payload: dict[str, Any]) -> dict[str, Any]:
+        input_ids = payload.get("input_ids") or []
+        return {
+            "keys": sorted(payload.keys()),
+            "input_ids": {"len": len(input_ids), "head": list(input_ids[:8])},
+            "sampling_params": payload.get("sampling_params"),
+            "return_logprob": payload.get("return_logprob"),
+        }
+
+    def _sglang_generate_response_to_token_output(self, data: dict[str, Any], include_log_probs: bool = False):
+        """SGLang ``/generate`` unary response -> verl ``TokenOutput``.
+
+        The frontend joins the engine's incremental chunks (``output_ids`` and
+        ``meta_info.output_token_logprobs`` appended, ``finish_reason`` and
+        ``completion_tokens`` from the last chunk), so this is the engine's own
+        response. Token ids are the engine's sampled ids; there is no text path and
+        no re-encode fallback.
+
+        ``finish_reason.type``: ``stop``/``length`` complete the turn. A plain
+        ``abort`` (pause_generation(mode=abort) during a weight sync, client
+        cancellation) keeps its partial tokens so partial rollout resumes after the
+        sync; an ``abort`` carrying ``status_code``/``err_type`` is an engine error
+        and raises.
+        """
+        if not isinstance(data, dict):
+            raise RuntimeError(f"SGLang /generate response is not an object: {str(data)[:500]}")
+        meta = data.get("meta_info") or {}
+        finish = meta.get("finish_reason")
+        kind = finish.get("type") if isinstance(finish, dict) else finish
+        if kind == "abort" and isinstance(finish, dict) and (finish.get("status_code") or finish.get("err_type")):
+            raise RuntimeError(
+                f"SGLang aborted the request with an error: {finish.get('message')!r} "
+                f"(status_code={finish.get('status_code')}, err_type={finish.get('err_type')})"
+            )
+        if kind not in ("stop", "length", "abort"):
+            raise RuntimeError(f"SGLang /generate returned unknown finish_reason {finish!r}: {str(data)[:500]}")
+        is_aborted = kind == "abort"
+
+        raw_ids = data.get("output_ids")
+        if raw_ids is None:
+            raw_ids = []
+        if not isinstance(raw_ids, list) or not all(isinstance(t, int) and not isinstance(t, bool) for t in raw_ids):
+            raise RuntimeError(f"SGLang /generate output_ids is not a list of token ids: {str(raw_ids)[:300]}")
+        token_ids = list(raw_ids)
+        if not token_ids:
+            if is_aborted:
+                return self._aborted_output(include_log_probs)
+            raise RuntimeError(f"SGLang /generate returned no output_ids for finish_reason={kind!r}")
+
+        # Same guard as the completions path (ai-dynamo/dynamo#14302): the token
+        # array must be the whole sampled sequence. Partial (aborted) arrays exempt.
+        completion_tokens = meta.get("completion_tokens")
+        if not is_aborted and isinstance(completion_tokens, int) and completion_tokens != len(token_ids):
+            raise RuntimeError(
+                f"SGLang /generate returned {len(token_ids)} output_ids but completion_tokens="
+                f"{completion_tokens} (finish_reason={kind!r}); refusing to train on a truncated sequence."
+            )
+
+        log_probs = None
+        if include_log_probs:
+            try:
+                log_probs = self._sglang_output_logprobs(meta, token_ids)
+            except RuntimeError:
+                if is_aborted:
+                    # Partial data from an aborted request is untrusted; let the client retry.
+                    return self._aborted_output(include_log_probs)
+                raise
+        return self._build_token_output(
+            token_ids=token_ids,
+            log_probs=log_probs,
+            stop_reason="aborted" if is_aborted else "completed",
+        )
+
+    @staticmethod
+    def _sglang_output_logprobs(meta: dict[str, Any], token_ids: list[int]) -> list[float]:
+        """``meta_info.output_token_logprobs`` -> per-token logprobs, checked against ``output_ids``.
+
+        Entries are ``[logprob, token_id, text]``. Length and every token id must
+        match the sampled ids: a shifted or short array would assign each logprob
+        to the wrong token and still look plausible in every metric.
+        """
+        entries = meta.get("output_token_logprobs")
+        if not isinstance(entries, list) or len(entries) != len(token_ids):
+            raise RuntimeError(
+                "SGLang /generate output_token_logprobs does not cover the output: "
+                f"{len(entries) if isinstance(entries, list) else entries!r} entries for {len(token_ids)} tokens. "
+                "return_logprob must be true on the request."
+            )
+        log_probs: list[float] = []
+        for position, (entry, token_id) in enumerate(zip(entries, token_ids, strict=True)):
+            if not isinstance(entry, (list, tuple)) or len(entry) < 2:
+                raise RuntimeError(f"malformed output_token_logprobs entry at {position}: {entry!r}")
+            logprob, entry_token = entry[0], entry[1]
+            if entry_token != token_id:
+                raise RuntimeError(
+                    f"output_token_logprobs token {entry_token!r} at position {position} does not match "
+                    f"output_ids token {token_id}"
+                )
+            if logprob is None:
+                raise RuntimeError(f"output_token_logprobs has no logprob at position {position}")
+            log_probs.append(float(logprob))
+        return log_probs
+
     async def _get_http_session(self):
         """Lazily create one keep-alive aiohttp session on the actor loop.
 
@@ -1960,13 +2187,14 @@ class DynamoHttpServer:
             return self._http_session
 
     async def _frontend_post(
-        self, payload: dict[str, Any], request_id: str, http_request_id: Optional[str] = None
+        self,
+        payload: dict[str, Any],
+        request_id: str,
+        http_request_id: Optional[str] = None,
+        url: Optional[str] = None,
     ) -> tuple[int, str]:
-        """POST one completion to the frontend; return ``(status, body_text)``.
-
-        ``request_id`` keys the session headers; ``http_request_id``, when given,
-        is the unique id of this one request.
-        """
+        """POST one request (``/v1/completions`` unless ``url`` is given); return
+        ``(status, body_text)``. ``http_request_id`` is this request's unique id."""
         import aiohttp
 
         headers = self._frontend_headers(request_id)
@@ -1975,7 +2203,7 @@ class DynamoHttpServer:
         session = await self._get_http_session()
         timeout = aiohttp.ClientTimeout(total=self._frontend_request_timeout_s())
         async with session.post(
-            self._frontend_completions_url(),
+            url or self._frontend_completions_url(),
             json=payload,
             headers=headers,
             timeout=timeout,
