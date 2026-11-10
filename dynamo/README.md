@@ -185,6 +185,18 @@ partial tokens for partial-rollout resume (an abort with `status_code` raises).
 unchanged; ThunderAgent's one-token session-final request still uses
 `/v1/completions`, which the sidecar also serves.
 
+Rollout routing replay (`rollout.enable_rollout_routing_replay=True`) is supported on
+exactly this combination: `engine: sglang`, `sglang.launch_mode: sidecar`,
+`generate_api: generate`. Any other combination is refused at launch. The recipe launches
+the engine with `--enable-return-routed-experts` and sets `return_routed_experts` on each
+request. It decodes `meta_info.routed_experts` the way verl's native SGLang server does:
+base64 int32 reshaped to `(seq, num_hidden_layers, num_experts_per_tok)`, covering the full
+sequence (`prompt + output - 1` rows, checked). Partial-rollout resumes are stitched by
+verl's `FullyAsyncLLMServerClient`, which keeps only the new rows. An aborted attempt
+without complete routing is dropped and retried, so a gap cannot shift later positions.
+[`tests/smoke/r3_compare.py`](tests/smoke/r3_compare.py) compares token ids, logprobs and
+routed experts against a stock SGLang server.
+
 - **V1:** keep `agent.agent_loop_manager_class=null` to use TransferQueue.
   Current Uni-Agent instead uses the [Gateway adapter](uniagent_gateway.py).
   The legacy `DynamoAgentLoopManager` only supports V0.

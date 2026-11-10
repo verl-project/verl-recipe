@@ -1404,3 +1404,135 @@ def test_frontend_mounts_native_generate_only_when_selected(monkeypatch, tmp_pat
         server._start_frontend()
         server._frontend_log_fp.close()
         assert started[-1].get("DYN_SGLANG_ENABLE_GENERATE") == expected
+
+
+# --------------------------------------------------------------------------- #
+# rollout routing replay (R3) on the native /generate path
+# --------------------------------------------------------------------------- #
+
+_R3_LAYERS, _R3_TOPK = 3, 2
+
+
+def _r3_server(dynamo_cfg=None, **rollout_cfg):
+    server = _native_server(dynamo_cfg, enable_rollout_routing_replay=True, **rollout_cfg)
+    server.model_config.hf_config = SimpleNamespace(num_hidden_layers=_R3_LAYERS, num_experts_per_tok=_R3_TOPK)
+    return server
+
+
+def _routing(rows):
+    """Deterministic (rows, layers, topk) routing and its SGLang wire form (base64 int32)."""
+    import numpy as np
+
+    arr = np.arange(rows * _R3_LAYERS * _R3_TOPK, dtype=np.int32).reshape(rows, _R3_LAYERS, _R3_TOPK)
+    return arr, base64.b64encode(arr.tobytes()).decode("utf-8")
+
+
+def test_r3_requires_sidecar_and_native_generate():
+    _r3_server()._check_routing_replay_support()  # sidecar + /generate: accepted
+    _native_server()._check_routing_replay_support()  # R3 off: nothing to check
+    refused = (
+        {"generate_api": "completions"},  # /v1/completions cannot carry routed experts
+        {"sglang": {"launch_mode": "worker"}},  # dynamo.sglang worker passthrough unverified
+        {"direct_generate": True},  # bypasses the frontend
+    )
+    for cfg in refused:
+        with pytest.raises(ValueError, match="enable_rollout_routing_replay"):
+            _r3_server(cfg)._check_routing_replay_support()
+    with pytest.raises(ValueError, match="enable_rollout_routing_replay"):
+        _make_server({"engine": "vllm"}, enable_rollout_routing_replay=True)._check_routing_replay_support()
+
+
+def test_r3_engine_flag_and_request_field_follow_the_rollout_flag():
+    assert "--enable-return-routed-experts" in _sidecar_engine_cmd(enable_rollout_routing_replay=True)
+    assert "--enable-return-routed-experts" not in _sidecar_engine_cmd()
+    assert _r3_server()._build_frontend_generate_payload([1, 2], {}, "r")["return_routed_experts"] is True
+    assert "return_routed_experts" not in _native_server()._build_frontend_generate_payload([1, 2], {}, "r")
+
+
+def test_r3_full_sequence_routing_decodes_like_verl_native():
+    """prompt 4 + output 3 -> positions [0, 6): SGLang has not forwarded the last token."""
+    import numpy as np
+
+    expected, wire = _routing(4 + 3 - 1)
+    out = _r3_server()._sglang_generate_response_to_token_output(
+        _sglang_response([5, 6, 2], routed_experts=wire), True, prompt_len=4
+    )
+    assert out.token_ids == [5, 6, 2] and out.stop_reason == "completed"
+    assert out.routed_experts.shape == (6, _R3_LAYERS, _R3_TOPK)
+    assert out.routed_experts.dtype == np.int32
+    np.testing.assert_array_equal(out.routed_experts, expected)
+    # same bytes verl's native server gets from sglang's extract_routed_experts_from_meta_info
+    native = np.frombuffer(base64.b64decode(wire.encode("utf-8")), dtype=np.int32)
+    np.testing.assert_array_equal(out.routed_experts, native.reshape(-1, _R3_LAYERS, _R3_TOPK))
+
+
+def test_r3_off_ignores_routing_in_the_response():
+    _, wire = _routing(6)
+    out = _native_server()._sglang_generate_response_to_token_output(
+        _sglang_response([5, 6, 2], routed_experts=wire), True, prompt_len=4
+    )
+    assert out.routed_experts is None
+
+
+def test_r3_reads_text_config_for_multimodal_wrappers():
+    server = _r3_server()
+    server.model_config.hf_config = SimpleNamespace(
+        text_config=SimpleNamespace(num_hidden_layers=_R3_LAYERS, num_experts_per_tok=_R3_TOPK)
+    )
+    assert server._routed_experts_shape() == (_R3_LAYERS, _R3_TOPK)
+    server.model_config.hf_config = SimpleNamespace(num_hidden_layers=4)  # dense model
+    with pytest.raises(AttributeError, match="num_experts_per_tok"):
+        server._routed_experts_shape()
+
+
+@pytest.mark.parametrize(
+    "meta,match",
+    [
+        ({}, "no meta_info.routed_experts"),  # engine launched without the flag
+        ({"routed_experts": _routing(5)[1]}, "expected prompt\\+output-1"),  # one row short
+        ({"routed_experts": base64.b64encode(b"\x00" * 4 * 7).decode()}, "not a multiple"),
+    ],
+)
+def test_r3_completed_turn_without_exact_routing_raises(meta, match):
+    with pytest.raises(RuntimeError, match=match):
+        _r3_server()._sglang_generate_response_to_token_output(
+            _sglang_response([5, 6, 2], **meta), True, prompt_len=4
+        )
+
+
+def test_r3_aborted_partial_keeps_tokens_only_with_routing():
+    """A kept partial must carry its rows, or the client's next append lands after a gap."""
+    server = _r3_server()
+    abort = {"type": "abort", "message": "Abort before"}
+    _, wire = _routing(4 + 2 - 1)
+    kept = server._sglang_generate_response_to_token_output(
+        _sglang_response([5, 6], finish=abort, routed_experts=wire), True, prompt_len=4
+    )
+    assert kept.token_ids == [5, 6] and kept.stop_reason == "aborted"
+    assert kept.routed_experts.shape == (5, _R3_LAYERS, _R3_TOPK)
+    dropped = server._sglang_generate_response_to_token_output(
+        _sglang_response([5, 6], finish=abort), True, prompt_len=4
+    )
+    assert dropped.token_ids == [] and dropped.stop_reason == "aborted" and dropped.routed_experts is None
+
+
+@pytest.mark.asyncio
+async def test_r3_generate_checks_rows_against_the_sent_prompt():
+    import numpy as np
+
+    server = _r3_server()
+    server._server_address = "10.0.0.1"
+    server._server_port = 8000
+    server._generation_resumed = asyncio.Event()
+    server._generation_resumed.set()
+    expected, wire = _routing(3 + 2 - 1)
+    sent = []
+
+    async def fake_post(payload, request_id, http_request_id=None, url=None):
+        sent.append(payload)
+        return 200, json.dumps(_sglang_response([5, 2], routed_experts=wire))
+
+    server._frontend_post = fake_post
+    out = await server.generate([1, 2, 3], {"logprobs": True}, "traj-r3")
+    assert sent[0]["return_routed_experts"] is True
+    np.testing.assert_array_equal(out.routed_experts, expected)

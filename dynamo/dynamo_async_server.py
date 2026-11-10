@@ -126,6 +126,10 @@ GENERATE_API_NATIVE = "generate"
 _GENERATE_APIS = (GENERATE_API_COMPLETIONS, GENERATE_API_NATIVE)
 _SGLANG_ENABLE_GENERATE_ENV = "DYN_SGLANG_ENABLE_GENERATE"
 _SGLANG_GENERATE_PATH = "/generate"
+# Rollout routing replay (R3): SGLang records the routed experts of every
+# position when launched with this flag and the request sets
+# return_routed_experts; verl's native SGLang server does the same.
+_SGLANG_ROUTED_EXPERTS_FLAG = "--enable-return-routed-experts"
 
 
 @dataclass(frozen=True)
@@ -362,6 +366,40 @@ class DynamoHttpServer:
 
     def _use_native_generate(self) -> bool:
         return self._generate_api() == GENERATE_API_NATIVE
+
+    def _routing_replay_enabled(self) -> bool:
+        return bool(getattr(self.config, "enable_rollout_routing_replay", False))
+
+    def _check_routing_replay_support(self) -> None:
+        """R3 is wired for one path only: SGLang sidecar + native ``/generate``.
+
+        ``/v1/completions`` has no field for routed experts, the direct path goes
+        around the frontend, and the ``dynamo.sglang`` worker's handling of
+        ``return_routed_experts`` is unverified. Training on a run that silently
+        lost its routing would replay nothing while every metric looks normal, so
+        refuse the other combinations at launch.
+        """
+        if not self._routing_replay_enabled():
+            return
+        if not (self._is_sglang_sidecar() and self._use_native_generate()) or self._use_direct_generate():
+            raise ValueError(
+                "rollout.enable_rollout_routing_replay=True needs engine_kwargs.dynamo.engine=sglang, "
+                "dynamo.sglang.launch_mode=sidecar and dynamo.generate_api=generate (and direct_generate "
+                "off): only SGLang's native /generate response carries meta_info.routed_experts."
+            )
+
+    def _routed_experts_shape(self) -> tuple[int, int]:
+        """``(num_hidden_layers, num_experts_per_tok)`` from the HF config, as verl's SGLang server reads it."""
+        hf_config = getattr(self.model_config, "hf_config", None)
+        text_config = getattr(hf_config, "text_config", None) or hf_config
+        layers = getattr(text_config, "num_hidden_layers", None)
+        topk = getattr(text_config, "num_experts_per_tok", None)
+        if not layers or not topk:
+            raise AttributeError(
+                "enable_rollout_routing_replay requires an MoE model config with "
+                "`num_hidden_layers` and `num_experts_per_tok`"
+            )
+        return int(layers), int(topk)
 
     def _sglang_launch_mode(self) -> str:
         """``worker`` (dynamo.sglang, default) or ``sidecar`` (stock SGLang + dynamo.sglang.sidecar)."""
@@ -1001,6 +1039,7 @@ class DynamoHttpServer:
                     "a vLLM-only channel, so generation silently trains on re-encoded "
                     "text). Set it to false explicitly if you really intend that."
                 )
+            self._check_routing_replay_support()
             # Re-checked here (not only in __init__) so a server constructed without
             # __init__ -- the CPU unit tests -- still refuses the split.
             self._check_sleep_mode_pairing()
@@ -1520,6 +1559,8 @@ class DynamoHttpServer:
             # Without this SGLang's torch_memory_saver never arms, and
             # release_memory_occupation silently frees nothing.
             cmd += ["--enable-memory-saver"]
+        if self._routing_replay_enabled():
+            cmd += [_SGLANG_ROUTED_EXPERTS_FLAG]
 
         # Preserve the worker's RL flag. After Dynamo PR #13951 it no longer
         # registers call_tokenizer_manager; cache flush is configured below.
@@ -2007,7 +2048,9 @@ class DynamoHttpServer:
                 f"Dynamo frontend {_SGLANG_GENERATE_PATH} failed status={status} body={body_text[:2000]!r} "
                 f"payload_summary={self._native_payload_debug_summary(payload)}"
             )
-        return self._sglang_generate_response_to_token_output(json.loads(body_text), include_log_probs)
+        return self._sglang_generate_response_to_token_output(
+            json.loads(body_text), include_log_probs, prompt_len=len(payload["input_ids"])
+        )
 
     def _native_max_new_tokens(self, sampling_params: dict[str, Any], prompt_len: int) -> int:
         """Remaining-budget clamp shared with the completions path's rule.
@@ -2047,13 +2090,18 @@ class DynamoHttpServer:
         for key in ("prompt_logprobs", "nvext"):
             sp.pop(key, None)
         native_sp.update({key: value for key, value in sp.items() if value is not None})
-        return {
+        payload = {
             "rid": str(request_id),
             "input_ids": input_ids,
             "sampling_params": native_sp,
             "return_logprob": return_logprob,
             "stream": False,
         }
+        if self._routing_replay_enabled():
+            # Full sequence (routed_experts_start_len=0), as verl's native server
+            # asks; FullyAsyncLLMServerClient keeps only the new rows on a resume.
+            payload["return_routed_experts"] = True
+        return payload
 
     @staticmethod
     def _native_payload_debug_summary(payload: dict[str, Any]) -> dict[str, Any]:
@@ -2065,7 +2113,9 @@ class DynamoHttpServer:
             "return_logprob": payload.get("return_logprob"),
         }
 
-    def _sglang_generate_response_to_token_output(self, data: dict[str, Any], include_log_probs: bool = False):
+    def _sglang_generate_response_to_token_output(
+        self, data: dict[str, Any], include_log_probs: bool = False, prompt_len: Optional[int] = None
+    ):
         """SGLang ``/generate`` unary response -> verl ``TokenOutput``.
 
         The frontend joins the engine's incremental chunks (``output_ids`` and
@@ -2123,11 +2173,62 @@ class DynamoHttpServer:
                     # Partial data from an aborted request is untrusted; let the client retry.
                     return self._aborted_output(include_log_probs)
                 raise
+
+        routed_experts = None
+        if self._routing_replay_enabled():
+            try:
+                routed_experts = self._sglang_routed_experts(meta, prompt_len, len(token_ids))
+            except RuntimeError:
+                if is_aborted:
+                    # An aborted attempt without (complete) routing cannot keep its
+                    # tokens: the client would append the next attempt's rows after a
+                    # gap and misalign every later position. Drop it and retry.
+                    return self._aborted_output(include_log_probs)
+                raise
         return self._build_token_output(
             token_ids=token_ids,
             log_probs=log_probs,
             stop_reason="aborted" if is_aborted else "completed",
+            routed_experts=routed_experts,
         )
+
+    def _sglang_routed_experts(self, meta: dict[str, Any], prompt_len: Optional[int], num_output: int):
+        """``meta_info.routed_experts`` -> ``(seq, num_hidden_layers, num_experts_per_tok)`` int32 array.
+
+        SGLang sends the raw int32 buffer base64-encoded (decoded exactly as
+        ``sglang.srt.state_capturer.routed_experts.extract_routed_experts_from_meta_info``
+        does, without importing sglang into the actor). With
+        ``routed_experts_start_len=0`` it covers positions ``[0, seqlen - 1)``: the
+        last sampled token has not been forwarded yet. The row count is checked when
+        the prompt length is known, since a short array would shift every routing.
+        """
+        import base64
+
+        import numpy as np
+
+        encoded = meta.get("routed_experts")
+        if not isinstance(encoded, str) or not encoded:
+            raise RuntimeError(
+                "SGLang /generate response has no meta_info.routed_experts although "
+                "enable_rollout_routing_replay is on (engine launched without "
+                f"{_SGLANG_ROUTED_EXPERTS_FLAG}, or the frontend dropped the field)"
+            )
+        layers, topk = self._routed_experts_shape()
+        flat = np.frombuffer(base64.b64decode(encoded), dtype=np.int32)
+        if flat.size % (layers * topk):
+            raise RuntimeError(
+                f"SGLang routed_experts has {flat.size} entries, not a multiple of "
+                f"num_hidden_layers*num_experts_per_tok={layers}*{topk}"
+            )
+        routed = flat.reshape(-1, layers, topk)
+        if prompt_len is not None:
+            expected = prompt_len + num_output - 1
+            if routed.shape[0] != expected:
+                raise RuntimeError(
+                    f"SGLang routed_experts covers {routed.shape[0]} positions, expected "
+                    f"prompt+output-1={prompt_len}+{num_output}-1={expected}"
+                )
+        return routed
 
     @staticmethod
     def _sglang_output_logprobs(meta: dict[str, Any], token_ids: list[int]) -> list[float]:
@@ -2632,6 +2733,7 @@ class DynamoHttpServer:
         log_probs: Optional[list[float]] = None,
         stop_reason: Optional[str] = None,
         allow_empty: bool = False,
+        routed_experts: Optional[Any] = None,
     ):
         """Build a verl TokenOutput while preserving AgentLoop shape invariants."""
         from verl.workers.rollout.replica import TokenOutput
@@ -2654,6 +2756,7 @@ class DynamoHttpServer:
         return TokenOutput(
             token_ids=token_ids,
             log_probs=log_probs,
+            routed_experts=routed_experts,
             stop_reason=stop_reason,
             extra_fields=extra_fields,
         )
