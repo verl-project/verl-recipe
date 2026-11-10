@@ -1,9 +1,9 @@
-# Source revision of `verl.experimental.fully_async_policy`
+# fully_async_policy — verl v0.9.1
 UPSTREAM=https://github.com/verl-project/verl.git
 MODE=pinned_commit
-COMMIT=e2ac8f6222801d5e8ce50447b0c3c2d9237e4770
-VERL_COMMIT=e2ac8f6222801d5e8ce50447b0c3c2d9237e4770
-PIP_INSTALL=pip install verl@git+https://github.com/verl-project/verl.git@e2ac8f6222801d5e8ce50447b0c3c2d9237e4770
-GIT_SETUP=git clone https://github.com/verl-project/verl.git && cd verl && git checkout e2ac8f6222801d5e8ce50447b0c3c2d9237e4770 && git submodule update --init --recursive recipe
+COMMIT=1876b06d0a3e4e71e06230be10af14492ca8a75b
+VERL_COMMIT=1876b06d0a3e4e71e06230be10af14492ca8a75b
+PIP_INSTALL=pip install verl@git+https://github.com/verl-project/verl.git@1876b06d0a3e4e71e06230be10af14492ca8a75b
+GIT_SETUP=git clone https://github.com/verl-project/verl.git && cd verl && git checkout 1876b06d0a3e4e71e06230be10af14492ca8a75b
 RECIPE_FOLDER=fully_async_policy
-NOTES=Requires verl.experimental.fully_async_policy and the Ascend dependency revisions listed in the example script. Use this recipe checkout in recipe/; the upstream revision's submodule does not include this newly added example.
+NOTES=Uses the V0 trainer in verl v0.9.1. Run from that verl checkout with this recipe checkout at recipe/.
