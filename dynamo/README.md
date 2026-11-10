@@ -137,8 +137,41 @@ The shared defaults are in [dynamo_base.yaml](config/dynamo_base.yaml).
 | `enable_kv_events` | Keep `true` for KV-aware routing |
 | `thunderagent.enabled` | `false` for the built-in KV router; V1 presets set this explicitly |
 | `request_completion_token_ids` | Return exact generated token IDs for RL |
-| `enable_worker_system_metrics` | Required for SGLang's native control routes |
+| `enable_worker_system_metrics` | Required for SGLang's `dynamo.sglang` worker control routes |
+| `sglang.launch_mode` | `worker` (default, `dynamo.sglang`) or `sidecar` (see below) |
 | `free_engine_on_train` | Must match `rollout.free_cache_engine` |
+
+### SGLang sidecar mode
+
+`sglang.launch_mode: sidecar` runs each shard as stock `sglang.launch_server`
+(HTTP + `--grpc-port` + `--incremental-streaming-output`) plus
+`python -m dynamo.sglang.sidecar`, which registers the engine with Dynamo over
+SGLang's native gRPC API and proxies the frontend's native `/generate` to SGLang's
+HTTP `/generate`. Weight sync, memory release/resume, pause and cache flush use
+SGLang's own HTTP routes on the engine's `--port`; the weight-sync verification uses
+its native `/get_weights_by_name`.
+
+```yaml
+engine_kwargs:
+  dynamo:
+    engine: sglang
+    request_completion_token_ids: true
+    sglang:
+      launch_mode: sidecar
+      sidecar_startup_deadline_s: 1800   # default: VERL_DYNAMO_FE_READY_TIMEOUT (600)
+      # sidecar_extra_args: [--grpc-connections, "8"]
+```
+
+Requirements: an SGLang build with the native gRPC server (v0.5.16+), and an
+`ai-dynamo` wheel that ships `dynamo.sglang.sidecar`. Engine ports come from a stable
+per-shard window starting at `VERL_DYNAMO_SGLANG_ENGINE_PORT_BASE` (default 2048).
+`--engine-route` is a `dynamo.sglang` flag and is rejected in this mode. Unlike the
+worker, the sidecar stays in Dynamo discovery while the engine is paused or its
+memory is released. Release pauses SGLang first, and SGLang holds new requests
+until `continue_generation`, which resume sends only after every released tag is
+restored. A request routed during that window waits; it does not reach freed memory.
+The sidecar treats only a closed engine-state stream as engine loss, so pausing does
+not make it exit.
 
 - **V1:** keep `agent.agent_loop_manager_class=null` to use TransferQueue.
   Current Uni-Agent instead uses the [Gateway adapter](uniagent_gateway.py).

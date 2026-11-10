@@ -98,13 +98,20 @@ _KV_EVENT_PORT_BASE = int(os.getenv("VERL_DYNAMO_KV_EVENT_PORT_BASE", "42000"))
 # below the 20000 vLLM-TCPStore window to avoid overlap. Only used when
 # rollout.engine_kwargs.dynamo.enable_worker_system_metrics=true.
 _SYSTEM_METRICS_PORT_BASE = int(os.getenv("VERL_DYNAMO_SYSTEM_METRICS_PORT_BASE", "11000"))
+# sglang sidecar mode: per-shard window holding the stock engine's HTTP and gRPC
+# ports. 2048..10239 spans every replica/node/shard slot and stays clear of the
+# system-metrics (11000+) and vLLM TCPStore (20000+) windows.
+_SGLANG_ENGINE_PORT_BASE = int(os.getenv("VERL_DYNAMO_SGLANG_ENGINE_PORT_BASE", "2048"))
 
 # Inference engine behind Dynamo. "vllm" keeps the historical path (thin
 # _dynamo_vllm_with_control wrapper + ZMQ control sidecar + worker_extension_cls);
 # "sglang" launches bare `python -m dynamo.sglang` and drives it entirely through
 # the /engine/control/* HTTP routes dynamo.sglang registers natively, so it needs
 # no sidecar and no worker extension. Selected via
-# rollout.engine_kwargs.dynamo.engine.
+# rollout.engine_kwargs.dynamo.engine. With engine_kwargs.dynamo.sglang.launch_mode
+# =sidecar, sglang instead runs stock sglang.launch_server plus Dynamo's Rust
+# dynamo.sglang.sidecar per shard, controlled over SGLang's own HTTP API (a Dynamo
+# sidecar, unrelated to the verl-private vLLM ZMQ control sidecar).
 ENGINE_VLLM = "vllm"
 ENGINE_SGLANG = "sglang"
 _SUPPORTED_ENGINES = (ENGINE_VLLM, ENGINE_SGLANG)
@@ -326,10 +333,22 @@ class DynamoHttpServer:
         """Return ``rollout.engine_kwargs.dynamo.sglang`` dict (or empty)."""
         return self._dynamo_cfg().get("sglang", {}) or {}
 
-    def get_engine_control_endpoints(self) -> list[str]:
-        """Base URLs of this node's per-shard ``/engine/*`` control planes.
+    def _sglang_launch_mode(self) -> str:
+        """``worker`` (dynamo.sglang, default) or ``sidecar`` (stock SGLang + dynamo.sglang.sidecar)."""
+        from recipe.dynamo.dynamo_sglang_engine import sglang_launch_mode
 
-        Ordered by shard index, so a trainer rank can index with
+        return sglang_launch_mode(self._sglang_cfg())
+
+    def _is_sglang_sidecar(self) -> bool:
+        from recipe.dynamo.dynamo_sglang_engine import LAUNCH_MODE_SIDECAR
+
+        return self._is_sglang() and self._sglang_launch_mode() == LAUNCH_MODE_SIDECAR
+
+    def get_engine_control_endpoints(self) -> list[str]:
+        """Base URLs of this node's per-shard sglang control planes.
+
+        ``/engine/*`` on DYN_SYSTEM_PORT in worker mode; SGLang's own HTTP server in
+        sidecar mode. Ordered by shard index, so a trainer rank can index with
         ``local_rank // tensor_model_parallel_size`` and reach the engine that owns
         its GPUs. sglang only — the vLLM path uses ``_control_endpoints`` (ZMQ).
         """
@@ -338,11 +357,12 @@ class DynamoHttpServer:
     def _sglang_control_clients(self) -> list:
         """Lazily build one control client per local sglang shard."""
         if self._sglang_clients is None:
-            from recipe.dynamo.dynamo_sglang_engine import DynamoSGLangControlClient
+            from recipe.dynamo.dynamo_sglang_engine import DynamoSGLangControlClient, control_api_for_launch_mode
 
             timeout_s = float(self._dynamo_cfg().get("request_timeout_s", 600))
+            api = control_api_for_launch_mode(self._sglang_launch_mode())
             self._sglang_clients = [
-                DynamoSGLangControlClient(url, timeout_s=timeout_s) for url in self._engine_control_endpoints
+                DynamoSGLangControlClient(url, timeout_s=timeout_s, api=api) for url in self._engine_control_endpoints
             ]
         return self._sglang_clients
 
@@ -894,6 +914,7 @@ class DynamoHttpServer:
             ]
 
         is_sglang = self._is_sglang()
+        sglang_sidecar = self._is_sglang_sidecar()
 
         for spec_idx, spec in enumerate(worker_specs):
             worker_cvd = spec.cuda_visible_devices
@@ -913,11 +934,13 @@ class DynamoHttpServer:
             # we use a fixed low port via _allocate_stable_node_port for the same
             # reason). Set enable_worker_system_metrics=false to restore the legacy
             # no-DYN_SYSTEM_PORT behaviour.
-            # For sglang this port is NOT optional: /engine/control/* is the only
-            # control plane there (weight refit, memory occupation, cache flush),
-            # so refuse to honour enable_worker_system_metrics=false.
+            # For a dynamo.sglang worker this port is NOT optional: /engine/control/*
+            # is the only control plane there (weight refit, memory occupation, cache
+            # flush), so refuse to honour enable_worker_system_metrics=false. In
+            # sidecar mode control goes to SGLang's own HTTP server instead, and the
+            # port only carries the sidecar's /metrics.
             enable_worker_metrics = self._dynamo_cfg_bool("enable_worker_system_metrics", True)
-            if is_sglang and not enable_worker_metrics:
+            if is_sglang and not sglang_sidecar and not enable_worker_metrics:
                 raise ValueError(
                     "engine=sglang requires enable_worker_system_metrics=true: the "
                     "dynamo.sglang control plane (/engine/control/*) is served on "
@@ -1016,7 +1039,7 @@ class DynamoHttpServer:
                 worker_metrics_endpoint = f"{self._server_address}:{system_metrics_port}"
                 self._worker_metrics_endpoints.append(worker_metrics_endpoint)
                 self._record_worker_metrics_endpoint(worker_metrics_endpoint)
-                if is_sglang:
+                if is_sglang and not sglang_sidecar:
                     host = (
                         f"[{self._server_address}]"
                         if is_valid_ipv6_address(self._server_address)
@@ -1033,6 +1056,19 @@ class DynamoHttpServer:
             # the same prefix hashes differently per worker → the router logs
             # "block_hash mismatch" and prefix-cache hits collapse.
             env.setdefault("PYTHONHASHSEED", "0")
+
+            if sglang_sidecar:
+                self._spawn_sglang_sidecar_shard(
+                    spec=spec,
+                    spec_idx=spec_idx,
+                    n_specs=len(worker_specs),
+                    served_model_name=served_model_name,
+                    tp=tp,
+                    env=env,
+                    kv_events_config_json=kv_events_config_json,
+                    log_dir=log_dir,
+                )
+                continue
 
             if is_sglang:
                 cmd = self._build_sglang_cmd(
@@ -1078,6 +1114,101 @@ class DynamoHttpServer:
                 stderr=subprocess.STDOUT,
             )
             self._engine_processes.append(proc)
+
+    def _spawn_sglang_sidecar_shard(
+        self,
+        *,
+        spec: "_DynamoWorkerSpec",
+        spec_idx: int,
+        n_specs: int,
+        served_model_name: str,
+        tp: int,
+        env: dict[str, str],
+        kv_events_config_json: Optional[str],
+        log_dir: str,
+    ) -> None:
+        """Start one sidecar-mode shard: stock SGLang plus ``dynamo.sglang.sidecar``.
+
+        The engine serves HTTP (control plane and the native ``/generate`` the
+        sidecar proxies) and gRPC (what the sidecar registers with Dynamo). Both
+        ports are bound by SGLang only after the model loads, so they come from the
+        stable per-shard window, like every other late-bound engine port here.
+
+        The sidecar is appended to ``_engine_processes`` before the engine so
+        teardown (registry order) deregisters it before its engine goes away; the
+        watchdog covers both either way.
+        """
+        host = self._server_address
+        url_host = f"[{host}]" if is_valid_ipv6_address(host) else host
+        http_port = self._allocate_stable_node_port(_SGLANG_ENGINE_PORT_BASE, spec_idx, window=8)
+        grpc_port = self._allocate_stable_node_port(_SGLANG_ENGINE_PORT_BASE, spec_idx, window=8)
+
+        engine_cmd = self._build_sglang_cmd(
+            served_model_name,
+            tp,
+            nccl_port=self._allocate_tcp_port(),
+            kv_events_config_json=kv_events_config_json,
+            sidecar_engine=(host, http_port, grpc_port),
+        )
+        sidecar_cmd = self._build_sglang_sidecar_cmd(f"http://{url_host}:{grpc_port}")
+
+        # The engine runs no Dynamo runtime; DYN_SYSTEM_PORT belongs to the sidecar.
+        engine_env = {k: v for k, v in env.items() if not k.startswith("DYN_SYSTEM_")}
+        # The sidecar is CPU-only. Hiding the GPUs keeps any CUDA-probing import
+        # in its process from creating a context on the engine's devices.
+        sidecar_env = dict(env)
+        sidecar_env["CUDA_VISIBLE_DEVICES"] = ""
+
+        self._engine_control_endpoints.append(f"http://{url_host}:{http_port}")
+
+        for role, cmd, proc_env in (
+            ("sidecar", sidecar_cmd, sidecar_env),
+            ("engine", engine_cmd, engine_env),
+        ):
+            stdout_path = os.path.join(log_dir, f"{spec.label}_{role}.log")
+            stdout_fp = open(stdout_path, "w")
+            self._engine_log_fps.append(stdout_fp)
+            self._engine_log_paths.append(stdout_path)
+            logger.info(
+                "[DynamoHttpServer] starting sglang %s shard %s/%s (replica=%s, GPUs=%s, "
+                "sglang_http=%s, sglang_grpc=%s, DYN_SYSTEM_PORT=%s, log=%s): %s",
+                role,
+                spec_idx,
+                n_specs,
+                spec.replica_rank,
+                proc_env.get("CUDA_VISIBLE_DEVICES"),
+                http_port,
+                grpc_port,
+                proc_env.get(_DYN_SYSTEM_PORT_ENV),
+                stdout_path,
+                " ".join(cmd),
+            )
+            proc = subprocess.Popen(cmd, env=proc_env, stdout=stdout_fp, stderr=subprocess.STDOUT)
+            self._engine_processes.append(proc)
+
+    def _build_sglang_sidecar_cmd(self, grpc_endpoint: str) -> list[str]:
+        """``dynamo.sglang.sidecar`` CLI for one shard.
+
+        The sidecar's gRPC startup deadline defaults to 300 s, which a large model
+        (load + CUDA graph capture) can exceed; past it the sidecar exits and the
+        watchdog reports the shard dead. Default it to the frontend readiness
+        budget, which bounds startup anyway.
+        """
+        cfg = self._sglang_cfg()
+        deadline_s = cfg.get("sidecar_startup_deadline_s", _FRONTEND_READY_TIMEOUT_S)
+        cmd = [
+            sys.executable,
+            "-m",
+            "dynamo.sglang.sidecar",
+            "--grpc-endpoint",
+            grpc_endpoint,
+            "--grpc-startup-deadline-secs",
+            str(max(1, int(float(deadline_s)))),
+        ]
+        extra = cfg.get("sidecar_extra_args") or []
+        if isinstance(extra, list):
+            cmd += [str(x) for x in extra]
+        return cmd
 
     def _record_worker_metrics_endpoint(self, endpoint: str) -> None:
         """Append a worker /metrics endpoint to a per-(replica,node) file so an
@@ -1276,21 +1407,45 @@ class DynamoHttpServer:
         tp: int,
         nccl_port: Optional[int] = None,
         kv_events_config_json: Optional[str] = None,
+        sidecar_engine: Optional[tuple[str, int, int]] = None,
     ) -> list[str]:
-        """Construct the ``dynamo.sglang`` CLI for one DP shard.
+        """Construct the engine CLI for one DP shard.
 
-        Unlike the vLLM path this launches the stock entrypoint — no verl wrapper —
-        because the control plane we need is already registered by
+        Worker mode (``sidecar_engine`` is None) launches ``dynamo.sglang`` — no verl
+        wrapper — because the control plane we need is already registered by
         ``handler_base.register_engine_routes`` and reachable over DYN_SYSTEM_PORT.
-
         ``dynamo.sglang.args`` forwards the full ``ServerArgs.add_cli_args`` surface,
         so anything not mapped below can still be passed through
         ``engine_kwargs.dynamo.extra_args``.
+
+        Sidecar mode (``sidecar_engine=(host, http_port, grpc_port)``) launches stock
+        ``sglang.launch_server`` with the same engine flags, minus the two that only
+        ``dynamo.sglang`` understands (``--enable-rl``, ``--engine-route``), plus:
+
+        * ``--host/--port``: SGLang's HTTP server, the RL control plane and the
+          target of the sidecar's native ``/generate`` passthrough;
+        * ``--grpc-port``: the native gRPC server the sidecar registers;
+        * ``--incremental-streaming-output``: without it the sidecar disables the
+          native ``/generate`` passthrough (it logs a warning and keeps serving the
+          OpenAI routes only).
         """
-        cmd = [
-            sys.executable,
-            "-m",
-            "dynamo.sglang",
+        if sidecar_engine is None:
+            cmd = [sys.executable, "-m", "dynamo.sglang"]
+        else:
+            host, http_port, grpc_port = sidecar_engine
+            cmd = [
+                sys.executable,
+                "-m",
+                "sglang.launch_server",
+                "--host",
+                host,
+                "--port",
+                str(http_port),
+                "--grpc-port",
+                str(grpc_port),
+                "--incremental-streaming-output",
+            ]
+        cmd += [
             "--model-path",
             self.model_config.local_path,
             "--served-model-name",
@@ -1333,7 +1488,7 @@ class DynamoHttpServer:
 
         # Preserve the worker's RL flag. After Dynamo PR #13951 it no longer
         # registers call_tokenizer_manager; cache flush is configured below.
-        if self._sglang_cfg().get("enable_rl", True):
+        if sidecar_engine is None and self._sglang_cfg().get("enable_rl", True):
             cmd += ["--enable-rl"]
 
         # KV-router page size. ThunderAgent's router_block_size must match, same
@@ -1363,10 +1518,17 @@ class DynamoHttpServer:
 
         # Readiness and weight refit both need a native cache-flush endpoint.
         # Honor an explicit public-path override without registering it twice.
-        routes = [extra[i + 1] for i, arg in enumerate(extra[:-1]) if arg == "--engine-route"]
-        routes += [arg.split("=", 1)[1] for arg in extra if arg.startswith("--engine-route=")]
-        if not any(route.split(":", 1)[0].split("=", 1)[0] == "flush_cache" for route in routes):
-            cmd += ["--engine-route", "flush_cache:tm"]
+        # Sidecar mode needs no registration: SGLang serves /flush_cache itself.
+        if sidecar_engine is None:
+            routes = [extra[i + 1] for i, arg in enumerate(extra[:-1]) if arg == "--engine-route"]
+            routes += [arg.split("=", 1)[1] for arg in extra if arg.startswith("--engine-route=")]
+            if not any(route.split(":", 1)[0].split("=", 1)[0] == "flush_cache" for route in routes):
+                cmd += ["--engine-route", "flush_cache:tm"]
+        elif any(arg == "--engine-route" or arg.startswith("--engine-route=") for arg in extra):
+            raise ValueError(
+                "--engine-route is a dynamo.sglang worker flag; sglang.launch_server (sidecar "
+                "mode) rejects it. Remove it from engine_kwargs.dynamo.extra_args."
+            )
 
         # Attention backend: default to flashinfer, mirroring verl's native sglang
         # server (async_sglang_server.py). SGLang's own default on Hopper is fa3,
@@ -2772,12 +2934,15 @@ class DynamoHttpServer:
         clients = self._sglang_control_clients()
         if not clients:
             raise RuntimeError(
-                "engine=sglang but no /engine control endpoints were recorded; "
-                "check that DYN_SYSTEM_PORT was set for each dynamo.sglang shard."
+                "engine=sglang but no control endpoints were recorded; check that "
+                "DYN_SYSTEM_PORT was set for each dynamo.sglang shard (worker mode) or "
+                "that each sidecar shard recorded its SGLang HTTP port (sidecar mode)."
             )
+        # wait_ready already requires a 200 from flush_cache, so in sidecar mode
+        # (SGLang serves /flush_cache natively) there is nothing left to probe.
         await asyncio.gather(*[c.wait_ready(timeout_s=_FRONTEND_READY_TIMEOUT_S) for c in clients])
 
-        if self._sglang_cfg().get("enable_rl", True):
+        if not self._is_sglang_sidecar() and self._sglang_cfg().get("enable_rl", True):
             probe = await asyncio.gather(
                 *[c.flush_cache() for c in clients],
                 return_exceptions=True,

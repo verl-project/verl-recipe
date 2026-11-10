@@ -49,6 +49,17 @@ The native lifecycle is validated with Dynamo 8c5a73723109 and SGLang 0.5.19.
 Older Dynamo workers exposing only the legacy control routes are not supported
 by this version of the client.
 
+**Sidecar mode** (``engine_kwargs.dynamo.sglang.launch_mode=sidecar``). The engine is
+a stock ``sglang.launch_server`` and ``dynamo.sglang.sidecar`` registers it with
+Dynamo over SGLang's native gRPC API. The sidecar publishes no ``/engine/*`` routes,
+so the control plane is SGLang's own HTTP server instead
+(``python/sglang/srt/entrypoints/http_server.py``): the same operations, served at
+``http://<engine-host>:<sglang --port>/<name>`` with no ``/engine/`` or ``control/``
+prefix. Two native responses are not JSON objects: ``/flush_cache`` answers plain
+text and ``/release_memory_occupation`` / ``/resume_memory_occupation`` answer
+``null``; failures there are signalled only by the HTTP status. ``api=native``
+selects that dialect.
+
 **Robustness note.** A ``serialized_named_tensors`` payload that fails to
 deserialize does not come back as an error — it kills the worker process outright
 (observed as ``RemoteDisconnected``, then connection-refused for everything after;
@@ -78,6 +89,35 @@ ROUTE_UPDATE_WEIGHT_VERSION = "control/update_weight_version"
 ROUTE_START_PROFILE = "control/start_profile"
 ROUTE_STOP_PROFILE = "control/stop_profile"
 ROUTE_CALL_TOKENIZER_MANAGER = "call_tokenizer_manager"
+ROUTE_FLUSH_CACHE = "flush_cache"
+
+# Control-plane dialects. ``dynamo``: the dynamo.sglang worker's /engine/* routes.
+# ``native``: SGLang's own HTTP server, used when a sidecar fronts the engine.
+API_DYNAMO = "dynamo"
+API_NATIVE = "native"
+_APIS = (API_DYNAMO, API_NATIVE)
+
+# Launch modes for engine_kwargs.dynamo.sglang.launch_mode.
+LAUNCH_MODE_WORKER = "worker"
+LAUNCH_MODE_SIDECAR = "sidecar"
+_LAUNCH_MODES = (LAUNCH_MODE_WORKER, LAUNCH_MODE_SIDECAR)
+
+
+def sglang_launch_mode(sglang_cfg: Optional[dict]) -> str:
+    """Validated ``engine_kwargs.dynamo.sglang.launch_mode`` (default ``worker``).
+
+    Shared by the node actor (which launches the processes) and the trainer-side
+    adapter (which builds its own control client), so the two cannot disagree on
+    which control dialect the engine speaks.
+    """
+    mode = str((sglang_cfg or {}).get("launch_mode") or LAUNCH_MODE_WORKER).strip().lower()
+    if mode not in _LAUNCH_MODES:
+        raise ValueError(f"rollout.engine_kwargs.dynamo.sglang.launch_mode must be one of {_LAUNCH_MODES}, got {mode!r}")
+    return mode
+
+
+def control_api_for_launch_mode(mode: str) -> str:
+    return API_NATIVE if mode == LAUNCH_MODE_SIDECAR else API_DYNAMO
 
 
 class DynamoSGLangControlError(RuntimeError):
@@ -93,14 +133,19 @@ class DynamoSGLangControlClient:
     ever posted to the engine that shares its GPUs.
     """
 
-    def __init__(self, base_url: str, timeout_s: float = 600.0):
+    def __init__(self, base_url: str, timeout_s: float = 600.0, api: str = API_DYNAMO):
         """
         Args:
-            base_url: ``http://host:port`` of the worker's system-status server.
+            base_url: ``http://host:port`` of the worker's system-status server
+                (``api=dynamo``) or of SGLang's own HTTP server (``api=native``).
             timeout_s: default per-request timeout.
+            api: control dialect, ``dynamo`` or ``native`` (see module docstring).
         """
+        if api not in _APIS:
+            raise ValueError(f"api must be one of {_APIS}, got {api!r}")
         self.base_url = base_url.rstrip("/")
         self.timeout_s = timeout_s
+        self.api = api
         self._session = None
 
     # ------------------------------------------------------------------ #
@@ -121,6 +166,14 @@ class DynamoSGLangControlClient:
         self._session = None
 
     def route_url(self, route: str) -> str:
+        if self.api == API_NATIVE:
+            if route == ROUTE_CALL_TOKENIZER_MANAGER:
+                raise DynamoSGLangControlError(
+                    "call_tokenizer_manager is a dynamo.sglang worker route; SGLang's native "
+                    "HTTP server (sidecar mode) has no generic tokenizer-manager passthrough"
+                )
+            # dynamo.sglang namespaces some keys under control/; the native names are bare.
+            return f"{self.base_url}/{route.removeprefix('control/')}"
         return f"{self.base_url}/engine/{route}"
 
     async def post(
@@ -133,7 +186,13 @@ class DynamoSGLangControlClient:
         """POST one control request and return the decoded JSON body.
 
         ``/engine/{*path}`` is mounted with axum's ``any(...)``, so the verb is
-        not load-bearing; POST is used for every route for uniformity.
+        not load-bearing; POST is used for every route for uniformity. Every
+        native SGLang control route used here accepts POST as well.
+
+        On the native dialect a 200 whose body is not a JSON object (plain-text
+        ``/flush_cache``, ``null`` from memory occupation) is a success: SGLang
+        reports those routes' failures only through the status code. It comes
+        back as ``{"status": "ok", "raw": <body>}``.
         """
         import aiohttp
 
@@ -147,7 +206,11 @@ class DynamoSGLangControlClient:
             try:
                 data = await resp.json(content_type=None)
             except Exception as e:
+                if self.api == API_NATIVE:
+                    return {"status": "ok", "raw": text}
                 raise DynamoSGLangControlError(f"{url} -> non-JSON body: {text[:2000]!r}") from e
+            if data is None and self.api == API_NATIVE:
+                return {"status": "ok", "raw": None}
 
         if raise_on_error_status and isinstance(data, dict):
             # Handlers answer either {"status": "ok"|"error", ...} or
@@ -248,13 +311,37 @@ class DynamoSGLangControlClient:
             timeout_s=timeout_s,
         )
 
+    async def get_weights_by_name(self, name: str, truncate_size: int, timeout_s: Optional[float] = None) -> Any:
+        """Read back a truncated parameter (the weight-sync verification probe).
+
+        Native dialect: SGLang's ``/get_weights_by_name`` route. Dynamo dialect:
+        the legacy ``call_tokenizer_manager`` passthrough, which needs the
+        ``{"io_struct.X": {...}}`` wrapper because tokenizer_manager takes a request
+        object, not kwargs. That route was removed by Dynamo PR #13951, so on
+        current workers this raises and the caller logs "verification unavailable".
+        """
+        if self.api == API_NATIVE:
+            return await self.post(
+                "get_weights_by_name",
+                {"name": name, "truncate_size": int(truncate_size)},
+                timeout_s=timeout_s,
+                raise_on_error_status=False,
+            )
+        return await self.call_tokenizer_manager(
+            "get_weights_by_name",
+            args=[{"io_struct.GetWeightsByNameReqInput": {"name": name, "truncate_size": int(truncate_size)}}],
+            timeout_s=timeout_s,
+        )
+
     async def flush_cache(self, timeout_s: Optional[float] = None) -> dict:
         """Flush the explicitly registered ``--engine-route flush_cache:tm``.
 
         PR13951 removed the generic call_tokenizer_manager route. The same
-        native flush is required before weight updates and for readiness.
+        native flush is required before weight updates and for readiness. On the
+        native dialect this is SGLang's own ``/flush_cache``, which answers 400 when
+        requests are still running.
         """
-        return await self.post("flush_cache", {}, timeout_s=timeout_s)
+        return await self.post(ROUTE_FLUSH_CACHE, {}, timeout_s=timeout_s)
 
     async def abort_request(self, rid: str = "", abort_all: bool = False) -> dict:
         """DO NOT use for abort-all: tokenizer_manager.abort_request is a SYNC
@@ -319,17 +406,32 @@ class DynamoSGLangControlClient:
             except Exception as e:  # noqa: BLE001 - 404/transport both mean not-ready-yet
                 last = f"{type(e).__name__}: {str(e)[:200]}"
                 await asyncio.sleep(poll_s)
+        if self.api == API_NATIVE:
+            hint = (
+                "The SGLang HTTP server never answered /flush_cache; check the engine log "
+                "(sglang.launch_server) for a model-load failure."
+            )
+        else:
+            hint = (
+                "If this is a 404 the worker is up but never finished loading the model; check "
+                "--engine-route flush_cache:tm and the native tokenizer-manager result."
+            )
         raise DynamoSGLangControlError(
-            f"dynamo.sglang engine routes at {self.base_url} not serving after {timeout_s}s. "
-            f"Last: {last}. If this is a 404 the worker is up but never finished loading the "
-            f"model; check --engine-route flush_cache:tm and the native tokenizer-manager result."
+            f"sglang control routes at {self.base_url} (api={self.api}) not serving after "
+            f"{timeout_s}s. Last: {last}. {hint}"
         )
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
-        return f"DynamoSGLangControlClient({self.base_url!r})"
+        return f"DynamoSGLangControlClient({self.base_url!r}, api={self.api!r})"
 
 
 __all__ = [
+    "API_DYNAMO",
+    "API_NATIVE",
+    "LAUNCH_MODE_SIDECAR",
+    "LAUNCH_MODE_WORKER",
     "DynamoSGLangControlClient",
     "DynamoSGLangControlError",
+    "control_api_for_launch_mode",
+    "sglang_launch_mode",
 ]

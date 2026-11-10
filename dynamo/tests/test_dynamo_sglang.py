@@ -26,9 +26,14 @@ from types import SimpleNamespace
 import pytest
 from recipe.dynamo.dynamo_async_server import DynamoHttpServer
 from recipe.dynamo.dynamo_sglang_engine import (
+    API_DYNAMO,
+    API_NATIVE,
+    LAUNCH_MODE_SIDECAR,
+    LAUNCH_MODE_WORKER,
     ROUTE_UPDATE_WEIGHTS_FROM_TENSOR,
     DynamoSGLangControlClient,
     DynamoSGLangControlError,
+    sglang_launch_mode,
 )
 
 
@@ -462,6 +467,263 @@ async def test_ready_probes_the_native_flush_route():
     client = _client(session)
     assert await client.wait_ready(timeout_s=1, poll_s=0)
     assert session.calls == [("http://worker:11000/engine/flush_cache", {})]
+
+
+# --------------------------------------------------------------------------- #
+# sidecar mode: stock SGLang + dynamo.sglang.sidecar, native SGLang control API
+# --------------------------------------------------------------------------- #
+
+
+class _RawResponse(_FakeResponse):
+    """A 200 whose body is not a JSON object, as SGLang's native routes answer."""
+
+    def __init__(self, status, body_text):
+        super().__init__(status, None)
+        self._body_text = body_text
+
+    async def text(self):
+        return self._body_text
+
+    async def json(self, content_type=None):
+        return json.loads(self._body_text)  # raises for plain text, None for "null"
+
+
+class _RawSession(_FakeSession):
+    def __init__(self, body_text, status=200):
+        super().__init__(status=status)
+        self.body_text = body_text
+
+    def post(self, url, json=None, timeout=None):
+        self.calls.append((url, json))
+        return _RawResponse(self.status, self.body_text)
+
+
+def _native_client(session):
+    client = DynamoSGLangControlClient("http://engine:2048", api=API_NATIVE)
+    client._session = session
+    return client
+
+
+def _sidecar_cfg(**sglang):
+    return {"engine": "sglang", "sglang": {"launch_mode": "sidecar", **sglang}}
+
+
+def test_launch_mode_defaults_to_worker_and_is_validated():
+    assert sglang_launch_mode(None) == LAUNCH_MODE_WORKER
+    assert sglang_launch_mode({}) == LAUNCH_MODE_WORKER
+    assert sglang_launch_mode({"launch_mode": " Sidecar "}) == LAUNCH_MODE_SIDECAR
+    with pytest.raises(ValueError, match="launch_mode"):
+        sglang_launch_mode({"launch_mode": "grpc"})
+    assert _make_server({"engine": "sglang"})._is_sglang_sidecar() is False
+    assert _make_server(_sidecar_cfg())._is_sglang_sidecar() is True
+    # launch_mode only means something for the sglang engine
+    assert _make_server({"engine": "vllm", "sglang": {"launch_mode": "sidecar"}})._is_sglang_sidecar() is False
+
+
+def _sidecar_engine_cmd(dynamo_cfg=None, **rollout_cfg):
+    server = _make_server(dynamo_cfg if dynamo_cfg is not None else _sidecar_cfg(), **rollout_cfg)
+    return server._build_sglang_cmd(
+        "test-model",
+        server.config.tensor_model_parallel_size,
+        nccl_port=5000,
+        kv_events_config_json=DynamoHttpServer._build_kv_events_config_json(5557),
+        sidecar_engine=("10.0.0.1", 2048, 2049),
+    )
+
+
+def test_sidecar_engine_cmd_is_stock_sglang_with_http_and_grpc():
+    cmd = _sidecar_engine_cmd(tensor_model_parallel_size=4, gpu_memory_utilization=0.7, enable_sleep_mode=True)
+    assert cmd[1:3] == ["-m", "sglang.launch_server"]
+    assert cmd[cmd.index("--host") + 1] == "10.0.0.1"
+    assert cmd[cmd.index("--port") + 1] == "2048"
+    assert cmd[cmd.index("--grpc-port") + 1] == "2049"
+    # without it the sidecar silently drops the native /generate passthrough
+    assert "--incremental-streaming-output" in cmd
+    # shared engine mapping is unchanged
+    assert cmd[cmd.index("--tp-size") + 1] == "4"
+    assert cmd[cmd.index("--mem-fraction-static") + 1] == "0.7"
+    assert cmd[cmd.index("--nccl-port") + 1] == "5000"
+    assert "--enable-memory-saver" in cmd
+    assert json.loads(cmd[cmd.index("--kv-events-config") + 1])["endpoint"] == "tcp://*:5557"
+    # dynamo.sglang-only flags would make sglang.launch_server exit at argparse
+    assert "--enable-rl" not in cmd
+    assert not any(arg.startswith("--engine-route") for arg in cmd)
+
+
+def test_sidecar_engine_rejects_engine_route_extra_args():
+    with pytest.raises(ValueError, match="engine-route"):
+        _sidecar_engine_cmd(_sidecar_cfg(extra_args=["--engine-route", "flush_cache:tm"]))
+    with pytest.raises(ValueError, match="engine-route"):
+        _sidecar_engine_cmd(_sidecar_cfg(extra_args=["--engine-route=flush_cache:tm"]))
+
+
+def test_sidecar_cmd_raises_the_startup_deadline():
+    server = _make_server(_sidecar_cfg())
+    cmd = server._build_sglang_sidecar_cmd("http://10.0.0.1:2049")
+    assert cmd[1:3] == ["-m", "dynamo.sglang.sidecar"]
+    assert cmd[cmd.index("--grpc-endpoint") + 1] == "http://10.0.0.1:2049"
+    # the sidecar's own default (300 s) is shorter than a large-model load
+    assert int(cmd[cmd.index("--grpc-startup-deadline-secs") + 1]) >= 300
+
+    server = _make_server(_sidecar_cfg(sidecar_startup_deadline_s=1800, sidecar_extra_args=["--grpc-connections", "8"]))
+    cmd = server._build_sglang_sidecar_cmd("http://10.0.0.1:2049")
+    assert cmd[cmd.index("--grpc-startup-deadline-secs") + 1] == "1800"
+    assert cmd[-2:] == ["--grpc-connections", "8"]
+
+
+def test_spawn_sidecar_shard_starts_sidecar_then_engine(tmp_path, monkeypatch):
+    server = _make_server(_sidecar_cfg(), tensor_model_parallel_size=2)
+    server.replica_rank = 0
+    server.node_rank = 0
+    server._server_address = "127.0.0.1"
+    server._allocated_tcp_ports = set()
+    server._engine_processes = []
+    server._engine_log_fps = []
+    server._engine_log_paths = []
+
+    launched = []
+
+    class _Proc:
+        def __init__(self, cmd, env=None, stdout=None, stderr=None):
+            launched.append((cmd, env))
+
+    monkeypatch.setattr("recipe.dynamo.dynamo_async_server.subprocess.Popen", _Proc)
+    spec = SimpleNamespace(replica_rank=0, rank_offset=2, cuda_visible_devices="2,3", label="replica0_shard1")
+    env = {"CUDA_VISIBLE_DEVICES": "2,3", "DYN_SYSTEM_PORT": "11008", "DYN_NAMESPACE": "ns"}
+    try:
+        server._spawn_sglang_sidecar_shard(
+            spec=spec,
+            spec_idx=1,
+            n_specs=2,
+            served_model_name="test-model",
+            tp=2,
+            env=env,
+            kv_events_config_json=None,
+            log_dir=str(tmp_path),
+        )
+    finally:
+        for fp in server._engine_log_fps:
+            fp.close()
+
+    (sidecar_cmd, sidecar_env), (engine_cmd, engine_env) = launched
+    assert sidecar_cmd[1:3] == ["-m", "dynamo.sglang.sidecar"]
+    assert engine_cmd[1:3] == ["-m", "sglang.launch_server"]
+    # sidecar dials exactly the engine's gRPC port; control goes to its HTTP port
+    grpc_port = engine_cmd[engine_cmd.index("--grpc-port") + 1]
+    http_port = engine_cmd[engine_cmd.index("--port") + 1]
+    assert grpc_port != http_port
+    assert sidecar_cmd[sidecar_cmd.index("--grpc-endpoint") + 1] == f"http://127.0.0.1:{grpc_port}"
+    assert server._engine_control_endpoints == [f"http://127.0.0.1:{http_port}"]
+    # GPUs belong to the engine; the Dynamo system port to the sidecar
+    assert engine_env["CUDA_VISIBLE_DEVICES"] == "2,3"
+    assert sidecar_env["CUDA_VISIBLE_DEVICES"] == ""
+    assert sidecar_env["DYN_SYSTEM_PORT"] == "11008"
+    assert "DYN_SYSTEM_PORT" not in engine_env
+    assert sidecar_env["DYN_NAMESPACE"] == "ns"
+    # the caller's env is not mutated
+    assert env["CUDA_VISIBLE_DEVICES"] == "2,3"
+    # both processes are watched, logs line up with processes, one shard counted
+    assert len(server._engine_processes) == 2
+    assert [p.rsplit("/", 1)[-1] for p in server._engine_log_paths] == [
+        "replica0_shard1_sidecar.log",
+        "replica0_shard1_engine.log",
+    ]
+    assert server.get_num_engine_workers() == 2
+
+
+def test_sidecar_mode_builds_native_control_clients():
+    server = _make_server(_sidecar_cfg())
+    server._engine_control_endpoints = ["http://h:2048", "http://h:2056"]
+    assert [c.api for c in server._sglang_control_clients()] == [API_NATIVE, API_NATIVE]
+    worker = _make_server({"engine": "sglang"})
+    worker._engine_control_endpoints = ["http://h:11000"]
+    assert [c.api for c in worker._sglang_control_clients()] == [API_DYNAMO]
+
+
+def test_native_route_url_has_no_engine_or_control_prefix():
+    client = DynamoSGLangControlClient("http://engine:2048/", api=API_NATIVE)
+    assert client.route_url("release_memory_occupation") == "http://engine:2048/release_memory_occupation"
+    assert client.route_url(ROUTE_UPDATE_WEIGHTS_FROM_TENSOR) == "http://engine:2048/update_weights_from_tensor"
+    assert client.route_url("control/update_weight_version") == "http://engine:2048/update_weight_version"
+    with pytest.raises(DynamoSGLangControlError, match="call_tokenizer_manager"):
+        client.route_url("call_tokenizer_manager")
+    with pytest.raises(ValueError, match="api"):
+        DynamoSGLangControlClient("http://engine:2048", api="grpc")
+
+
+@pytest.mark.asyncio
+async def test_native_plain_text_flush_is_success():
+    session = _RawSession("Cache flushed.\nPlease check backend logs for more details.\n")
+    client = _native_client(session)
+    result = await client.flush_cache()
+    assert result["status"] == "ok"
+    assert session.calls == [("http://engine:2048/flush_cache", {})]
+    assert await client.wait_ready(timeout_s=1, poll_s=0)
+
+
+@pytest.mark.asyncio
+async def test_native_plain_text_is_still_an_error_on_the_dynamo_dialect():
+    client = _client(_RawSession("Cache flushed.\n"))
+    with pytest.raises(DynamoSGLangControlError, match="non-JSON"):
+        await client.flush_cache()
+
+
+@pytest.mark.asyncio
+async def test_native_flush_failure_status_raises():
+    """SGLang answers 400 (plain text) when it refuses to flush with requests running."""
+    client = _native_client(_RawSession("Flush cache failed.\n", status=400))
+    with pytest.raises(DynamoSGLangControlError, match="HTTP 400"):
+        await client.flush_cache()
+
+
+@pytest.mark.asyncio
+async def test_native_null_memory_occupation_is_success_and_pauses_first():
+    session = _RawSession("null")
+    client = _native_client(session)
+    await client.release_memory_occupation(tags=["kv_cache"])
+    await client.resume_memory_occupation(tags=["kv_cache"])
+    assert session.calls == [
+        ("http://engine:2048/pause_generation", {"mode": "abort"}),
+        ("http://engine:2048/release_memory_occupation", {"tags": ["kv_cache"]}),
+        ("http://engine:2048/resume_memory_occupation", {"tags": ["kv_cache"]}),
+        ("http://engine:2048/continue_generation", {}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_native_weight_update_wire_format_is_unchanged():
+    session = _FakeSession(payload={"success": True, "message": "ok"})
+    client = _native_client(session)
+    blob = bytes(range(256))
+    req = SimpleNamespace(serialized_named_tensors=[blob], load_format=None, flush_cache=False)
+    await client.update_weights_from_tensor(req)
+    url, body = session.calls[0]
+    assert url == "http://engine:2048/update_weights_from_tensor"
+    assert base64.b64decode(body["serialized_named_tensors"][0]) == blob
+    # a {"success": false} body still fails on the native dialect
+    client = _native_client(_FakeSession(payload={"success": False, "message": "deserialize failed"}))
+    with pytest.raises(DynamoSGLangControlError, match="deserialize failed"):
+        await client.update_weights_from_tensor(req)
+
+
+@pytest.mark.asyncio
+async def test_native_weight_readback_uses_get_weights_by_name():
+    session = _FakeSession(payload=[0.5, -0.25])
+    client = _native_client(session)
+    assert await client.get_weights_by_name("model.embed_tokens.weight", truncate_size=2) == [0.5, -0.25]
+    assert session.calls == [
+        ("http://engine:2048/get_weights_by_name", {"name": "model.embed_tokens.weight", "truncate_size": 2})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_worker_weight_readback_keeps_the_legacy_passthrough():
+    session = _FakeSession(payload={"result": [0.5]})
+    client = _client(session)
+    await client.get_weights_by_name("w", truncate_size=1)
+    url, body = session.calls[0]
+    assert url == "http://worker:11000/engine/call_tokenizer_manager"
+    assert body["args"] == [{"io_struct.GetWeightsByNameReqInput": {"name": "w", "truncate_size": 1}}]
 
 
 # --------------------------------------------------------------------------- #

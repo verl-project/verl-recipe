@@ -51,7 +51,11 @@ from typing import Any, Generator, Optional
 import ray
 import torch
 from recipe.dynamo.dynamo_naming import control_actor_name
-from recipe.dynamo.dynamo_sglang_engine import DynamoSGLangControlClient
+from recipe.dynamo.dynamo_sglang_engine import (
+    DynamoSGLangControlClient,
+    control_api_for_launch_mode,
+    sglang_launch_mode,
+)
 
 from verl.workers.rollout.sglang_rollout.sglang_rollout import ServerAdapter as _SGLangServerAdapter
 from verl.workers.rollout.sglang_rollout.utils import get_named_tensor_buckets
@@ -235,7 +239,10 @@ class SGLangServerAdapter(_SGLangServerAdapter):
             )
         base_url = endpoints[self._shard_idx_local]
         timeout_s = float(self._dynamo_cfg().get("request_timeout_s", 600))
-        self._control_client = DynamoSGLangControlClient(base_url, timeout_s=timeout_s)
+        # Same config as the node actor that launched the shard, so both sides
+        # speak the same control dialect (dynamo /engine/* vs native SGLang HTTP).
+        api = control_api_for_launch_mode(sglang_launch_mode(self._sglang_cfg()))
+        self._control_client = DynamoSGLangControlClient(base_url, timeout_s=timeout_s, api=api)
         # Keep the parent's attribute pointing somewhere sane; several inherited
         # helpers gate on `self._engine is not None`.
         self._engine = self._control_client
@@ -441,20 +448,9 @@ class SGLangServerAdapter(_SGLangServerAdapter):
 
         name, expected = self._verify_sample
         try:
-            # tokenizer_manager takes an io_struct request object, not kwargs
-            # ("got an unexpected keyword argument 'name'"). dynamo's
-            # call_tokenizer_manager resolves {"io_struct.X": {...}} into that type.
-            got = await self._control_client.call_tokenizer_manager(
-                "get_weights_by_name",
-                args=[
-                    {
-                        "io_struct.GetWeightsByNameReqInput": {
-                            "name": name,
-                            "truncate_size": len(expected),
-                        }
-                    }
-                ],
-            )
+            # Native /get_weights_by_name in sidecar mode; the legacy tokenizer-manager
+            # passthrough on a dynamo.sglang worker (see the client method).
+            got = await self._control_client.get_weights_by_name(name, truncate_size=len(expected))
         except Exception as e:  # noqa: BLE001
             # Infrastructure problem, not a correctness signal — do not fail the run,
             # but do not let it pass silently either.
