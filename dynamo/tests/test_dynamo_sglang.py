@@ -1534,3 +1534,50 @@ async def test_r3_generate_checks_rows_against_the_sent_prompt():
     out = await server.generate([1, 2, 3], {"logprobs": True}, "traj-r3")
     assert sent[0]["return_routed_experts"] is True
     np.testing.assert_array_equal(out.routed_experts, expected)
+
+
+# --------------------------------------------------------------------------- #
+# frontend readiness on ai-dynamo 1.7 (/health without an instance list)
+# --------------------------------------------------------------------------- #
+
+_WORKER_STATE = (
+    'dynamo_frontend_router_worker_state{{model="m",reason="none",router_worker_id="{wid}",'
+    'state="{state}",target_component="backend",target_endpoint="{ep}",target_namespace="ns",'
+    'worker_type="decode"}} {value}'
+)
+
+
+def test_available_generate_workers_are_counted_from_router_metrics():
+    text = "\n".join(
+        [
+            "# HELP dynamo_frontend_router_worker_state worker state",
+            _WORKER_STATE.format(wid="1", state="available", ep="generate", value=1),
+            _WORKER_STATE.format(wid="1", state="available", ep="generate", value=1),  # same worker twice
+            _WORKER_STATE.format(wid="2", state="available", ep="generate", value=1),
+            _WORKER_STATE.format(wid="3", state="busy", ep="generate", value=1),
+            _WORKER_STATE.format(wid="4", state="available", ep="clear_kv_blocks", value=1),
+            _WORKER_STATE.format(wid="5", state="available", ep="generate", value=0),
+            'dynamo_component_router_ttft_seconds_count{worker_id="6"} 3',
+        ]
+    )
+    assert DynamoHttpServer._count_available_generate_workers(text) == 2
+    assert DynamoHttpServer._count_available_generate_workers("") == 0
+
+
+@pytest.mark.asyncio
+async def test_healthcheck_reads_router_metrics_when_health_has_no_instances(monkeypatch):
+    server = _make_server({"engine": "sglang"})
+    server._frontend_port = 8000
+    server._raise_if_subprocess_died = lambda: None
+    metrics = "\n".join(_WORKER_STATE.format(wid=w, state="available", ep="generate", value=1) for w in "12")
+    seen = []
+
+    def fake_get(url, timeout):
+        seen.append(url)
+        if url.endswith("/health"):
+            return SimpleNamespace(status_code=200, json=lambda: {"status": "healthy", "stage": "ready"})
+        return SimpleNamespace(status_code=200, text=metrics)
+
+    monkeypatch.setattr("recipe.dynamo.dynamo_async_server.requests.get", fake_get)
+    await server._healthcheck_frontend(expected_workers=2)
+    assert seen == ["http://localhost:8000/health", "http://localhost:8000/metrics"]

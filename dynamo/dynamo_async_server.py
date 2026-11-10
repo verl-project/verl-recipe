@@ -1854,6 +1854,31 @@ class DynamoHttpServer:
             f"rollout.engine_kwargs.dynamo.frontend_extra_args must be a list or string, got {type(extra).__name__}"
         )
 
+    @staticmethod
+    def _count_available_generate_workers(metrics_text: str) -> int:
+        """Distinct ``router_worker_id`` with ``target_endpoint="generate"``, ``state="available"``, value 1.
+
+        Source: ``dynamo_frontend_router_worker_state`` on the frontend's ``/metrics``.
+        """
+        workers = set()
+        for line in metrics_text.splitlines():
+            if not line.startswith("dynamo_frontend_router_worker_state{"):
+                continue
+            labels, _, value = line.rpartition("} ")
+            if 'target_endpoint="generate"' not in labels or 'state="available"' not in labels:
+                continue
+            try:
+                if float(value) < 1:
+                    continue
+            except ValueError:
+                continue
+            marker = 'router_worker_id="'
+            start = labels.find(marker)
+            if start >= 0:
+                start += len(marker)
+                workers.add(labels[start : labels.find('"', start)])
+        return len(workers)
+
     async def _healthcheck_frontend(self, expected_workers: int):
         url = f"http://localhost:{self._frontend_port}/health"
         deadline = time.monotonic() + _FRONTEND_READY_TIMEOUT_S
@@ -1865,8 +1890,17 @@ class DynamoHttpServer:
                 resp = await asyncio.to_thread(requests.get, url, timeout=5)
                 if resp.status_code == 200:
                     data = resp.json()
-                    instances = data.get("instances") or []
-                    n_gen = sum(1 for i in instances if i.get("endpoint") == "generate")
+                    if "instances" in data:
+                        instances = data.get("instances") or []
+                        n_gen = sum(1 for i in instances if i.get("endpoint") == "generate")
+                    else:
+                        # ai-dynamo 1.7 dropped the instance list from /health
+                        # ({"status","stage"} only); its router exports one
+                        # worker_state series per registered worker instead.
+                        metrics = await asyncio.to_thread(
+                            requests.get, f"http://localhost:{self._frontend_port}/metrics", timeout=5
+                        )
+                        n_gen = self._count_available_generate_workers(metrics.text)
                     if n_gen >= expected_workers:
                         logger.info(
                             "[DynamoHttpServer] frontend healthy: %s/%s workers registered",

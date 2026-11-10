@@ -39,6 +39,16 @@ actor_rollout_ref:
   actor:
     use_dynamic_bsz: true
     use_kl_loss: false
+    optim:
+      # A 30B MoE's expert shard (~1/8 of the experts per GPU on 8 GPUs) plus its
+      # fp32 master weights and Adam state does not fit next to the sleeping
+      # rollout engine; run the optimizer step on CPU, as verl's 8-GPU MoE
+      # examples do.
+      override_optimizer_config:
+        optimizer_offload_fraction: 1
+        optimizer_cpu_offload: true
+        overlap_cpu_optimizer_d2h_h2d: true
+        use_precision_aware_optimizer: true
     megatron:
       use_mbridge: true
       param_offload: true
@@ -70,6 +80,10 @@ actor_rollout_ref:
       dynamo:
         engine: sglang
         generate_api: generate
+        # The engine binds its KV-event port only after loading weights (minutes
+        # for a 30B model); a random free port picked before that is often taken
+        # by then (ZMQError: Address already in use). Use the per-shard window.
+        stable_kv_event_ports: true
         sglang:
           launch_mode: sidecar
         thunderagent:
