@@ -1,0 +1,14 @@
+# TPR recipe — pinned upstream VERL source revision for verl-tpr.patch
+UPSTREAM=https://github.com/verl-project/verl.git
+MODE=pinned_commit
+BRANCH=main
+COMMIT=2ab35292039a51175a4b3d3b3b2d76e951a0d3e4
+PIP_INSTALL=pip install verl@git+https://github.com/verl-project/verl.git@2ab35292039a51175a4b3d3b3b2d76e951a0d3e4
+GIT_SETUP=git clone https://github.com/verl-project/verl.git && cd verl && git checkout 2ab35292039a51175a4b3d3b3b2d76e951a0d3e4
+RECIPE_FOLDER=tpr
+NOTES=Apply tpr/verl-tpr.patch to this clean VERL checkout before launching TPR.
+
+# Uni-Agent — pinned to the revision used by the validated TPR E2E run
+UNIAGENT_UPSTREAM=https://github.com/verl-project/uni-agent.git
+UNIAGENT_MODE=pinned_commit
+UNIAGENT_COMMIT=d7415466c9b4b3ff7f59a3298ee3e0f5e1297a2f

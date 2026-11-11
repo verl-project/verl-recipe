@@ -1,0 +1,51 @@
+diff --git a/verl/workers/config/engine.py b/verl/workers/config/engine.py
+--- a/verl/workers/config/engine.py
++++ b/verl/workers/config/engine.py
+@@ -206,7 +206,9 @@ class McoreEngineConfig(EngineConfig):
+     override_ddp_config: dict[str, Any] = field(default_factory=dict)
+     override_transformer_config: dict[str, Any] = field(default_factory=dict)
+     override_mcore_model_config: dict[str, Any] = field(default_factory=dict)
+     use_mbridge: bool = True
+     use_megatron_fsdp: bool = False
++    # Optional Tree Prefix Reuse execution path.
++    tpr_enabled: bool = False
+     strategy: str = "megatron"
+     qat: QATEngineConfig = field(default_factory=QATEngineConfig)
+diff --git a/verl/workers/engine/megatron/transformer_impl.py b/verl/workers/engine/megatron/transformer_impl.py
+--- a/verl/workers/engine/megatron/transformer_impl.py
++++ b/verl/workers/engine/megatron/transformer_impl.py
+@@ -439,3 +439,8 @@ class MegatronEngine:
+         override_ddp_config = self._resolve_override_ddp_config()
+ 
++        if self.engine_config.tpr_enabled:
++            from verl_tpr.adapter import install_tpr_module_spec
++
++            install_tpr_module_spec(self.provider, bridge=self.bridge)
++
+         module, updated_tf_config = make_megatron_module(
+@@ -449,4 +454,15 @@ class MegatronEngine:
+             peft_config=self.model_config.get("lora", None),
+         )
+         self.tf_config = updated_tf_config
++        if (
++            self.engine_config.tpr_enabled
++            and getattr(updated_tf_config, "recompute_granularity", None) is not None
++        ):
++            from verl.utils.megatron_utils import unwrap_model
++            from verl_tpr.recompute import install_tpr_full_recompute
++
++            if len(module) != 1:
++                raise NotImplementedError("TPR full recompute requires PP/VPP=1")
++            install_tpr_full_recompute(unwrap_model(module[0]), updated_tf_config)
++
+         print(f"module: {len(module)}")
+@@ -821,3 +837,9 @@ class MegatronEngine:
+             tu.assign_non_tensor(data, routed_num_tokens=routed_num_tokens.item())
+ 
++        # Keep all logical trajectories together before native micro-batch / DCP scheduling.
++        if self.engine_config.tpr_enabled and not forward_only:
++            from verl_tpr.adapter import run_tpr_forward_backward_batch
++
++            return run_tpr_forward_backward_batch(self, data, loss_function, forward_only=forward_only)
++
+         # BSHD path only: pad every micro-batch to the mini-batch's global max seq_len so the
