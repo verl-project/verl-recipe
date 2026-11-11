@@ -1364,6 +1364,28 @@ async def test_generate_dispatches_to_native_route_with_same_headers():
 
 
 @pytest.mark.asyncio
+async def test_generate_keys_affinity_on_session_id_not_per_turn_request_id():
+    # verl's LLMServerManager sends request_id=uuid4() per turn plus
+    # session_id=<trajectory key>; affinity must follow the trajectory.
+    server = _native_server()
+    server.config.engine_kwargs["dynamo"]["router_session_affinity_ttl_secs"] = 600
+    server._server_address = "10.0.0.1"
+    server._server_port = 8000
+    server._generation_resumed = asyncio.Event()
+    server._generation_resumed.set()
+    headers = []
+
+    async def fake_post(payload, request_id, http_request_id=None, url=None):
+        headers.append(server._frontend_headers(request_id))
+        return 200, json.dumps(_sglang_response([5]))
+
+    server._frontend_post = fake_post
+    for turn in ("turn-uuid-1", "turn-uuid-2"):
+        await server.generate([1, 2], {"logprobs": True}, turn, session_id="traj-9")
+    assert [h["x-dynamo-session-id"] for h in headers] == ["traj-9", "traj-9"]
+
+
+@pytest.mark.asyncio
 async def test_native_frontend_error_during_pause_is_reported_as_aborted():
     server = _native_server()
     server._server_address = "10.0.0.1"
