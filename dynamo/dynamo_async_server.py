@@ -608,6 +608,24 @@ class DynamoHttpServer:
             raise RuntimeError(f"dynamo.sglang control call {method!r} failed on {errors}")
         return results
 
+    async def _sglang_flush_cache_all(self, timeout_s: float = 60.0, poll_s: float = 0.5) -> None:
+        """``flush_cache`` on every shard, retried until the shards are idle.
+
+        SGLang refuses a flush (HTTP 400) while any request is running or queued,
+        and ``pause_generation(mode="abort")`` returns before the scheduler has
+        retired the aborted requests: a flush right after it fails with
+        ``#running-req`` > 0 for a few scheduler steps. Retry until ``timeout_s``.
+        """
+        deadline = time.monotonic() + timeout_s
+        while True:
+            try:
+                await self._sglang_control_all("flush_cache")
+                return
+            except RuntimeError as exc:
+                if "HTTP 400" not in str(exc) or time.monotonic() >= deadline:
+                    raise
+            await asyncio.sleep(poll_s)
+
     def _dynamo_cfg_bool(self, key: str, default: bool) -> bool:
         value = self._dynamo_cfg().get(key, default)
         if isinstance(value, bool):
@@ -3245,7 +3263,7 @@ class DynamoHttpServer:
 
     async def clear_kv_cache(self):
         if self._is_sglang():
-            await self._sglang_control_all("flush_cache")
+            await self._sglang_flush_cache_all()
             return
         if not self._control_endpoints:
             return
@@ -3402,7 +3420,7 @@ class DynamoHttpServer:
             self._generation_resumed.clear()
             await self._sglang_control_all("pause_generation", mode="abort")
             if reset_prefix_cache:
-                await self._sglang_control_all("flush_cache")
+                await self._sglang_flush_cache_all()
             return {"aborted_count": -1, "request_ids": [], "paused": True}
         # vLLM: bridge AsyncLLM.pause_generation (vLLM >= 0.12) through each shard's
         # control sidecar -- aborts in-flight requests (the frontend returns their

@@ -1581,3 +1581,35 @@ async def test_healthcheck_reads_router_metrics_when_health_has_no_instances(mon
     monkeypatch.setattr("recipe.dynamo.dynamo_async_server.requests.get", fake_get)
     await server._healthcheck_frontend(expected_workers=2)
     assert seen == ["http://localhost:8000/health", "http://localhost:8000/metrics"]
+
+
+def _flush_server(failures: list):
+    server = DynamoHttpServer.__new__(DynamoHttpServer)
+    calls = []
+
+    async def control_all(method, *args, **kwargs):
+        calls.append(method)
+        if failures:
+            raise failures.pop(0)
+        return []
+
+    server._sglang_control_all = control_all
+    return server, calls
+
+
+def test_flush_cache_retries_while_aborted_requests_drain():
+    busy = RuntimeError("dynamo.sglang control call 'flush_cache' failed on [(url, 'HTTP 400: Flush cache failed.')]")
+    server, calls = _flush_server([busy, busy])
+    asyncio.run(server._sglang_flush_cache_all(timeout_s=5, poll_s=0))
+    assert calls == ["flush_cache"] * 3
+
+
+def test_flush_cache_raises_other_errors_and_gives_up_at_deadline():
+    server, calls = _flush_server([RuntimeError("HTTP 500: boom")])
+    with pytest.raises(RuntimeError, match="HTTP 500"):
+        asyncio.run(server._sglang_flush_cache_all(timeout_s=5, poll_s=0))
+    assert calls == ["flush_cache"]
+    server, calls = _flush_server([RuntimeError("HTTP 400: busy")] * 50)
+    with pytest.raises(RuntimeError, match="HTTP 400"):
+        asyncio.run(server._sglang_flush_cache_all(timeout_s=0, poll_s=0))
+    assert calls == ["flush_cache"]
