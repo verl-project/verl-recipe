@@ -6,6 +6,43 @@ See [`REQUIRED_VERL.txt`](REQUIRED_VERL.txt) for the upstream repository, instal
 
 This directory contains the implementation for reproducing the DeepEyes paper within the verl framework, supporting multi-turn visual tool calls. This implementation is based on the original [DeepEyes paper](https://arxiv.org/abs/2505.14362) and its [official implementation](https://github.com/Visual-Agent/DeepEyes), integrated with the multi-modal and multi-turn capabilities of the verl framework.
 
+Two model families are supported:
+
+| Model | Config | Entry script | Backend |
+| --- | --- | --- | --- |
+| Qwen2.5-VL-7B (original recipe) | `configs/deepeyes_multiturn_grpo.yaml` | `run_deepeyes_grpo.sh` | SGLang (GPU) |
+| Qwen3.5-4B | `configs/deepeyes_multiturn_grpo_qwen3_5.yaml` | `run_deepeyes_grpo_qwen3_5_4b.sh` | vLLM-Ascend (NPU) |
+| Qwen3.5-9B | `configs/deepeyes_multiturn_grpo_qwen3_5.yaml` | `run_deepeyes_grpo_qwen3_5_9b.sh` | vLLM-Ascend (NPU) |
+
+## Qwen3.5-4B / Qwen3.5-9B on Ascend NPU
+
+Requirements: CANN 8.5.2+, torch/torch_npu 2.9.0, vllm 0.18.0, vllm-ascend 0.18.0,
+transformers `cc7ab9be` (contains `qwen3_5`). Installation, data preparation, judge
+setup and troubleshooting are documented in [`QWEN3_5_NPU_RUNBOOK.md`](QWEN3_5_NPU_RUNBOOK.md).
+
+```bash
+huggingface-cli download Qwen/Qwen3.5-4B --local-dir ~/models/Qwen3.5-4B
+huggingface-cli download Qwen/Qwen3.5-9B --local-dir ~/models/Qwen3.5-9B
+python3 recipe/deepeyes/scripts/prepare_data.py --output-dir ~/data/deepeyes
+
+# A judge server must be running; see the runbook.
+LLM_AS_A_JUDGE_BASE=http://127.0.0.1:18901/v1 \
+MODEL_PATH=~/models/Qwen3.5-4B \
+bash recipe/deepeyes/run_deepeyes_grpo_qwen3_5_4b.sh
+```
+
+Differences from the Qwen2.5-VL recipe:
+
+| Topic | Qwen2.5-VL | Qwen3.5 |
+| --- | --- | --- |
+| Chat template | custom ChatML in the YAML | model's native template |
+| Tool call format | JSON | XML `<function=...><parameter=...>` |
+| Tool parser | `hermes` | `multi_turn.format=qwen3_coder` |
+| Thinking | model emits `<think>...</think>` | template injects `<think>`, so the dataset removes the duplicated instruction |
+| Dataset class | `CustomRLHFDataset` | `CustomRLHFDatasetQwen35` |
+| Rollout engine | SGLang | vLLM-Ascend |
+| Training engine | FSDP | FSDP2, `use_remove_padding=False` |
+
 ## Reproducing the Experiment
 
 > **Note on the 'Chart' Dataset:**
