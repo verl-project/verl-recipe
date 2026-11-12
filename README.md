@@ -82,6 +82,7 @@ The script requires only `bash`, `git`, `awk`, and `pip`/`pip3` on `PATH`. It do
 | langgraph_agent | [`recipe/langgraph_agent/REQUIRED_VERL.txt`](langgraph_agent/REQUIRED_VERL.txt) |
 | minicpmo | [`recipe/minicpmo/REQUIRED_VERL.txt`](minicpmo/REQUIRED_VERL.txt) |
 | nemo_gym | [`recipe/nemo_gym/REQUIRED_VERL.txt`](nemo_gym/REQUIRED_VERL.txt) |
+| [one_step_off_policy](one_step_off_policy/README.md) | [`recipe/one_step_off_policy/REQUIRED_VERL.txt`](one_step_off_policy/REQUIRED_VERL.txt) |
 | open_math_reasoning | [`recipe/open_math_reasoning/REQUIRED_VERL.txt`](open_math_reasoning/REQUIRED_VERL.txt) |
 | partial_rollout | [`recipe/partial_rollout/REQUIRED_VERL.txt`](partial_rollout/REQUIRED_VERL.txt) |
 | prime | [`recipe/prime/REQUIRED_VERL.txt`](prime/REQUIRED_VERL.txt) |

@@ -1,0 +1,9 @@
+# one_step_off_policy — verl v0.9.1
+UPSTREAM=https://github.com/verl-project/verl.git
+MODE=pinned_commit
+COMMIT=1876b06d0a3e4e71e06230be10af14492ca8a75b
+VERL_COMMIT=1876b06d0a3e4e71e06230be10af14492ca8a75b
+PIP_INSTALL=pip install verl@git+https://github.com/verl-project/verl.git@1876b06d0a3e4e71e06230be10af14492ca8a75b
+GIT_SETUP=git clone https://github.com/verl-project/verl.git && cd verl && git checkout 1876b06d0a3e4e71e06230be10af14492ca8a75b && git submodule update --init recipe && git -C recipe fetch https://github.com/Begunner/verl-recipe.git 776a0f47dd5321cdac75b676e183b921064f40fe && git -C recipe checkout 776a0f47dd5321cdac75b676e183b921064f40fe
+RECIPE_FOLDER=one_step_off_policy
+NOTES=Uses the V0 trainer in verl v0.9.1. Run from that verl checkout with this recipe checkout at recipe/.
