@@ -92,7 +92,11 @@ _ETCD_READY_TIMEOUT_S = 30.0
 _NATS_READY_TIMEOUT_S = 30.0
 _WATCHDOG_INTERVAL_S = 5.0
 _VLLM_TCPSTORE_PORT_BASE = int(os.getenv("VERL_DYNAMO_VLLM_PORT_BASE", "20000"))
-_KV_EVENT_PORT_BASE = int(os.getenv("VERL_DYNAMO_KV_EVENT_PORT_BASE", "42000"))
+# Above Linux's default ephemeral range (32768-60999): the engine binds this port
+# only after loading weights (and allocating HiCache), minutes after it was
+# picked, and an outgoing connection's ephemeral port can take it meanwhile.
+# The KV-event layout below spans at most 4096 ports, so 61000 stays <= 65535.
+_KV_EVENT_PORT_BASE = int(os.getenv("VERL_DYNAMO_KV_EVENT_PORT_BASE", "61000"))
 # Opt-in per-worker system-status/metrics port base. Kept well below 32768 so
 # Dynamo's Rust runtime (which parses DYN_SYSTEM_PORT as i16) accepts it, and
 # below the 20000 vLLM-TCPStore window to avoid overlap. Only used when
@@ -1362,7 +1366,14 @@ class DynamoHttpServer:
         finally:
             sock.close()
 
-    def _allocate_stable_node_port(self, base: int, shard_idx: int, window: int = 8) -> int:
+    def _allocate_stable_node_port(
+        self,
+        base: int,
+        shard_idx: int,
+        window: int = 8,
+        replica_stride: int = 2048,
+        node_stride: int = 128,
+    ) -> int:
         """Pick a stable node-local port for concurrently launched shards.
 
         Engine ports get bound in child processes, well after the parent picked
@@ -1374,7 +1385,7 @@ class DynamoHttpServer:
         """
         replica_slot = self.replica_rank % 4
         node_slot = self.node_rank % 16
-        start = base + replica_slot * 2048 + node_slot * 128 + shard_idx * window
+        start = base + replica_slot * replica_stride + node_slot * node_stride + shard_idx * window
         for port in range(start, start + window):
             if port in self._allocated_tcp_ports:
                 continue
@@ -1401,7 +1412,10 @@ class DynamoHttpServer:
         previous failed job, so use a random currently-free port by default.
         """
         if self._dynamo_cfg_bool("stable_kv_event_ports", False):
-            return self._allocate_stable_node_port(_KV_EVENT_PORT_BASE, shard_idx, window=16)
+            # 4 replica slots x 16 node slots x 8 shards x 8 ports = 4096 ports.
+            return self._allocate_stable_node_port(
+                _KV_EVENT_PORT_BASE, shard_idx, window=8, replica_stride=1024, node_stride=64
+            )
         return self._allocate_tcp_port(bind_wildcard=True)
 
     def _configured_or_allocated_port(self, key: str, bind_wildcard: bool = False) -> int:

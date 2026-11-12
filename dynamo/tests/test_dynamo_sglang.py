@@ -571,6 +571,25 @@ def test_sidecar_cmd_raises_the_startup_deadline():
     assert cmd[-2:] == ["--grpc-connections", "8"]
 
 
+def test_stable_kv_event_ports_avoid_ephemeral_range_and_are_unique():
+    # The engine binds its KV-event port minutes after it is picked; a port in
+    # Linux's ephemeral range (32768-60999) can be taken by an outgoing
+    # connection in between (seen: ZMQError Address already in use, port 42160).
+    seen = set()
+    for replica_rank in range(4):
+        for node_rank in range(16):
+            server = _make_server({"engine": "sglang", "stable_kv_event_ports": True})
+            server.replica_rank, server.node_rank = replica_rank, node_rank
+            server._server_address = "127.0.0.1"
+            server._allocated_tcp_ports = set()
+            server._can_bind_tcp_port = lambda port, bind_wildcard=False: True
+            for shard_idx in range(8):
+                port = server._allocate_kv_event_port(shard_idx)
+                assert 60999 < port <= 65535, (replica_rank, node_rank, shard_idx, port)
+                assert port not in seen
+                seen.add(port)
+
+
 def test_spawn_sidecar_shard_starts_sidecar_then_engine(tmp_path, monkeypatch):
     server = _make_server(_sidecar_cfg(), tensor_model_parallel_size=2)
     server.replica_rank = 0
