@@ -96,8 +96,11 @@ def test_pristine_upstream_setup_runs_with_info_enabled(compat, monkeypatch):
     trainer._enable_hybrid_replicas = False
     with monkeypatch.context() as baseline:
         baseline.setattr(upstream.logger, "info", logging.Logger.info.__get__(upstream.logger))
-        with pytest.raises(TypeError, match="flush"):
+        try:
             upstream.PPOTrainerSeparateAsync._setup(trainer)
+        except TypeError as exc:
+            # Older verl uses logger.info(..., flush=True); current images fixed it.
+            assert "flush" in str(exc)
     upstream.PPOTrainerSeparateAsync._setup(trainer)
     assert trainer.current_mode is upstream.HybridEngineMode.TRAINER
     assert trainer.standalone_server_manager is manager
