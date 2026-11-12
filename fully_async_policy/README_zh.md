@@ -2,6 +2,8 @@
 
 依赖固定为 [verl v0.9.1](https://github.com/verl-project/verl/commit/1876b06d0a3e4e71e06230be10af14492ca8a75b)，见 [REQUIRED_VERL.txt](REQUIRED_VERL.txt)。使用该版本中的 V0 trainer，并将本 recipe 仓库放在 verl checkout 的 `recipe/` 目录下运行。
 
+完整的仓库检出、环境安装和启动步骤见 [Required verl version](README.md#required-verl-version)。
+
 
 **Author:**  `https://github.com/meituan-search`
 

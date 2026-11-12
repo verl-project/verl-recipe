@@ -3,11 +3,33 @@
 ## Required verl version
 
 Pinned to [verl v0.9.1](https://github.com/verl-project/verl/commit/1876b06d0a3e4e71e06230be10af14492ca8a75b); see [REQUIRED_VERL.txt](REQUIRED_VERL.txt).
-The recipe uses that version's V0 trainer. Run from the pinned verl checkout with this recipe checkout at `recipe/`:
+The recipe uses that version's V0 trainer. Set up a fresh checkout with the migrated recipe revision:
 
 ```bash
-python -m recipe.fully_async_policy.fully_async_main [Hydra overrides]
+git clone https://github.com/verl-project/verl.git verl-v091
+cd verl-v091
+git checkout 1876b06d0a3e4e71e06230be10af14492ca8a75b
+git submodule update --init recipe
+git -C recipe fetch https://github.com/Begunner/verl-recipe.git 776a0f47dd5321cdac75b676e183b921064f40fe
+git -C recipe checkout 776a0f47dd5321cdac75b676e183b921064f40fe
+
+# NVIDIA FSDP + vLLM environment
+uv sync --frozen --python 3.12 --extra fsdp --extra vllm --extra math
+source .venv/bin/activate
 ```
+
+The environment command above is for NVIDIA FSDP + vLLM. For Megatron or SGLang,
+replace the corresponding extra with `megatron` or `sglang`. For ROCm, Ascend, or
+TensorRT-LLM, use the platform-specific environment for the pinned verl version.
+
+Run from `verl-v091/`, where Hydra loads `verl/trainer/config`. For example:
+
+```bash
+python -m recipe.fully_async_policy.fully_async_main --cfg job
+```
+
+For training, replace `--cfg job` with model, dataset, and resource overrides,
+or run a launcher under `recipe/fully_async_policy/shell/`.
 
 **Author:** `https://github.com/meituan-search`
 
