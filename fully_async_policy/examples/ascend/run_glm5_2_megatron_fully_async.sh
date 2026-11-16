@@ -293,7 +293,7 @@ TRAINER_ARGS=(
     trainer.total_epochs=100
 )
 
-python3 -m verl.experimental.fully_async_policy.fully_async_main \
+python3 -m recipe.fully_async_policy.fully_async_main \
     --config-path=config \
     --config-name=fully_async_ppo_megatron_trainer.yaml \
     "++ray_kwargs.ray_init.runtime_env.env_vars.VERL_VLLM_ASCEND_GLM52_PATCH='1'" \
