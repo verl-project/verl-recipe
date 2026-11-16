@@ -1,0 +1,6 @@
+# POISE — current V1 trainer and FSDP engine APIs.
+UPSTREAM=https://github.com/verl-project/verl.git
+MODE=pinned_commit
+BRANCH=main
+COMMIT=8718ca30a3f002f93b7c4fd99b9b2506718681bc
+PIP_INSTALL=pip install verl@git+https://github.com/verl-project/verl.git@8718ca30a3f002f93b7c4fd99b9b2506718681bc
