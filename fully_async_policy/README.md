@@ -3,15 +3,15 @@
 ## Required verl version
 
 Pinned to [verl v0.9.1](https://github.com/verl-project/verl/commit/1876b06d0a3e4e71e06230be10af14492ca8a75b); see [REQUIRED_VERL.txt](REQUIRED_VERL.txt).
-The recipe uses that version's V0 trainer. Set up a fresh checkout with the migrated recipe revision:
+The recipe uses that version's V0 trainer. Set up a fresh checkout with the recipes from the official repository:
 
 ```bash
 git clone https://github.com/verl-project/verl.git verl-v091
 cd verl-v091
 git checkout 1876b06d0a3e4e71e06230be10af14492ca8a75b
 git submodule update --init recipe
-git -C recipe fetch https://github.com/Begunner/verl-recipe.git 776a0f47dd5321cdac75b676e183b921064f40fe
-git -C recipe checkout 776a0f47dd5321cdac75b676e183b921064f40fe
+git -C recipe fetch https://github.com/verl-project/verl-recipe.git main
+git -C recipe checkout --detach FETCH_HEAD
 
 # NVIDIA FSDP + vLLM environment
 uv sync --frozen --python 3.12 --extra fsdp --extra vllm --extra math
