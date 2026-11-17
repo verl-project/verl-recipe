@@ -12,8 +12,8 @@
 #   because gdn_row_slot_len needs gated_delta_document_resets which the default torchtitan commit lacks.
 #   Left unset by default so the recipe runs out of the box on verl main's default image.
 #
-# Preprocess R2E-Gym dataset beforehand with uni-agent:
-#   python3 -m uni_agent.tasks.r2e_gym.preprocess --local-save-dir "${RAY_DATA_HOME}/data/r2e_gym_easy"
+# Preprocess R2E-Gym into non-overlapping train/eval Parquet splits beforehand:
+#   PYTHONPATH=uni-agent python3 deepswe_tpu/prepare_data.py --local-save-dir "${RAY_DATA_HOME}/data/r2e_gym"
 
 set -xeuo pipefail
 
@@ -69,8 +69,8 @@ export USE_DYNAMIC_BSZ="${USE_DYNAMIC_BSZ:-False}"
 RAY_DATA_HOME="${RAY_DATA_HOME:-/data}"
 export MODEL_NAME="${MODEL_NAME:-Qwen3.5-35B-A3B}"
 export MODEL_PATH="${MODEL_PATH:-${RAY_DATA_HOME}/assets/hf/${MODEL_NAME}}"
-export TRAIN_FILE="${TRAIN_FILE:-${RAY_DATA_HOME}/data/r2e_gym_easy/train.parquet}"
-export TEST_FILE="${TEST_FILE:-${RAY_DATA_HOME}/data/r2e_gym_easy/test.parquet}"
+export TRAIN_FILE="${TRAIN_FILE:-${RAY_DATA_HOME}/data/r2e_gym/train.parquet}"
+export TEST_FILE="${TEST_FILE:-${RAY_DATA_HOME}/data/r2e_gym/test.parquet}"
 export PROJECT_NAME="${PROJECT_NAME:-verl-tpu-deepswe}"
 export EXPERIMENT_NAME="${EXPERIMENT_NAME:-qwen3_5_35b_deepswe_r2e_gym}"
 
@@ -81,7 +81,7 @@ export LEARNING_RATE="${LEARNING_RATE:-1e-6}"
 export LR_WARMUP_STEPS="${LR_WARMUP_STEPS:-0}"
 export TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-50}"
 export VAL_BATCH_SIZE="${VAL_BATCH_SIZE:-64}"
-export VAL_MAX_SAMPLES="${VAL_MAX_SAMPLES:-70}"
+export VAL_MAX_SAMPLES="${VAL_MAX_SAMPLES:-100}"
 export TEST_FREQ="${TEST_FREQ:-10}"
 export VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-False}"
 
@@ -108,8 +108,8 @@ VLLM_ASYNC_SCHEDULING="${VLLM_ASYNC_SCHEDULING:-False}"
 export NUM_WARMUP_BATCHES="${NUM_WARMUP_BATCHES:-1}"
 # max_off_policy_strategy=wait blocks sampling while any in-flight prompt group has
 # (global_steps - dispatch_step + 1) >= MAX_OFF_POLICY_THRESHOLD. With 1, every step waits for all in-flight
-# groups, including the warmup prefetch, so the prefetch never overlaps training. With a prefetch (staleness 1,
-# MLPerf MAX_STALENESS=1) use 2: a step only waits for the groups dispatched in the previous step.
+# groups, including the warmup prefetch, so the prefetch never overlaps training. With a 1-batch prefetch
+# (staleness 1), use 2 so a step only waits for the groups dispatched in the previous step.
 if awk -v w="${NUM_WARMUP_BATCHES}" 'BEGIN { exit !(w > 0) }'; then
   MAX_OFF_POLICY_THRESHOLD="${MAX_OFF_POLICY_THRESHOLD:-2}"
   export VERL_REFILL_AFTER_SAMPLE="${VERL_REFILL_AFTER_SAMPLE:-1}"
