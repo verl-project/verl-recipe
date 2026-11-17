@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 TIMEOUT_TEXT = "TimeoutError: Code execution timed out."
-UNAVAILABLE_TEXT = "Code execution is temporarily unavailable; the code was not run."
+UNAVAILABLE_TEXT = "Code execution is temporarily unavailable; no result was returned."
 
 _REMOTE = "/opt/verl-retool"
 # Runs as PID 1 of the new namespaces, so every process the code starts dies with it.
@@ -159,6 +159,8 @@ class CustomE2BSandboxTool(BaseTool):
                     logger.warning("E2B sandbox %s failed with %s", lease.sandbox.sandbox_id, type(exc).__name__)
                 await self._discard(lease.sandbox)
                 lease.sandbox = None
+                # Whatever broke this sandbox may have hit the idle ones too: check each before reuse.
+                self._renewed.clear()
                 if not isinstance(exc, self._retryable):
                     break
         return ToolResponse(text=UNAVAILABLE_TEXT), 0.0, {}
@@ -212,9 +214,7 @@ class CustomE2BSandboxTool(BaseTool):
                 template=self.template,
                 timeout=self.sandbox_timeout,
                 metadata=self._metadata,
-                secure=True,
                 allow_internet_access=False,
-                lifecycle={"on_timeout": "kill"},
             )
         try:
             await sandbox.commands.run(f"install -d -m 755 {_REMOTE}", user="root", timeout=15)

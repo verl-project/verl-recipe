@@ -86,26 +86,34 @@ The RL scripts run the model's code through the tool named in `actor_rollout_ref
 
 [E2B](https://e2b.dev) runs the code in cloud sandboxes, so there is no code execution service to deploy.
 
+Install the SDK and set your API key. The key must be in the environment of the Ray workers, not only in the shell that starts training.
+
 ```bash
 pip install e2b
 export E2B_API_KEY="..."
+```
 
+Then point any RL script at the E2B config:
+
+```bash
 bash recipe/retool/run_qwen2-32b_dapo.sh \
     actor_rollout_ref.rollout.multi_turn.tool_config_path=recipe/retool/e2b_tool_config.yaml
 ```
-
-`E2B_API_KEY` must be set in the environment of the Ray workers, not only in the shell that starts training.
 
 How it works:
 
 - Each agent loop worker keeps a pool of `pool_size` sandboxes and reuses them, because E2B limits how fast sandboxes can be created (1 per second on Hobby, 5 on Pro). Sandboxes are created on demand, `create_interval` seconds apart.
 - Every tool call runs in fresh Linux namespaces inside one sandbox: read-only root, empty `/tmp`, no network, an unprivileged user. Variables, files and processes do not carry over to the next call, the same as with Sandbox Fusion.
 - The model gets stdout followed by stderr. Code that runs longer than `default_timeout` seconds is killed and the output ends with `TimeoutError: Code execution timed out.`
-- If a sandbox fails, the call is retried once on a new sandbox. If that fails too, the model gets `Code execution is temporarily unavailable; the code was not run.` and a warning is logged.
+- If a sandbox fails, the call is retried once on a new sandbox. If that fails too, the model gets `Code execution is temporarily unavailable; no result was returned.` and a warning is logged. If that warning appears on every call, check the API key and the `template` name.
 - A sandbox that gets no calls for `sandbox_timeout` seconds is removed by E2B and replaced on the next call. Nothing has to be shut down after training.
 
-Size the pool to your plan: `pool_size` × `actor_rollout_ref.rollout.agent.num_workers` must stay within the plan's concurrent sandbox limit (10 on Hobby, 100 on Pro; see [E2B limits](https://e2b.dev/docs/billing)). The default `pool_size: 8` with 8 workers uses up to 64 sandboxes. On Hobby, set `pool_size: 1`.
+Size the pool to your plan: `pool_size` × `actor_rollout_ref.rollout.agent.num_workers` must stay within the plan's concurrent sandbox limit (10 on Hobby, 100 on Pro; see [E2B limits](https://e2b.dev/docs/billing)). The default `pool_size: 8` with 8 workers uses up to 64 sandboxes. On Hobby, set `pool_size: 1` and `create_interval` to at least the number of workers, so that all workers together stay under 1 creation per second.
 
 The default `code-interpreter-v1` template includes numpy, sympy and scipy. To use other packages, build a [custom template](https://e2b.dev/docs/template/quickstart) and set `template`.
 
-Tested with `verl==0.9.1`. The tests in [`tests/test_e2b_sandbox_tool.py`](tests/test_e2b_sandbox_tool.py) need no GPU or network: `pytest recipe/retool/tests/test_e2b_sandbox_tool.py` from the verl root.
+The E2B tool is tested with `verl==0.9.1`, not with the `verl==0.6.1` pinned above. Its tests need no GPU or network. Run them from the verl root:
+
+```bash
+pytest recipe/retool/tests/test_e2b_sandbox_tool.py
+```

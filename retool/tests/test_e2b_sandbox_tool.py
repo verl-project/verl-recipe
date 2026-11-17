@@ -242,6 +242,20 @@ def test_expired_idle_sandboxes_do_not_use_up_retries(make_tool):
     assert [sandbox.killed for sandbox in FakeSandbox.created] == [True, True, True, False]
 
 
+def test_retry_does_not_reuse_another_dead_sandbox(make_tool):
+    tool = make_tool(pool_size=3)
+
+    async def run():
+        await asyncio.gather(*(call(tool) for _ in range(3)))
+        for sandbox in FakeSandbox.created:
+            sandbox.expired = True
+        FakeSandbox.script = [Gone("vm died")]
+        return await call(tool)
+
+    assert asyncio.run(run()) == "ok\n"
+    assert len(FakeSandbox.created) == 4 and not FakeSandbox.created[3].killed
+
+
 def test_sandbox_creation_is_paced(make_tool):
     tool = make_tool(pool_size=3, create_interval=0.1)
 
