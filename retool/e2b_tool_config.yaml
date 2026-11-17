@@ -1,0 +1,28 @@
+tools:
+  - class_name: "recipe.retool.e2b_sandbox_tool.CustomE2BSandboxTool"
+    config:
+      # Sandboxes kept by each agent loop worker. Keep
+      # pool_size * actor_rollout_ref.rollout.agent.num_workers within your E2B plan's concurrent sandbox limit.
+      pool_size: 8
+      # Seconds between sandbox creations in one worker.
+      create_interval: 2.0
+      # Seconds one code execution may run.
+      default_timeout: 30
+      # Seconds an unused sandbox lives before E2B removes it.
+      sandbox_timeout: 600
+      max_output_bytes: 65536
+      template: "code-interpreter-v1"
+      type: native
+
+    tool_schema:
+      type: "function"
+      function:
+        name: "code_interpreter"
+        description: "A tool for executing code."
+        parameters:
+          type: "object"
+          properties:
+            code:
+              type: "string"
+              description: "The code to execute."
+          required: ["code"]
