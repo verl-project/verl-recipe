@@ -1,9 +1,9 @@
-# deepswe — rolling; tested against unmodified verl main + verl-hardware-plugin main
+# deepswe_tpu — rolling; tested against unmodified verl main + verl-hardware-plugin main
 UPSTREAM=https://github.com/verl-project/verl.git
 MODE=rolling
 BRANCH=main
 VERL_COMMIT=44cdff30191583b9aa14d90872b6ba1447a7275d
 PIP_INSTALL=pip install verl@git+https://github.com/verl-project/verl.git@44cdff30191583b9aa14d90872b6ba1447a7275d
 TPU_PLUGIN_COMMIT=16be0a491de807bbd9767f7894aa21feb41e1b52
-RECIPE_FOLDER=deepswe
+RECIPE_FOLDER=deepswe_tpu
 NOTES=Requires latest verl main, verl-hardware-plugin main (TPU_PLUGIN_COMMIT), and uni-agent with GKEAgentSandbox / R2E-Gym support.

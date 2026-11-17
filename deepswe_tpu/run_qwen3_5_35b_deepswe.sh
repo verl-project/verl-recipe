@@ -31,10 +31,10 @@ if [[ -z "${VERL_ROOT:-}" ]]; then
   fi
 fi
 
-if [[ -f "${VERL_ROOT}/recipe/deepswe/deepswe.py" ]]; then
-  DEEPSWE_MODULE="${DEEPSWE_MODULE:-recipe.deepswe.deepswe}"
+if [[ -f "${VERL_ROOT}/recipe/deepswe_tpu/deepswe.py" ]]; then
+  DEEPSWE_MODULE="${DEEPSWE_MODULE:-recipe.deepswe_tpu.deepswe}"
 else
-  DEEPSWE_MODULE="${DEEPSWE_MODULE:-deepswe.deepswe}"
+  DEEPSWE_MODULE="${DEEPSWE_MODULE:-deepswe_tpu.deepswe}"
 fi
 
 # Topology: trainer 2 hosts x 8 TensorCores (2x2x2), FSDP16; 3 rollout replicas of 8 chips (2x2x1), TP8/EP8.

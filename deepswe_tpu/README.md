@@ -46,9 +46,41 @@ kubectl create namespace "${NAMESPACE}" || true
 Each R2E-Gym rollout episode spins up an isolated repository container (such as `numpy`, `pillow`, `pandas`, or `tornado`) where the ReAct agent runs bash commands, edits code, and executes `pytest` suites. Running dozens of concurrent container sandboxes on a dedicated CPU node pool prevents their CPU and disk I/O bursts from starving the Ray head pod or interfering with the TPU host VMs.
 
 ### How it should look
-- **Machine type & sizing**: CPU nodes with plenty of vCPUs and local disk (e.g., `n2-standard-32` or `n2-standard-64` with `200GB+` `pd-balanced` boot disks to cache multiple R2E-Gym container images). For 32–128 concurrent sandboxes (~2 vCPUs and 4 GiB RAM per sandbox), provision ~500–2,000 total vCPUs (e.g., 16–64 `n2-standard-32` nodes with autoscaling).
+- **Machine type & sizing**: CPU nodes with plenty of vCPUs and local disk (e.g., `n2-standard-32` or `n2-standard-64` with `200GB+` `pd-balanced` boot disks to cache multiple R2E-Gym container images).
 - **Node label**: `cloud.google.com/gke-nodepool=sandbox-cpu-pool` so `GKEAgentSandbox` can target this pool via `NODE_SELECTOR_KEY` and `NODE_SELECTOR_VAL`.
 - **Node taint**: `cloud.google.com/gke-nodepool=sandbox-cpu-pool:NoSchedule` so regular cluster workloads do not land on sandbox nodes (`GKEAgentSandbox` automatically adds a matching toleration to every sandbox pod it creates).
+
+### How to size the number of nodes
+
+**Mental model:** Each training run puts two kinds of sandbox pods on this CPU node pool:
+1. **Working sandboxes** — containers actively running shell commands and `pytest` for the trajectories currently in flight. These are what actually consume CPU and RAM (typically bursting to ~`1–2` vCPUs and `2–4 GiB` RAM each).
+2. **Warm standby sandboxes** — idle containers pre-started ahead of time (2-slot lookahead for the current + next batch, plus just-in-time eval containers on validation steps) so rollouts do not block on multi-gigabyte image pulls. Standby pods use almost no CPU, so they mainly count toward Kubernetes' per-node pod limit and local disk cache.
+
+If `K` training runs share the same sandbox pool in parallel, both buckets scale linearly by `K`.
+
+**Simple sizing rule (for `n2-standard-32`, 32 vCPU / 128 GiB RAM):**
+1. **How many working sandboxes run at once per job?**
+   Each rollout batch has `TRAIN_BATCH_SIZE * ROLLOUT_N` trajectories, and with `NUM_WARMUP_BATCHES=1` up to two batches overlap, capped by `CONCURRENCY`:
+   ```text
+   active_per_run = min(CONCURRENCY, (1 + NUM_WARMUP_BATCHES) * TRAIN_BATCH_SIZE * ROLLOUT_N)
+   ```
+   *(Default TPU v7x: `min(384, 2 * 16 * 16) = 384` working sandboxes.)*
+2. **Convert working sandboxes to CPU nodes:**
+   One `n2-standard-32` node comfortably handles about **`16–24` working sandboxes** (~20 as a rule of thumb) without CPU throttling or OOM kills during parallel `pytest` bursts. Multiply by the number of parallel runs `K`:
+   ```text
+   nodes = ceil(K * active_per_run / 20)   # conservative: divide by 16; tighter: divide by 24
+   ```
+3. **Quick sanity checks for pod limit and disk:**
+   - **Pod cap (`110` pods/node on GKE, ~`100` usable):** Standby warm pools add roughly `2 * TRAIN_BATCH_SIZE * min(ROLLOUT_N, SANDBOX_MAX_WARMPOOL_SIZE)` pods (plus `VAL_MAX_SAMPLES * SANDBOX_EVAL_REPLICAS` during validation) — around `~710` total pods at peak for one default v7x run. Make sure `nodes >= ceil(K * peak_pods / 100)` (compute dominates on `n2-standard-32`, but the pod cap can bind on `n2-standard-64+`).
+   - **Boot disk (`200–300 GB`):** R2E-Gym images are ~`2–5 GB` uncompressed. Replicas of the same image co-locate onto one node by default (`colocate_replicas=True`) to reuse cached containerd layers; `200 GB+` disks keep ~`30–50` images cached per node.
+
+**Quick-reference examples (`n2-standard-32`):**
+
+| Workload | `TRAIN_BATCH_SIZE` x `ROLLOUT_N` | `CONCURRENCY` | Working sandboxes (`K * active`) | Recommended `n2-standard-32` nodes |
+| --- | --- | --- | --- | --- |
+| 1 small / dev run | 8 x 8 | 64 | 64 | **4–6** |
+| 1 default TPU v7x run | 16 x 16 | 384 | 384 | **16–24** (autoscale `4–32`) |
+| 2–3 parallel TPU v7x runs | 16 x 16 (x `K`) | 384 (x `K`) | 768–1,152 | **32–64+** |
 
 ### Suggested command
 ```bash
@@ -69,7 +101,7 @@ gcloud container node-pools create sandbox-cpu-pool \
 
 ---
 
-## 3. TPU Node Pools (Trainer Slice + Rollout Slice(s))
+## 3. TPU Node Pools (1 Trainer Slice + N Rollout Slices)
 
 ### What it is for
 `verl`'s `separate_async` trainer runs TorchTitan FSDP2 training on a dedicated trainer TPU slice while `vLLM` generates rollouts on separate rollout TPU slice(s), syncing weights between them after each step via `tpu-sync`. Keeping trainer and rollout on separate TPU slices prevents training and inference from competing for HBM on the same chips.
@@ -207,7 +239,7 @@ git clone https://github.com/verl-project/verl.git
 git clone https://github.com/verl-project/verl-hardware-plugin.git
 git clone https://github.com/verl-project/uni-agent.git
 git clone https://github.com/verl-project/verl-recipe.git
-mkdir -p verl/recipe && cp -r verl-recipe/deepswe verl/recipe/deepswe
+mkdir -p verl/recipe && cp -r verl-recipe/deepswe_tpu verl/recipe/deepswe_tpu
 
 # 2. Preprocess R2E-Gym into Parquet files and upload to GCS
 PYTHONPATH=uni-agent:verl python3 -m uni_agent.tasks.r2e_gym.preprocess \
@@ -217,7 +249,7 @@ gcloud storage cp -r /tmp/r2e_gym_easy "gs://${BUCKET}/${USER_DIR}/data/"
 # 3. Upload the text-only Qwen3.5-35B-A3B checkpoint to GCS
 gcloud storage cp -r /path/to/Qwen3.5-35B-A3B "gs://${BUCKET}/${USER_DIR}/assets/hf/"
 
-# 4. Bundle and upload the repositories (the recipe is inside verl/recipe/deepswe)
+# 4. Bundle and upload the repositories (the recipe is inside verl/recipe/deepswe_tpu)
 tar -czf /tmp/deepswe_bundle.tar.gz \
   --exclude='.git' --exclude='__pycache__' \
   uni-agent verl verl-hardware-plugin
@@ -290,7 +322,7 @@ kubectl exec -n "${NAMESPACE}" "${HEAD_POD}" -- \
     export NODE_SELECTOR_VAL='sandbox-cpu-pool' &&
     # Optional (only when image was built with TORCHTITAN_COMMIT=4e16e67aed8c1e702e6f440b1ff81619bb6873d4):
     # export GDN_ROW_SLOT_LEN=32768 &&
-    exec bash /tmp/deepswe_src/verl/recipe/deepswe/run_qwen3_5_35b_deepswe.sh \
+    exec bash /tmp/deepswe_src/verl/recipe/deepswe_tpu/run_qwen3_5_35b_deepswe.sh \
       \"trainer.logger=['console','wandb']\" \
       \"+ray_kwargs.ray_init.runtime_env.env_vars.PYTHONPATH='\${PYTHONPATH}'\"
   "

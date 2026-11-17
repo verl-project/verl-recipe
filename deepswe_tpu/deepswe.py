@@ -11,9 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""DeepSWE recipe hooks for 2-slot lookahead GKE / Kubernetes sandbox pre-warming and just-in-time evaluation pools.
+"""DeepSWE-style TPU recipe hooks for 2-slot GKE sandbox lookahead and just-in-time evaluation pools.
 
-This module lives in the DeepSWE recipe folder (``verl-recipe/deepswe/deepswe.py``) and is loaded through
+This module lives in the TPU DeepSWE recipe folder (``verl-recipe/deepswe_tpu/deepswe.py``) and is loaded through
 ``VERL_USE_EXTERNAL_MODULES`` so core ``verl`` trainer files remain untouched.
 """
 
@@ -28,36 +28,22 @@ from typing import Any
 import numpy as np
 import torch
 from tensordict import TensorDict
+from uni_agent.framework.entry import AgentFrameworkRolloutAdapter
+from uni_agent.sandbox.gke_agent_sandbox import (
+    PrewarmBatchIterator,
+    close_lookahead_warmer,
+    ensure_lookahead_batch_warm,
+    extract_sandbox_images,
+    finish_lookahead_batch_async,
+    load_image_map_from_task_config,
+    prefetch_lookahead_batch_async,
+)
 
 from verl.trainer.ppo.core_algos import ADV_ESTIMATOR_REGISTRY, register_adv_est
 from verl.trainer.ppo.v1.trainer_base import TRAINER_REGISTRY, PPOTrainer
 from verl.trainer.ppo.v1.trainer_separate_async import PPOTrainerSeparateAsync
 from verl.trainer.ppo.v1.trainer_sync import PPOTrainerSync
 from verl.utils import tensordict_utils as tu
-
-try:
-    from uni_agent.sandbox.gke_agent_sandbox import (
-        PrewarmBatchIterator,
-        close_lookahead_warmer,
-        ensure_lookahead_batch_warm,
-        extract_sandbox_images,
-        finish_lookahead_batch_async,
-        load_image_map_from_task_config,
-        prefetch_lookahead_batch_async,
-    )
-except ImportError:
-    PrewarmBatchIterator = None  # type: ignore[assignment]
-    close_lookahead_warmer = None  # type: ignore[assignment]
-    ensure_lookahead_batch_warm = None  # type: ignore[assignment]
-    extract_sandbox_images = None  # type: ignore[assignment]
-    finish_lookahead_batch_async = None  # type: ignore[assignment]
-    load_image_map_from_task_config = None  # type: ignore[assignment]
-    prefetch_lookahead_batch_async = None  # type: ignore[assignment]
-
-try:
-    from uni_agent.framework.entry import AgentFrameworkRolloutAdapter
-except ImportError:
-    AgentFrameworkRolloutAdapter = object  # type: ignore[assignment,misc]
 
 logger = logging.getLogger(__name__)
 
@@ -151,8 +137,6 @@ class _DeepSWESandboxLookaheadMixin:
             return None
 
     def _extract_batch_images(self: PPOTrainer, batch_or_items: Any) -> list[str]:
-        if extract_sandbox_images is None:
-            return []
         return extract_sandbox_images(batch_or_items, image_map=self._sandbox_image_map)
 
     def _init_sandbox_lookahead(self: PPOTrainer) -> None:
@@ -164,19 +148,10 @@ class _DeepSWESandboxLookaheadMixin:
         self._eval_sandbox_images = None
         self._eval_sandbox_batch_id = None
 
-        if (
-            PrewarmBatchIterator is None
-            or extract_sandbox_images is None
-            or ensure_lookahead_batch_warm is None
-            or prefetch_lookahead_batch_async is None
-            or finish_lookahead_batch_async is None
-        ):
-            return
         if os.getenv("VERL_SANDBOX_LOOKAHEAD", "1").strip().lower() in ("0", "false", "no"):
             return
 
-        if load_image_map_from_task_config is not None:
-            self._sandbox_image_map = load_image_map_from_task_config(self._resolve_task_config_path()) or None
+        self._sandbox_image_map = load_image_map_from_task_config(self._resolve_task_config_path()) or None
 
         self._eval_sandbox_images = self._extract_batch_images(self.val_dataset) or None
         self._eval_sandbox_replicas = int(
@@ -247,7 +222,7 @@ class _DeepSWESandboxLookaheadMixin:
     def _release_eval_sandboxes(self: PPOTrainer) -> None:
         """Retire the evaluation sandbox batch so its warm pools are torn down after validation."""
         batch_id, self._eval_sandbox_batch_id = getattr(self, "_eval_sandbox_batch_id", None), None
-        if batch_id is not None and finish_lookahead_batch_async is not None:
+        if batch_id is not None:
             finish_lookahead_batch_async(batch_id, wait=False)
 
     def _finish_sampled_sandbox_batch(self: PPOTrainer) -> None:
@@ -257,8 +232,7 @@ class _DeepSWESandboxLookaheadMixin:
 
     def _close_sandbox_lookahead(self: PPOTrainer) -> None:
         self._eval_sandbox_batch_id = None
-        if close_lookahead_warmer is not None:
-            close_lookahead_warmer()
+        close_lookahead_warmer()
 
     def _raw_next_train_batch(self: PPOTrainer, num_prompts: int | None = None) -> TensorDict:
         return super()._next_train_batch(num_prompts)  # type: ignore[misc]
@@ -271,11 +245,7 @@ class _DeepSWESandboxLookaheadMixin:
             batch = self._prewarm_batch_iterator.next_batch()
         else:
             batch = self._raw_next_train_batch(num_prompts)
-            if (
-                getattr(self, "_prewarm_batch_iterator", None) is not None
-                and extract_sandbox_images is not None
-                and ensure_lookahead_batch_warm is not None
-            ):
+            if getattr(self, "_prewarm_batch_iterator", None) is not None:
                 imgs = self._extract_batch_images(batch)
                 if imgs:
                     rollout_n = int(self.config.actor_rollout_ref.rollout.get("n", 8) or 8)
