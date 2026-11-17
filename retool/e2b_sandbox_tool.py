@@ -152,11 +152,13 @@ class CustomE2BSandboxTool(BaseTool):
                 lease.reusable = True
                 return ToolResponse(text=text), 0.0, {}
             except Exception as exc:
-                sandbox_id = getattr(lease.sandbox, "sandbox_id", None)
+                if lease.sandbox is None:
+                    logger.warning("E2B sandbox could not be created: %s: %s", type(exc).__name__, exc)
+                else:
+                    # The exception text may quote the code, so only its type is logged.
+                    logger.warning("E2B sandbox %s failed with %s", lease.sandbox.sandbox_id, type(exc).__name__)
                 await self._discard(lease.sandbox)
                 lease.sandbox = None
-                # The exception text may quote the command, so only its type is logged.
-                logger.warning("E2B sandbox %s failed with %s", sandbox_id, type(exc).__name__)
                 if not isinstance(exc, self._retryable):
                     break
         return ToolResponse(text=UNAVAILABLE_TEXT), 0.0, {}
