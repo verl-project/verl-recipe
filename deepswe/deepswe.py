@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""DeepSWE recipe hooks for 2-slot lookahead Kubernetes sandbox pre-warming and just-in-time evaluation pools.
+"""DeepSWE recipe hooks for 2-slot lookahead GKE / Kubernetes sandbox pre-warming and just-in-time evaluation pools.
 
 This module lives in the DeepSWE recipe folder (``verl-recipe/deepswe/deepswe.py``) and is loaded through
 ``VERL_USE_EXTERNAL_MODULES`` so core ``verl`` trainer files remain untouched.
@@ -36,12 +36,13 @@ from verl.trainer.ppo.v1.trainer_sync import PPOTrainerSync
 from verl.utils import tensordict_utils as tu
 
 try:
-    from uni_agent.sandbox.k8s_agent_sandbox import (
+    from uni_agent.sandbox.gke_agent_sandbox import (
         PrewarmBatchIterator,
         close_lookahead_warmer,
         ensure_lookahead_batch_warm,
         extract_sandbox_images,
         finish_lookahead_batch_async,
+        load_image_map_from_task_config,
         prefetch_lookahead_batch_async,
     )
 except ImportError:
@@ -50,6 +51,7 @@ except ImportError:
     ensure_lookahead_batch_warm = None  # type: ignore[assignment]
     extract_sandbox_images = None  # type: ignore[assignment]
     finish_lookahead_batch_async = None  # type: ignore[assignment]
+    load_image_map_from_task_config = None  # type: ignore[assignment]
     prefetch_lookahead_batch_async = None  # type: ignore[assignment]
 
 try:
@@ -73,14 +75,13 @@ def compute_grpo_loo_outcome_advantage(
     config: Any = None,
     **kwargs: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Group-relative outcome advantage with leave-one-out baseline and LOO std scale (tunix grpo-loo).
+    """Group-relative outcome advantage with leave-one-out baseline and LOO std scale (GRPO-LOO).
 
     Excludes each trajectory from both the baseline mean and the sample standard deviation used to scale its
     advantage:
       - LOO centered score: ``(r_i - mean(r)) * (G / (G - 1)) = r_i - mean(r_{-i})``
       - LOO variance: ``(sum_j (r_j - mean(r))^2 - (r_i - mean(r))^2 * (G / (G - 1))) / (G - 2)``
-      - Divided by ``sqrt(loo_var) + epsilon`` when ``loo_var > 1e-5 * sum_sq``, matching
-        ``tunix.rl.algo_core.compute_grpo_loo_advantages`` (which yields [-3.615, +3.615] at G=16).
+      - Divided by ``sqrt(loo_var) + epsilon`` when ``loo_var > 1e-5 * sum_sq`` (yielding [-3.615, +3.615] at G=16).
     """
     del config, kwargs
     scores = token_level_rewards.sum(dim=-1)
@@ -132,15 +133,34 @@ class _DeepSWESandboxLookaheadMixin:
 
     _prewarm_batch_iterator: PrewarmBatchIterator | None = None
     _sandbox_lookahead_initialized: bool = False
+    _sandbox_image_map: list[Any] | None = None
     _eval_sandbox_images: list[str] | None = None
     _eval_sandbox_replicas: int = 1
     _eval_sandbox_batch_id: str | None = None
+
+    def _resolve_task_config_path(self: PPOTrainer) -> str | None:
+        try:
+            custom = self.config.actor_rollout_ref.rollout.get("custom", {}) or {}
+            af = custom.get("agent_framework", {}) or {}
+            runners = af.get("agent_runners", {}) or {}
+            task_runner = runners.get("task", {}) or {}
+            runner_kwargs = task_runner.get("runner_kwargs", {}) or {}
+            path = runner_kwargs.get("task_config_path")
+            return str(path) if path else None
+        except Exception:
+            return None
+
+    def _extract_batch_images(self: PPOTrainer, batch_or_items: Any) -> list[str]:
+        if extract_sandbox_images is None:
+            return []
+        return extract_sandbox_images(batch_or_items, image_map=self._sandbox_image_map)
 
     def _init_sandbox_lookahead(self: PPOTrainer) -> None:
         if getattr(self, "_sandbox_lookahead_initialized", False):
             return
         self._sandbox_lookahead_initialized = True
         self._prewarm_batch_iterator = None
+        self._sandbox_image_map = None
         self._eval_sandbox_images = None
         self._eval_sandbox_batch_id = None
 
@@ -155,7 +175,10 @@ class _DeepSWESandboxLookaheadMixin:
         if os.getenv("VERL_SANDBOX_LOOKAHEAD", "1").strip().lower() in ("0", "false", "no"):
             return
 
-        self._eval_sandbox_images = extract_sandbox_images(self.val_dataset) or None
+        if load_image_map_from_task_config is not None:
+            self._sandbox_image_map = load_image_map_from_task_config(self._resolve_task_config_path()) or None
+
+        self._eval_sandbox_images = self._extract_batch_images(self.val_dataset) or None
         self._eval_sandbox_replicas = int(
             os.getenv(
                 "SANDBOX_EVAL_REPLICAS",
@@ -166,7 +189,7 @@ class _DeepSWESandboxLookaheadMixin:
         rollout_n = int(self.config.actor_rollout_ref.rollout.get("n", 8) or 8)
         self._prewarm_batch_iterator = PrewarmBatchIterator(
             fetch_batch_fn=self._raw_next_train_batch,
-            extract_images_fn=extract_sandbox_images,
+            extract_images_fn=self._extract_batch_images,
             ensure_warm_fn=ensure_lookahead_batch_warm,
             prefetch_async_fn=prefetch_lookahead_batch_async,
             finish_batch_fn=finish_lookahead_batch_async,
@@ -253,7 +276,7 @@ class _DeepSWESandboxLookaheadMixin:
                 and extract_sandbox_images is not None
                 and ensure_lookahead_batch_warm is not None
             ):
-                imgs = extract_sandbox_images(batch)
+                imgs = self._extract_batch_images(batch)
                 if imgs:
                     rollout_n = int(self.config.actor_rollout_ref.rollout.get("n", 8) or 8)
                     ensure_lookahead_batch_warm(
@@ -267,7 +290,7 @@ class _DeepSWESandboxLookaheadMixin:
 
 
 class DeepSWESeparateAsyncPPOTrainer(_DeepSWESandboxLookaheadMixin, PPOTrainerSeparateAsync):
-    """Separate-async PPO trainer with 2-slot K8s sandbox lookahead pre-warming for DeepSWE."""
+    """Separate-async PPO trainer with 2-slot GKE sandbox lookahead pre-warming for DeepSWE."""
 
     def _should_refill_after_sample(self) -> bool:
         num_warmup = self.config.trainer.v1.separate_async.get("num_warmup_batches", 0) or 0
@@ -314,7 +337,7 @@ class DeepSWESeparateAsyncPPOTrainer(_DeepSWESandboxLookaheadMixin, PPOTrainerSe
 
 
 class DeepSWESyncPPOTrainer(_DeepSWESandboxLookaheadMixin, PPOTrainerSync):
-    """Synchronous PPO trainer with 2-slot K8s sandbox lookahead pre-warming for DeepSWE."""
+    """Synchronous PPO trainer with 2-slot GKE sandbox lookahead pre-warming for DeepSWE."""
 
     def on_train_begin(self) -> None:
         self._prime_sandbox_lookahead()

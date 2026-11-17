@@ -47,8 +47,8 @@ Each R2E-Gym rollout episode spins up an isolated repository container (such as 
 
 ### How it should look
 - **Machine type & sizing**: CPU nodes with plenty of vCPUs and local disk (e.g., `n2-standard-32` or `n2-standard-64` with `200GB+` `pd-balanced` boot disks to cache multiple R2E-Gym container images). For 32–128 concurrent sandboxes (~2 vCPUs and 4 GiB RAM per sandbox), provision ~500–2,000 total vCPUs (e.g., 16–64 `n2-standard-32` nodes with autoscaling).
-- **Node label**: `cloud.google.com/gke-nodepool=sandbox-cpu-pool` so `K8sAgentSandbox` can target this pool via `NODE_SELECTOR_KEY` and `NODE_SELECTOR_VAL`.
-- **Node taint**: `cloud.google.com/gke-nodepool=sandbox-cpu-pool:NoSchedule` so regular cluster workloads do not land on sandbox nodes (`K8sAgentSandbox` automatically adds a matching toleration to every sandbox pod it creates).
+- **Node label**: `cloud.google.com/gke-nodepool=sandbox-cpu-pool` so `GKEAgentSandbox` can target this pool via `NODE_SELECTOR_KEY` and `NODE_SELECTOR_VAL`.
+- **Node taint**: `cloud.google.com/gke-nodepool=sandbox-cpu-pool:NoSchedule` so regular cluster workloads do not land on sandbox nodes (`GKEAgentSandbox` automatically adds a matching toleration to every sandbox pod it creates).
 
 ### Suggested command
 ```bash
@@ -99,11 +99,13 @@ done
 ## 4. Agent Sandbox CRDs, Controller, and Namespace RBAC
 
 ### What it is for
-`uni-agent`'s `K8sAgentSandbox` (`uni_agent/sandbox/k8s_agent_sandbox.py`) uses `agent_sandbox_rl` (`SandboxFleet`) to manage pre-warmed pools of R2E-Gym containers in Kubernetes. Under the hood, this relies on the `kubernetes-sigs/agent-sandbox` controller and four custom resources (`Sandbox`, `SandboxTemplate`, `SandboxWarmPool`, and `SandboxClaim`), plus RBAC permissions for the Ray worker's Kubernetes ServiceAccount to create those resources and exec into the claimed sandbox pods.
+`uni-agent`'s `GKEAgentSandbox` (`uni_agent/sandbox/gke_agent_sandbox.py`) uses `agent_sandbox_rl` (`SandboxFleet`) to manage pre-warmed pools of R2E-Gym containers in Kubernetes. Under the hood, this relies on the `kubernetes-sigs/agent-sandbox` controller and four custom resources (`Sandbox`, `SandboxTemplate`, `SandboxWarmPool`, and `SandboxClaim`), plus RBAC permissions for the Ray worker's Kubernetes ServiceAccount to create those resources and exec into the claimed sandbox pods.
+
+By default, `GKEAgentSandbox` configures every `SandboxTemplate` with `networkPolicyManagement: Managed` and an empty `networkPolicy` (`{ingress: [], egress: []}`), blocking all ingress and egress traffic (including public internet, internal cluster services, and cloud metadata endpoints) while keeping pod loopback (`localhost`) and Kubernetes API `pods/exec` working.
 
 ### How it should look
 - **CRDs & Controller**: `sandboxes.agents.x-k8s.io`, `sandboxtemplates.extensions.agents.x-k8s.io`, `sandboxwarmpools.extensions.agents.x-k8s.io`, and `sandboxclaims.extensions.agents.x-k8s.io` installed in the cluster, with `agent-sandbox-controller` running in `agent-sandbox-system`.
-- **RBAC (`Role` + `RoleBinding`)**: In the namespace where your Ray pods run (e.g., `default`), the ServiceAccount used by your Ray pods (`xpk-sa` or `default`) must have `get`, `list`, `watch`, `create`, `update`, `patch`, `delete` on `pods`, `services`, `sandboxes`, `sandboxtemplates`, `sandboxwarmpools`, and `sandboxclaims`, plus `get` and `create` on `pods/exec` and `pods/log`.
+- **RBAC (`Role` + `RoleBinding`)**: In the namespace where your Ray pods run (e.g., `default`), the ServiceAccount used by your Ray pods (`${RAY_SERVICE_ACCOUNT:-default}`) must have `get`, `list`, `watch`, `create`, `update`, `patch`, `delete` on `pods`, `services`, `sandboxes`, `sandboxtemplates`, `sandboxwarmpools`, and `sandboxclaims`, plus `get` and `create` on `pods/exec` and `pods/log`.
 
 ### Suggested commands
 Check if the CRDs already exist, and install them if missing:
@@ -120,13 +122,9 @@ kubectl get crd sandboxes.agents.x-k8s.io \
 
 Apply the RBAC permissions in your target namespace:
 ```bash
+export RAY_SERVICE_ACCOUNT="${RAY_SERVICE_ACCOUNT:-default}"
+
 cat <<EOF | kubectl apply -f -
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: xpk-sa
-  namespace: ${NAMESPACE}
----
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -153,10 +151,7 @@ metadata:
   namespace: ${NAMESPACE}
 subjects:
   - kind: ServiceAccount
-    name: xpk-sa
-    namespace: ${NAMESPACE}
-  - kind: ServiceAccount
-    name: default
+    name: ${RAY_SERVICE_ACCOUNT}
     namespace: ${NAMESPACE}
 roleRef:
   kind: Role
@@ -170,11 +165,11 @@ EOF
 ## 5. Regional Artifact Registry Mirror for R2E-Gym Images
 
 ### What it is for
-Each row in the R2E-Gym dataset specifies a Docker Hub image (`namanjain12/<repo>_final:<commit>`). If dozens of GKE nodes pull those multi-gigabyte images directly from Docker Hub at once, Docker Hub blocks the pulls with `429 Too Many Requests` rate-limit errors. Hosting a mirror of the 8 R2E-Gym repositories (`aiohttp_final`, `datalad_final`, `numpy_final`, `pandas_final`, `pillow_final`, `pyramid_final`, `scrapy_final`, `tornado_final`) in a regional Artifact Registry repository lets `K8sAgentSandbox` rewrite `namanjain12/*` to your regional mirror via `SANDBOX_IMAGE_PREFIX`.
+Each row in the R2E-Gym dataset specifies a Docker Hub image (`namanjain12/<repo>_final:<commit>`). If dozens of GKE nodes pull those multi-gigabyte images directly from Docker Hub at once, Docker Hub blocks the pulls with `429 Too Many Requests` rate-limit errors. Hosting a mirror of the 8 R2E-Gym repositories (`aiohttp_final`, `datalad_final`, `numpy_final`, `pandas_final`, `pillow_final`, `pyramid_final`, `scrapy_final`, `tornado_final`) in a regional Artifact Registry repository lets `GKEAgentSandbox` rewrite dataset images to your regional mirror via `sandbox.image_map` in `task_config_react_gke.yaml` or via `SANDBOX_IMAGE_MAP`.
 
 ### How it should look
 - An Artifact Registry Docker repository in the same region as your cluster (for example, `us-central1-docker.pkg.dev/<PROJECT>/<REPO>`) containing the mirrored `<repo>_final:<commit>` tags.
-- Pass `SANDBOX_IMAGE_PREFIX="<REGION>-docker.pkg.dev/<PROJECT>/<REPO>"` when launching the job.
+- Either configure `sandbox.image_map` in `task_config_react_gke.yaml`, or pass `SANDBOX_IMAGE_MAP="namanjain12/**=<REGION>-docker.pkg.dev/<PROJECT>/<REPO>/**"` when launching the job.
 
 ---
 
@@ -194,10 +189,10 @@ Under your GCS bucket `gs://<BUCKET>/<USER_DIR>` (which maps to `RAY_DATA_HOME=/
 export BUCKET="<GCS_BUCKET>"
 export USER_DIR="<USER_DIR>"
 
-# 1. Clone verl main, verl-hardware-plugin main, uni-agent (K8sAgentSandbox + R2E-Gym), and this recipe
+# 1. Clone verl main, verl-hardware-plugin main, uni-agent (GKEAgentSandbox + R2E-Gym), and this recipe
 git clone https://github.com/verl-project/verl.git
 git clone https://github.com/verl-project/verl-hardware-plugin.git
-git clone -b feat/deepswe-main https://github.com/askhat-g/uni-agent.git
+git clone https://github.com/verl-project/uni-agent.git
 git clone https://github.com/verl-project/verl-recipe.git
 mkdir -p verl/recipe && cp -r verl-recipe/deepswe verl/recipe/deepswe
 
@@ -251,12 +246,13 @@ kubectl exec -n "${NAMESPACE}" "${HEAD_POD}" -- ray status
 This recipe targets upstream `verl` `main` together with `verl-hardware-plugin` `main` (for TPU support) and `uni-agent`. See [`REQUIRED_VERL.txt`](./REQUIRED_VERL.txt).
 
 ### What it is for
-[`run_qwen3_5_35b_deepswe.sh`](./run_qwen3_5_35b_deepswe.sh) wires `uni-agent`'s `AgentFrameworkRolloutAdapter` (`ReActAgent` + `r2e_gym` + `K8sAgentSandbox`) into `verl`'s V1 async PPO/RLOO trainer (`verl/examples/tpu/grpo/run_qwen3_5_torchtitan.sh`).
+[`run_qwen3_5_35b_deepswe.sh`](./run_qwen3_5_35b_deepswe.sh) wires `uni-agent`'s `AgentFrameworkRolloutAdapter` (`ReActAgent` + `r2e_gym` + `GKEAgentSandbox`) into `verl`'s V1 async PPO/RLOO trainer (`verl/examples/tpu/grpo/run_qwen3_5_torchtitan.sh`).
 
 ### How the launch command should look
 - Because `ray job submit` starts in `/app` with a clean environment on the head pod, pass your `export` statements inside `bash -c "..."` so both the shell script and `ray.init(runtime_env=...)` inherit them.
 - Mount or copy `verl-recipe` at `${VERL_ROOT}/recipe` (or set `VERL_ROOT` and include `verl-recipe` on `PYTHONPATH`).
-- Set `SANDBOX_NAMESPACE`, `SANDBOX_IMAGE_PREFIX`, `NODE_SELECTOR_KEY=cloud.google.com/gke-nodepool`, and `NODE_SELECTOR_VAL=sandbox-cpu-pool` so `K8sAgentSandbox` provisions warm pools in your namespace on the sandbox CPU pool using the mirrored images.
+- Set `SANDBOX_NAMESPACE`, `SANDBOX_IMAGE_MAP`, `NODE_SELECTOR_KEY=cloud.google.com/gke-nodepool`, and `NODE_SELECTOR_VAL=sandbox-cpu-pool` so `GKEAgentSandbox` provisions warm pools in your namespace on the sandbox CPU pool using the mirrored images.
+- If your cluster uses custom pod annotations (for example, admission-webhook ownership metadata), pass them via `SANDBOX_POD_ANNOTATIONS='{"key":"value"}'`.
 - Defaults target **TPU v7x** (`TPU_ACCELERATOR_TYPE=tpu7x`, `USE_KL_LOSS=False`, `PARAM_DTYPE=bfloat16`, `FP32_MASTER=True`, `OPTIMIZER_HOST_OFFLOAD=True`, `OPTIM_IMPL=fused`, `ROLLOUT_LOAD_FORMAT=dummy`).
 
 ### Suggested command (TPU v7x)
@@ -289,7 +285,7 @@ kubectl exec -n "${NAMESPACE}" "${HEAD_POD}" -- \
     export MAX_MODEL_LEN=65536 &&
     export PAD_TO_LENGTH_BUCKET=4096 &&
     export SANDBOX_NAMESPACE='${NAMESPACE}' &&
-    export SANDBOX_IMAGE_PREFIX='<REGION>-docker.pkg.dev/<PROJECT>/<REPO>' &&
+    export SANDBOX_IMAGE_MAP='namanjain12/**=<REGION>-docker.pkg.dev/<PROJECT>/<REPO>/**' &&
     export NODE_SELECTOR_KEY='cloud.google.com/gke-nodepool' &&
     export NODE_SELECTOR_VAL='sandbox-cpu-pool' &&
     exec bash /tmp/deepswe_src/verl/recipe/deepswe/run_qwen3_5_35b_deepswe.sh \
