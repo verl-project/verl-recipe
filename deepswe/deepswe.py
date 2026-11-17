@@ -289,6 +289,12 @@ class _DeepSWESandboxLookaheadMixin:
         return batch
 
 
+# If core verl already handles post-sample batch refill (either via an env-var hook
+# ``_should_refill_after_sample`` or via the config-driven ``_refill_after_sample`` from
+# verl-project/verl#8661 when enabled), defer to it so we never submit two batches per step.
+_CORE_HAS_ENV_REFILL_AFTER_SAMPLE = hasattr(PPOTrainerSeparateAsync, "_should_refill_after_sample")
+
+
 class DeepSWESeparateAsyncPPOTrainer(_DeepSWESandboxLookaheadMixin, PPOTrainerSeparateAsync):
     """Separate-async PPO trainer with 2-slot GKE sandbox lookahead pre-warming for DeepSWE."""
 
@@ -299,6 +305,11 @@ class DeepSWESeparateAsyncPPOTrainer(_DeepSWESandboxLookaheadMixin, PPOTrainerSe
             and not self.hybrid_rollout_config.enable_switch
             and os.getenv("VERL_REFILL_AFTER_SAMPLE", "0").strip().lower() in ("1", "true", "yes")
         )
+
+    def _recipe_refills(self) -> bool:
+        if _CORE_HAS_ENV_REFILL_AFTER_SAMPLE or bool(getattr(self, "_refill_after_sample", False)):
+            return False
+        return self._should_refill_after_sample()
 
     def on_train_begin(self) -> None:
         self._prime_sandbox_lookahead()
@@ -324,14 +335,14 @@ class DeepSWESeparateAsyncPPOTrainer(_DeepSWESandboxLookaheadMixin, PPOTrainerSe
         self._finish_sampled_sandbox_batch()
         super().on_sample_end()
         if (
-            self._should_refill_after_sample()
+            self._recipe_refills()
             and self.local_trigger_step == self.parameter_sync_step - 1
             and self.global_steps < self.total_training_steps
         ):
             self._add_batch_to_generate()
 
     def prepare_step(self) -> dict:
-        if self._should_refill_after_sample():
+        if self._recipe_refills():
             return self._wait_for_sampleable_and_switch()
         return super().prepare_step()
 

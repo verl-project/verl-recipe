@@ -69,25 +69,38 @@ gcloud container node-pools create sandbox-cpu-pool \
 
 ---
 
-## 3. Two TPU Node Pools (1 Trainer Slice + 1 Rollout Slice)
+## 3. TPU Node Pools (Trainer Slice + Rollout Slice(s))
 
 ### What it is for
-`verl`'s `separate_async` trainer runs TorchTitan FSDP2 training on one TPU slice while `vLLM` generates rollouts on a second TPU slice, syncing weights between them after each step via `tpu-sync`. Having two separate TPU slices of equal size prevents training and inference from competing for HBM on the same chips.
+`verl`'s `separate_async` trainer runs TorchTitan FSDP2 training on a dedicated trainer TPU slice while `vLLM` generates rollouts on separate rollout TPU slice(s), syncing weights between them after each step via `tpu-sync`. Keeping trainer and rollout on separate TPU slices prevents training and inference from competing for HBM on the same chips.
 
 ### How they should look
-- **Two identical TPU slices** in the same cluster: one for the trainer (`tpu-group-0`) and one for the rollout server (`tpu-group-1`).
-- **TPU v7x**: Two 4-chip / 8-TensorCore slices (`tpu7x-standard-4t`, topology `2x2x1`, 1 host x 8 TensorCores per slice) or two 8-chip / 16-TensorCore slices (`2x2x2`, 2 hosts per slice).
+- **Default optimized TPU v7x topology**: One `2x2x2` trainer slice (`tpu7x-standard-4t`, 2 hosts x 8 TensorCores = 16 TensorCores, `tpu-group-0`) plus three `2x2x1` rollout slices (1 host x 8 TensorCores each = 3 replicas of TP8/EP8, `tpu-group-1`..`tpu-group-3`).
+- Smaller topologies (such as one `2x2x1` trainer slice + one `2x2x1` rollout slice) also work by overriding `NNODES_TRAINER`, `NNODES_ROLLOUT`, and `PARAM_DTYPE`/`OPTIMIZER_HOST_OFFLOAD`.
 
 ### Suggested commands
 ```bash
-# Two TPU v7x slices (1 host per slice, 2x2x1 topology)
-for SLICE in trainer-v7x-slice rollout-v7x-slice; do
-  gcloud container node-pools create "${SLICE}" \
+# Trainer slice (2 hosts x 8 TensorCores, 2x2x2 topology)
+gcloud container node-pools create trainer-v7x-slice \
+  --cluster="${CLUSTER}" \
+  --project="${PROJECT}" \
+  --region="${REGION}" \
+  --node-locations="${ZONE}" \
+  --machine-type=tpu7x-standard-4t \
+  --tpu-topology=2x2x2 \
+  --num-nodes=2 \
+  --workload-metadata=GKE_METADATA \
+  --scopes=cloud-platform
+
+# Three rollout slices (1 host x 8 TensorCores each, 2x2x1 topology)
+for i in 1 2 3; do
+  gcloud container node-pools create "rollout-v7x-slice-${i}" \
     --cluster="${CLUSTER}" \
     --project="${PROJECT}" \
     --region="${REGION}" \
     --node-locations="${ZONE}" \
     --machine-type=tpu7x-standard-4t \
+    --tpu-topology=2x2x1 \
     --num-nodes=1 \
     --workload-metadata=GKE_METADATA \
     --scopes=cloud-platform
@@ -253,7 +266,8 @@ This recipe targets upstream `verl` `main` together with `verl-hardware-plugin` 
 - Mount or copy `verl-recipe` at `${VERL_ROOT}/recipe` (or set `VERL_ROOT` and include `verl-recipe` on `PYTHONPATH`).
 - Set `SANDBOX_NAMESPACE`, `SANDBOX_IMAGE_MAP`, `NODE_SELECTOR_KEY=cloud.google.com/gke-nodepool`, and `NODE_SELECTOR_VAL=sandbox-cpu-pool` so `GKEAgentSandbox` provisions warm pools in your namespace on the sandbox CPU pool using the mirrored images.
 - If your cluster uses custom pod annotations (for example, admission-webhook ownership metadata), pass them via `SANDBOX_POD_ANNOTATIONS='{"key":"value"}'`.
-- Defaults target **TPU v7x** (`TPU_ACCELERATOR_TYPE=tpu7x`, `USE_KL_LOSS=False`, `PARAM_DTYPE=bfloat16`, `FP32_MASTER=True`, `OPTIMIZER_HOST_OFFLOAD=True`, `OPTIM_IMPL=fused`, `ROLLOUT_LOAD_FORMAT=dummy`).
+- Defaults are optimized for **TPU v7x**: `2x2x2` trainer (`NNODES_TRAINER=2`, `N_CHIPS_TRAINER=8`, FSDP16, on-device `PARAM_DTYPE=float32`, fused AdamW, SparseCore async FSDP collective offload, `TRAINER_SCOPED_VMEM_LIMIT_KIB=65472`, `AC_SAVE_SPLASH_AND_ROUTING=True`, `SPLASH_MAX_BLOCK_SIZE=1024`, `FROZEN_PARAM_REGEX=moe.router.gate`) and 3 rollout replicas of `2x2x1` (`NNODES_ROLLOUT=3`, `N_CHIPS_ROLLOUT=8`, TP8/EP8, `USE_MOE_FUSED_EP_KERNEL=1`, `TPU_MOE_SKIP_PADDED_TOKENS=1`, `TPU_ENABLE_GDN_DYNAMIC_TILING=1`, `ENABLE_PREFIX_CACHING=True`, `VLLM_BLOCK_SIZE=512`, `VLLM_ASYNC_SCHEDULING=False`, `MAX_NUM_SEQS=128`, `CONCURRENCY=384`), 32k context (`MAX_PROMPT_LEN=8192`, `MAX_RESPONSE_LEN=24576`, `STATIC_MICRO_BATCH_LEN=32768`), and `ROLLOUT_RS_THRESHOLD=0.998_1.002`.
+- **Optional `GDN_ROW_SLOT_LEN=32768` speedup**: For an image built from `verl/examples/tpu/grpo/Dockerfile` with `--build-arg TORCHTITAN_COMMIT=4e16e67aed8c1e702e6f440b1ff81619bb6873d4` (`google-pytorch/torchtitan#142`), export `GDN_ROW_SLOT_LEN=32768` to put one sequence per GatedDeltaNet row slot. It is left unset by default so the recipe runs out of the box on `verl main`'s default image.
 
 ### Suggested command (TPU v7x)
 ```bash
@@ -267,27 +281,15 @@ kubectl exec -n "${NAMESPACE}" "${HEAD_POD}" -- \
     export UNI_AGENT_HOME='/tmp/deepswe_src/uni-agent' &&
     export PROJECT_NAME='verl-tpu-deepswe' &&
     export EXPERIMENT_NAME='qwen3_5_35b_deepswe_r2e_gym_v7x_50steps' &&
-    export TPU_ACCELERATOR_TYPE='tpu7x' &&
-    export NNODES_TRAINER=2 &&
-    export N_CHIPS_TRAINER=8 &&
-    export NNODES_ROLLOUT=4 &&
-    export N_CHIPS_ROLLOUT=8 &&
-    export ROLLOUT_TENSOR_PARALLEL_SIZE=8 &&
-    export ROLLOUT_EXPERT_PARALLEL_SIZE=8 &&
     export TOTAL_TRAINING_STEPS=50 &&
     export TEST_FREQ=10 &&
     export VAL_BEFORE_TRAIN=False &&
-    export TRAIN_BATCH_SIZE=16 &&
-    export PPO_MINI_BATCH_SIZE=16 &&
-    export ROLLOUT_N=16 &&
-    export MAX_PROMPT_LEN=8192 &&
-    export MAX_RESPONSE_LEN=57344 &&
-    export MAX_MODEL_LEN=65536 &&
-    export PAD_TO_LENGTH_BUCKET=4096 &&
     export SANDBOX_NAMESPACE='${NAMESPACE}' &&
     export SANDBOX_IMAGE_MAP='namanjain12/**=<REGION>-docker.pkg.dev/<PROJECT>/<REPO>/**' &&
     export NODE_SELECTOR_KEY='cloud.google.com/gke-nodepool' &&
     export NODE_SELECTOR_VAL='sandbox-cpu-pool' &&
+    # Optional (only when image was built with TORCHTITAN_COMMIT=4e16e67aed8c1e702e6f440b1ff81619bb6873d4):
+    # export GDN_ROW_SLOT_LEN=32768 &&
     exec bash /tmp/deepswe_src/verl/recipe/deepswe/run_qwen3_5_35b_deepswe.sh \
       \"trainer.logger=['console','wandb']\" \
       \"+ray_kwargs.ray_init.runtime_env.env_vars.PYTHONPATH='\${PYTHONPATH}'\"

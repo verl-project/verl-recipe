@@ -2,8 +2,8 @@
 UPSTREAM=https://github.com/verl-project/verl.git
 MODE=rolling
 BRANCH=main
-VERL_COMMIT=8c94a12d7811030413cd85e2bba6db863e0913c8
-PIP_INSTALL=pip install verl@git+https://github.com/verl-project/verl.git@8c94a12d7811030413cd85e2bba6db863e0913c8
+VERL_COMMIT=44cdff30191583b9aa14d90872b6ba1447a7275d
+PIP_INSTALL=pip install verl@git+https://github.com/verl-project/verl.git@44cdff30191583b9aa14d90872b6ba1447a7275d
 TPU_PLUGIN_COMMIT=16be0a491de807bbd9767f7894aa21feb41e1b52
 RECIPE_FOLDER=deepswe
 NOTES=Requires latest verl main, verl-hardware-plugin main (TPU_PLUGIN_COMMIT), and uni-agent with GKEAgentSandbox / R2E-Gym support.
