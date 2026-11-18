@@ -6,12 +6,6 @@
 # kernel, on-device fp32 AdamW, Splash block size 1024, frozen MoE router gate, 0.998_1.002 rollout
 # correction band, vLLM async_scheduling disabled for tpu-sync stability).
 #
-# Optional GatedDeltaNet row-slot optimization (GDN_ROW_SLOT_LEN=32768):
-#   Requires an image built from verl's examples/tpu/grpo/Dockerfile with
-#   --build-arg TORCHTITAN_COMMIT=4e16e67aed8c1e702e6f440b1ff81619bb6873d4 (google-pytorch/torchtitan#142),
-#   because gdn_row_slot_len needs gated_delta_document_resets which the default torchtitan commit lacks.
-#   Left unset by default so the recipe runs out of the box on verl main's default image.
-#
 # Preprocess R2E-Gym into non-overlapping train/eval Parquet splits beforehand:
 #   PYTHONPATH=uni-agent python3 deepswe_tpu/prepare_data.py --local-save-dir "${RAY_DATA_HOME}/data/r2e_gym"
 
@@ -56,7 +50,6 @@ export USE_KL_LOSS="${USE_KL_LOSS:-False}"
 
 # Trainer memory/compute: on-device fp32 parameters + fused AdamW, no host offload, SparseCore FSDP collectives.
 export PARAM_DTYPE="${PARAM_DTYPE:-float32}"
-export FP32_MASTER="${FP32_MASTER:-False}"
 export OPTIMIZER_HOST_OFFLOAD="${OPTIMIZER_HOST_OFFLOAD:-False}"
 export OPTIM_IMPL="${OPTIM_IMPL:-fused}"
 export SPARSECORE_OFFLOAD="${SPARSECORE_OFFLOAD:-False}"
