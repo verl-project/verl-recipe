@@ -28,7 +28,6 @@ from typing import Any
 import numpy as np
 import torch
 from tensordict import TensorDict
-from uni_agent.framework.entry import AgentFrameworkRolloutAdapter
 from uni_agent.sandbox.gke_agent_sandbox import (
     PrewarmBatchIterator,
     close_lookahead_warmer,
@@ -343,15 +342,6 @@ class DeepSWESyncPPOTrainer(_DeepSWESandboxLookaheadMixin, PPOTrainerSync):
     def on_sample_end(self) -> None:
         self._finish_sampled_sandbox_batch()
         super().on_sample_end()
-
-
-class DeepSWERolloutAdapter(AgentFrameworkRolloutAdapter):
-    """Rollout adapter entry point that also ensures DeepSWE trainer hooks are registered."""
-
-    @classmethod
-    def create(cls, **kwargs: Any) -> Any:
-        register_deepswe_trainers()
-        return super().create(**kwargs)
 
 
 def register_deepswe_trainers() -> None:

@@ -205,6 +205,13 @@ roleRef:
 EOF
 ```
 
+Install the Python sandbox client packages into your training image (`agent-sandbox-rl` is not published on PyPI yet, so install both client packages from `kubernetes-sigs/agent-sandbox`):
+```bash
+pip install 'uni-agent[gke]'
+pip install 'git+https://github.com/kubernetes-sigs/agent-sandbox.git@9afee7039342f18fa9ad402929cabf8b66eebaa7#subdirectory=clients/python/agentic-sandbox-client'
+pip install 'git+https://github.com/kubernetes-sigs/agent-sandbox.git@9afee7039342f18fa9ad402929cabf8b66eebaa7#subdirectory=examples/agent-sandbox-rl'
+```
+
 ---
 
 ## 5. Regional Artifact Registry Mirror for R2E-Gym Images
@@ -339,4 +346,9 @@ kubectl exec -n "${NAMESPACE}" "${HEAD_POD}" -- \
 
 # Check warm pools and active sandbox claims in your namespace
 kubectl get sandboxwarmpools,sandboxclaims -n "${NAMESPACE}"
+
+# If a job is preempted or killed before on_train_end() tears down warm pools, clean up by SANDBOX_RUN_ID:
+for res in sandboxclaims sandboxwarmpools sandboxtemplates; do
+  kubectl -n "${NAMESPACE}" get "${res}" -o name | grep "${SANDBOX_RUN_ID}" | xargs -r kubectl -n "${NAMESPACE}" delete
+done
 ```

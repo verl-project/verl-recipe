@@ -119,6 +119,8 @@ else
 fi
 export VERL_SANDBOX_LOOKAHEAD="${VERL_SANDBOX_LOOKAHEAD:-1}"
 export SANDBOX_EVAL_REPLICAS="${SANDBOX_EVAL_REPLICAS:-1}"
+export SANDBOX_MAX_WARMPOOL_SIZE="${SANDBOX_MAX_WARMPOOL_SIZE:-${ROLLOUT_N}}"
+export SANDBOX_NETWORK_POLICY_MANAGEMENT="${SANDBOX_NETWORK_POLICY_MANAGEMENT:-Managed}"
 
 # vLLM-TorchTPU kernel flags, TorchTitan TPU options, tpu-sync options, and rollout correction band.
 TPU_MOE_SKIP_PADDED_TOKENS="${TPU_MOE_SKIP_PADDED_TOKENS:-1}"
@@ -138,6 +140,7 @@ TASK_CONFIG="${TASK_CONFIG:-${UNI_AGENT_HOME}/examples/quickstart/training/task_
 GATEWAY_COUNT="${GATEWAY_COUNT:-8}"
 # One agent session per decode slot (3 replicas x 128).
 CONCURRENCY="${CONCURRENCY:-384}"
+export SANDBOX_MAX_CONCURRENT="${SANDBOX_MAX_CONCURRENT:-$((CONCURRENCY > 512 ? CONCURRENCY : 512))}"
 DISPATCH_MODE="${DISPATCH_MODE:-inline_async}"
 TRAJECTORY_SELECTION="${TRAJECTORY_SELECTION:-all}"
 AGENT_LOG_DIR="${AGENT_LOG_DIR:-/tmp/uni_agent_logs/${EXPERIMENT_NAME}}"
@@ -149,15 +152,11 @@ AGENT_OVERRIDES=(
   "++ray_kwargs.ray_init.runtime_env.env_vars.VERL_REFILL_AFTER_SAMPLE='${VERL_REFILL_AFTER_SAMPLE}'"
   "++ray_kwargs.ray_init.runtime_env.env_vars.VERL_SANDBOX_LOOKAHEAD='${VERL_SANDBOX_LOOKAHEAD}'"
   "++ray_kwargs.ray_init.runtime_env.env_vars.SANDBOX_EVAL_REPLICAS='${SANDBOX_EVAL_REPLICAS}'"
-  "++ray_kwargs.ray_init.runtime_env.env_vars.SANDBOX_NAMESPACE='${SANDBOX_NAMESPACE:-}'"
-  "++ray_kwargs.ray_init.runtime_env.env_vars.SANDBOX_RUN_ID='${SANDBOX_RUN_ID:-}'"
-  "++ray_kwargs.ray_init.runtime_env.env_vars.SANDBOX_IMAGE_MAP='${SANDBOX_IMAGE_MAP:-}'"
-  "++ray_kwargs.ray_init.runtime_env.env_vars.SANDBOX_POD_ANNOTATIONS='${SANDBOX_POD_ANNOTATIONS:-}'"
-  "++ray_kwargs.ray_init.runtime_env.env_vars.SANDBOX_NETWORK_POLICY_MANAGEMENT='${SANDBOX_NETWORK_POLICY_MANAGEMENT:-}'"
-  "++ray_kwargs.ray_init.runtime_env.env_vars.NODE_SELECTOR_KEY='${NODE_SELECTOR_KEY:-}'"
-  "++ray_kwargs.ray_init.runtime_env.env_vars.NODE_SELECTOR_VAL='${NODE_SELECTOR_VAL:-}'"
+  "++ray_kwargs.ray_init.runtime_env.env_vars.SANDBOX_MAX_WARMPOOL_SIZE='${SANDBOX_MAX_WARMPOOL_SIZE}'"
+  "++ray_kwargs.ray_init.runtime_env.env_vars.SANDBOX_MAX_CONCURRENT='${SANDBOX_MAX_CONCURRENT}'"
+  "++ray_kwargs.ray_init.runtime_env.env_vars.SANDBOX_NETWORK_POLICY_MANAGEMENT='${SANDBOX_NETWORK_POLICY_MANAGEMENT}'"
   "++actor_rollout_ref.rollout.multi_turn.format=qwen3_coder"
-  "++actor_rollout_ref.rollout.agent.agent_loop_manager_class=${DEEPSWE_MODULE}.DeepSWERolloutAdapter"
+  "++actor_rollout_ref.rollout.agent.agent_loop_manager_class=uni_agent.framework.entry.AgentFrameworkRolloutAdapter"
   "++actor_rollout_ref.rollout.custom.agent_framework.gateway_count=${GATEWAY_COUNT}"
   "++actor_rollout_ref.rollout.custom.agent_framework.log_dir=${AGENT_LOG_DIR}"
   "++actor_rollout_ref.rollout.custom.agent_framework.allowed_request_sampling_param_keys=[temperature,top_p,top_k]"
@@ -172,6 +171,12 @@ AGENT_OVERRIDES=(
   "reward.custom_reward_function.path=pkg://uni_agent.framework.task_runner"
   "reward.custom_reward_function.name=score_from_runner_result"
 )
+# Only forward optional sandbox/node-selector env vars when set, so unset vars do not arrive as "".
+for _opt_var in SANDBOX_NAMESPACE SANDBOX_RUN_ID SANDBOX_IMAGE_MAP SANDBOX_POD_ANNOTATIONS NODE_SELECTOR_KEY NODE_SELECTOR_VAL; do
+  if [[ -n "${!_opt_var:-}" ]]; then
+    AGENT_OVERRIDES+=("++ray_kwargs.ray_init.runtime_env.env_vars.${_opt_var}='${!_opt_var}'")
+  fi
+done
 
 OPTIMIZATION_OVERRIDES=(
   "++ray_kwargs.ray_init.runtime_env.env_vars.TPU_MOE_SKIP_PADDED_TOKENS='${TPU_MOE_SKIP_PADDED_TOKENS}'"
