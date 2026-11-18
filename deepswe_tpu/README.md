@@ -60,11 +60,11 @@ If `K` training runs share the same sandbox pool in parallel, both buckets scale
 
 **Simple sizing rule (for `n2-standard-32`, 32 vCPU / 128 GiB RAM):**
 1. **How many working sandboxes run at once per job?**
-   Each rollout batch has `TRAIN_BATCH_SIZE * ROLLOUT_N` trajectories, and with `NUM_WARMUP_BATCHES=1` up to two batches overlap, capped by `CONCURRENCY`:
+   Each rollout batch has `TRAIN_BATCH_SIZE * ROLLOUT_N` trajectories, and with `NUM_WARMUP_BATCHES=2` up to three batches overlap, capped by `CONCURRENCY`:
    ```text
    active_per_run = min(CONCURRENCY, (1 + NUM_WARMUP_BATCHES) * TRAIN_BATCH_SIZE * ROLLOUT_N)
    ```
-   *(Default TPU v7x: `min(384, 2 * 16 * 16) = 384` working sandboxes.)*
+   *(Default TPU v7x: `min(384, 3 * 16 * 16) = 384` working sandboxes.)*
 2. **Convert working sandboxes to CPU nodes:**
    One `n2-standard-32` node comfortably handles about **`16–24` working sandboxes** (~20 as a rule of thumb) without CPU throttling or OOM kills during parallel `pytest` bursts. Multiply by the number of parallel runs `K`:
    ```text

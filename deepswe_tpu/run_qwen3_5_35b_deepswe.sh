@@ -79,11 +79,11 @@ export PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-${TRAIN_BATCH_SIZE}}"
 export ROLLOUT_N="${ROLLOUT_N:-16}"
 export LEARNING_RATE="${LEARNING_RATE:-1e-6}"
 export LR_WARMUP_STEPS="${LR_WARMUP_STEPS:-0}"
-export TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-50}"
+export TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-100}"
 export VAL_BATCH_SIZE="${VAL_BATCH_SIZE:-64}"
 export VAL_MAX_SAMPLES="${VAL_MAX_SAMPLES:-100}"
 export TEST_FREQ="${TEST_FREQ:-10}"
-export VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-False}"
+export VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-True}"
 
 # 32k context; one 32768-token micro-batch per rank, padded to one compiled shape.
 export MAX_PROMPT_LEN="${MAX_PROMPT_LEN:-8192}"
@@ -105,16 +105,16 @@ VLLM_BLOCK_SIZE="${VLLM_BLOCK_SIZE-512}"
 # the scheduler and model runner can desync and gpu_model_runner._update_states raises
 # KeyError(req_data.all_token_ids[req_id]) -> EngineDeadError. Keep it off by default here.
 VLLM_ASYNC_SCHEDULING="${VLLM_ASYNC_SCHEDULING:-False}"
-export NUM_WARMUP_BATCHES="${NUM_WARMUP_BATCHES:-1}"
-# max_off_policy_strategy=wait blocks sampling while any in-flight prompt group has
-# (global_steps - dispatch_step + 1) >= MAX_OFF_POLICY_THRESHOLD. With 1, every step waits for all in-flight
-# groups, including the warmup prefetch, so the prefetch never overlaps training. With a 1-batch prefetch
-# (staleness 1), use 2 so a step only waits for the groups dispatched in the previous step.
-if awk -v w="${NUM_WARMUP_BATCHES}" 'BEGIN { exit !(w > 0) }'; then
-  MAX_OFF_POLICY_THRESHOLD="${MAX_OFF_POLICY_THRESHOLD:-2}"
+export NUM_WARMUP_BATCHES="${NUM_WARMUP_BATCHES:-2}"
+# A prompt group sampled at step s that was dispatched at step d has span s - d + 1. With
+# max_off_policy_strategy=drop, groups whose span exceeds MAX_OFF_POLICY_THRESHOLD are dropped instead of trained
+# on ("wait" blocks sampling for them instead). NUM_WARMUP_BATCHES prefetched batches give spans up to
+# NUM_WARMUP_BATCHES + 1, so that is the default threshold: nothing is dropped unless rollouts fall further behind.
+MAX_OFF_POLICY_STRATEGY="${MAX_OFF_POLICY_STRATEGY:-drop}"
+MAX_OFF_POLICY_THRESHOLD="${MAX_OFF_POLICY_THRESHOLD:-$((NUM_WARMUP_BATCHES + 1))}"
+if (( NUM_WARMUP_BATCHES > 0 )); then
   export VERL_REFILL_AFTER_SAMPLE="${VERL_REFILL_AFTER_SAMPLE:-1}"
 else
-  MAX_OFF_POLICY_THRESHOLD="${MAX_OFF_POLICY_THRESHOLD:-1}"
   export VERL_REFILL_AFTER_SAMPLE="${VERL_REFILL_AFTER_SAMPLE:-0}"
 fi
 export VERL_SANDBOX_LOOKAHEAD="${VERL_SANDBOX_LOOKAHEAD:-1}"
@@ -136,8 +136,25 @@ FROZEN_PARAM_REGEX="${FROZEN_PARAM_REGEX-moe.router.gate}"
 GDN_ROW_SLOT_LEN="${GDN_ROW_SLOT_LEN:-}"
 TPU_SYNC_VERIFY_PARITY="${TPU_SYNC_VERIFY_PARITY:-off}"
 TPU_SYNC_RELEASE_BUFFERS="${TPU_SYNC_RELEASE_BUFFERS:-True}"
-# Sequence rejection (rollout_rs=seq_mean_k1) with lower edge 0.998 to match this stack's ~+0.0009 log-prob bias.
-ROLLOUT_RS_THRESHOLD="${ROLLOUT_RS_THRESHOLD:-0.998_1.002}"
+# Advantage and rollout correction follow the reference run on the MLPerf R2E-Gym-Easy 700/70 split
+# (google-trellis/verl-tpu-deepswe, q35b_deepswe_v7x_mlperf700_16_lookahead_val_6r):
+#   - rloo: leave-one-out baseline, r_i - mean(r_-i), with no std scaling.
+#   - rollout_is=seq_mask_tis: per-token truncated IS weights; a sequence whose geometric-mean pi_train / pi_rollout
+#     ratio leaves the ROLLOUT_IS_THRESHOLD band gets zero weight but stays in the loss denominator.
+#   - rollout_rs=seq_mean_abs_exp: drop a sequence when mean_t exp(|log pi_train - log pi_rollout|) exceeds
+#     ROLLOUT_RS_THRESHOLD.
+export ADV_ESTIMATOR="${ADV_ESTIMATOR:-rloo}"
+ROLLOUT_IS="${ROLLOUT_IS:-seq_mask_tis}"
+ROLLOUT_IS_THRESHOLD="${ROLLOUT_IS_THRESHOLD:-0.998_1.002}"
+ROLLOUT_RS="${ROLLOUT_RS:-seq_mean_abs_exp}"
+ROLLOUT_RS_THRESHOLD="${ROLLOUT_RS_THRESHOLD:-2.0}"
+# seq_mask_tis / seq_mean_abs_exp are not in verl main yet (see REQUIRED_VERL.txt); fail here rather than at step 1.
+if [[ "${ROLLOUT_IS}" == "seq_mask_tis" || "${ROLLOUT_RS}" == "seq_mean_abs_exp" ]] &&
+  ! grep -q "seq_mask_tis" "${VERL_ROOT}/verl/trainer/ppo/rollout_corr_helper.py"; then
+  echo "ERROR: ${VERL_ROOT} has no seq_mask_tis / seq_mean_abs_exp rollout correction. Use a verl checkout that" \
+    "includes it (see deepswe_tpu/REQUIRED_VERL.txt), or set ROLLOUT_IS / ROLLOUT_RS to modes it supports." >&2
+  exit 1
+fi
 
 UNI_AGENT_HOME="${UNI_AGENT_HOME:-/workspace/uni-agent}"
 TASK_CONFIG="${TASK_CONFIG:-${UNI_AGENT_HOME}/examples/quickstart/training/task_config_react_gke.yaml}"
@@ -227,14 +244,13 @@ if [[ -n "${GDN_ROW_SLOT_LEN}" ]]; then
   OPTIMIZATION_OVERRIDES+=("++actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.gdn_row_slot_len=${GDN_ROW_SLOT_LEN}")
 fi
 
-export ADV_ESTIMATOR="${ADV_ESTIMATOR:-grpo_loo}"
-
 exec bash "${VERL_ROOT}/examples/tpu/grpo/run_qwen3_5_torchtitan.sh" \
     algorithm.adv_estimator="${ADV_ESTIMATOR}" \
     algorithm.use_kl_in_reward=False \
     algorithm.rollout_correction.bypass_mode=False \
-    algorithm.rollout_correction.rollout_is=null \
-    algorithm.rollout_correction.rollout_rs=seq_mean_k1 \
+    algorithm.rollout_correction.rollout_is="${ROLLOUT_IS}" \
+    "algorithm.rollout_correction.rollout_is_threshold='${ROLLOUT_IS_THRESHOLD}'" \
+    algorithm.rollout_correction.rollout_rs="${ROLLOUT_RS}" \
     "algorithm.rollout_correction.rollout_rs_threshold='${ROLLOUT_RS_THRESHOLD}'" \
     actor_rollout_ref.actor.policy_loss.loss_mode=vanilla \
     actor_rollout_ref.actor.use_kl_loss=False \
@@ -260,5 +276,5 @@ exec bash "${VERL_ROOT}/examples/tpu/grpo/run_qwen3_5_torchtitan.sh" \
     "${AGENT_OVERRIDES[@]}" \
     "${OPTIMIZATION_OVERRIDES[@]}" \
     trainer.v1.sampler.max_off_policy_threshold="${MAX_OFF_POLICY_THRESHOLD}" \
-    trainer.v1.sampler.max_off_policy_strategy=wait \
+    trainer.v1.sampler.max_off_policy_strategy="${MAX_OFF_POLICY_STRATEGY}" \
     "$@"

@@ -22,11 +22,8 @@ from __future__ import annotations
 import logging
 import os
 import uuid
-from collections import defaultdict
 from typing import Any
 
-import numpy as np
-import torch
 from tensordict import TensorDict
 from uni_agent.sandbox.gke_agent_sandbox import (
     PrewarmBatchIterator,
@@ -38,74 +35,12 @@ from uni_agent.sandbox.gke_agent_sandbox import (
     prefetch_lookahead_batch_async,
 )
 
-from verl.trainer.ppo.core_algos import ADV_ESTIMATOR_REGISTRY, register_adv_est
 from verl.trainer.ppo.v1.trainer_base import TRAINER_REGISTRY, PPOTrainer
 from verl.trainer.ppo.v1.trainer_separate_async import PPOTrainerSeparateAsync
 from verl.trainer.ppo.v1.trainer_sync import PPOTrainerSync
 from verl.utils import tensordict_utils as tu
 
 logger = logging.getLogger(__name__)
-
-_LOO_VAR_NOISE_FLOOR = 1e-5
-_MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE = 2
-
-
-@register_adv_est("grpo_loo")
-@register_adv_est("grpo-loo")
-def compute_grpo_loo_outcome_advantage(
-    token_level_rewards: torch.Tensor,
-    response_mask: torch.Tensor,
-    index: np.ndarray,
-    epsilon: float = 1e-6,
-    config: Any = None,
-    **kwargs: Any,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Group-relative outcome advantage with leave-one-out baseline and LOO std scale (GRPO-LOO).
-
-    Excludes each trajectory from both the baseline mean and the sample standard deviation used to scale its
-    advantage:
-      - LOO centered score: ``(r_i - mean(r)) * (G / (G - 1)) = r_i - mean(r_{-i})``
-      - LOO variance: ``(sum_j (r_j - mean(r))^2 - (r_i - mean(r))^2 * (G / (G - 1))) / (G - 2)``
-      - Divided by ``sqrt(loo_var) + epsilon`` when ``loo_var > 1e-5 * sum_sq`` (yielding [-3.615, +3.615] at G=16).
-    """
-    del config, kwargs
-    scores = token_level_rewards.sum(dim=-1)
-    advantages_1d = torch.zeros_like(scores, dtype=torch.float32)
-
-    id2indices: dict[Any, list[int]] = defaultdict(list)
-    with torch.no_grad():
-        bsz = scores.shape[0]
-        for i in range(bsz):
-            id2indices[index[i]].append(i)
-
-        for row_indices in id2indices.values():
-            valid_count = len(row_indices)
-            if valid_count < _MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE:
-                continue
-            idx_tensor = torch.tensor(row_indices, device=scores.device, dtype=torch.long)
-            group_scores = scores.index_select(0, idx_tensor).to(dtype=torch.float32)
-            n_others = float(valid_count - 1)
-            group_mean = group_scores.mean()
-            centered = group_scores - group_mean
-            scale = float(valid_count) / n_others
-            adv = centered * scale
-
-            sum_sq = torch.sum(centered * centered)
-            if valid_count - 1 >= 2:
-                loo_var = (sum_sq - (centered * centered) * scale) / float(valid_count - 2)
-                loo_var = torch.where(
-                    loo_var > _LOO_VAR_NOISE_FLOOR * sum_sq,
-                    loo_var,
-                    torch.zeros_like(loo_var),
-                )
-            else:
-                loo_var = torch.zeros_like(centered)
-            loo_std = torch.sqrt(loo_var)
-            adv = torch.where(loo_std > 0, adv / (loo_std + epsilon), adv)
-            advantages_1d.index_copy_(0, idx_tensor, adv)
-
-        advantages = advantages_1d.to(dtype=scores.dtype).unsqueeze(-1) * response_mask
-    return advantages, advantages
 
 
 class _DeepSWESandboxLookaheadMixin:
@@ -345,11 +280,9 @@ class DeepSWESyncPPOTrainer(_DeepSWESandboxLookaheadMixin, PPOTrainerSync):
 
 
 def register_deepswe_trainers() -> None:
-    """Register DeepSWE lookahead trainers in ``TRAINER_REGISTRY`` and ``grpo_loo`` in ``ADV_ESTIMATOR_REGISTRY``."""
+    """Register DeepSWE lookahead trainers in ``TRAINER_REGISTRY``."""
     TRAINER_REGISTRY["separate_async"] = DeepSWESeparateAsyncPPOTrainer
     TRAINER_REGISTRY["sync"] = DeepSWESyncPPOTrainer
-    ADV_ESTIMATOR_REGISTRY["grpo_loo"] = compute_grpo_loo_outcome_advantage
-    ADV_ESTIMATOR_REGISTRY["grpo-loo"] = compute_grpo_loo_outcome_advantage
 
 
 register_deepswe_trainers()
