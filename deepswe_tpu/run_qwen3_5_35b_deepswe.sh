@@ -148,11 +148,11 @@ ROLLOUT_IS="${ROLLOUT_IS:-seq_mask_tis}"
 ROLLOUT_IS_THRESHOLD="${ROLLOUT_IS_THRESHOLD:-0.998_1.002}"
 ROLLOUT_RS="${ROLLOUT_RS:-seq_mean_abs_exp}"
 ROLLOUT_RS_THRESHOLD="${ROLLOUT_RS_THRESHOLD:-2.0}"
-# seq_mask_tis / seq_mean_abs_exp are not in verl main yet (see REQUIRED_VERL.txt); fail here rather than at step 1.
+# seq_mask_tis / seq_mean_abs_exp come with verl-project/verl#8677; fail here rather than at step 1 without it.
 if [[ "${ROLLOUT_IS}" == "seq_mask_tis" || "${ROLLOUT_RS}" == "seq_mean_abs_exp" ]] &&
   ! grep -q "seq_mask_tis" "${VERL_ROOT}/verl/trainer/ppo/rollout_corr_helper.py"; then
-  echo "ERROR: ${VERL_ROOT} has no seq_mask_tis / seq_mean_abs_exp rollout correction. Use a verl checkout that" \
-    "includes it (see deepswe_tpu/REQUIRED_VERL.txt), or set ROLLOUT_IS / ROLLOUT_RS to modes it supports." >&2
+  echo "ERROR: ${VERL_ROOT} has no seq_mask_tis / seq_mean_abs_exp rollout correction (verl-project/verl#8677)." \
+    "Use a verl main that includes it, or set ROLLOUT_IS / ROLLOUT_RS to modes this checkout supports." >&2
   exit 1
 fi
 
