@@ -6,4 +6,4 @@ VERL_COMMIT=565bc5ca267d56eaaf45a6f5d10a82ad4ca9ba29
 PIP_INSTALL=pip install verl@git+https://github.com/verl-project/verl.git@565bc5ca267d56eaaf45a6f5d10a82ad4ca9ba29
 TPU_PLUGIN_COMMIT=e40b7ad2e09f08e85e7dba2bcf9731efc69b90a4
 RECIPE_FOLDER=deepswe_tpu
-NOTES=Requires verl main, verl-hardware-plugin main (TPU_PLUGIN_COMMIT), and uni-agent with GKEAgentSandbox / R2E-Gym support. Rollout correction defaults to rollout_is=null, rollout_rs=seq_mean_k1 (0.998_1.002), which verl main supports; the reference run's seq_mask_tis / seq_mean_abs_exp can be selected with ROLLOUT_IS / ROLLOUT_RS once verl-project/verl#8677 is merged.
+NOTES=Requires verl main, verl-hardware-plugin main (TPU_PLUGIN_COMMIT), and uni-agent with GKEAgentSandbox / R2E-Gym support. Rollout correction defaults to rollout_is=null, rollout_rs=seq_mean_k1 (0.998_1.002), which verl main supports; seq_mask_tis / seq_mean_abs_exp can be selected with ROLLOUT_IS / ROLLOUT_RS once verl-project/verl#8677 is merged.

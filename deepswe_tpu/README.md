@@ -317,7 +317,7 @@ kubectl exec -n "${NAMESPACE}" "${HEAD_POD}" -- ray status
 ## 8. Running the Recipe in `verl`
 
 ### Required `verl` version
-This recipe targets upstream `verl` `main` together with `verl-hardware-plugin` `main` (for TPU support) and `uni-agent`. See [`REQUIRED_VERL.txt`](./REQUIRED_VERL.txt). Rollout correction defaults to `seq_mean_k1` sequence rejection with no IS weights; the reference run's `ROLLOUT_IS=seq_mask_tis` / `ROLLOUT_RS=seq_mean_abs_exp` (`ROLLOUT_RS_THRESHOLD=2.0`) need verl-project/verl#8677 and will become the defaults once it is merged.
+This recipe targets upstream `verl` `main` together with `verl-hardware-plugin` `main` (for TPU support) and `uni-agent`. See [`REQUIRED_VERL.txt`](./REQUIRED_VERL.txt). Rollout correction defaults to `seq_mean_k1` sequence rejection with no IS weights; `ROLLOUT_IS=seq_mask_tis` / `ROLLOUT_RS=seq_mean_abs_exp` (`ROLLOUT_RS_THRESHOLD=2.0`) need verl-project/verl#8677 and will become the defaults once it is merged.
 
 ### What it is for
 [`run_qwen3_5_35b_deepswe.sh`](./run_qwen3_5_35b_deepswe.sh) wires `uni-agent`'s `AgentFrameworkRolloutAdapter` (`ReActAgent` + `r2e_gym` + `GKEAgentSandbox`) into `verl`'s V1 async PPO/RLOO trainer (`verl/examples/tpu/grpo/run_qwen3_5_torchtitan.sh`).

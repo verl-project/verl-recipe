@@ -136,10 +136,9 @@ FROZEN_PARAM_REGEX="${FROZEN_PARAM_REGEX-moe.router.gate}"
 GDN_ROW_SLOT_LEN="${GDN_ROW_SLOT_LEN:-}"
 TPU_SYNC_VERIFY_PARITY="${TPU_SYNC_VERIFY_PARITY:-off}"
 TPU_SYNC_RELEASE_BUFFERS="${TPU_SYNC_RELEASE_BUFFERS:-True}"
-# rloo: leave-one-out baseline, r_i - mean(r_-i), with no std scaling, as in the reference run on the MLPerf
-# R2E-Gym-Easy 700/70 split (google-trellis/verl-tpu-deepswe, q35b_deepswe_v7x_mlperf700_16_lookahead_val_6r).
+# rloo: leave-one-out baseline, r_i - mean(r_-i), with no std scaling.
 export ADV_ESTIMATOR="${ADV_ESTIMATOR:-rloo}"
-# Rollout correction. The reference run used the modes added by verl-project/verl#8677:
+# Rollout correction. The intended modes are the ones added by verl-project/verl#8677:
 #   ROLLOUT_IS=seq_mask_tis ROLLOUT_IS_THRESHOLD=0.998_1.002 ROLLOUT_RS=seq_mean_abs_exp ROLLOUT_RS_THRESHOLD=2.0
 # TODO: make those the defaults once verl#8677 is in verl main. Until then the defaults are what verl main has: no
 # IS weights, and sequence rejection with seq_mean_k1 (lower edge 0.998 for this stack's ~+0.0009 log-prob bias).
