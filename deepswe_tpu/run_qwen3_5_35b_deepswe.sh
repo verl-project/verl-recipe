@@ -136,18 +136,25 @@ FROZEN_PARAM_REGEX="${FROZEN_PARAM_REGEX-moe.router.gate}"
 GDN_ROW_SLOT_LEN="${GDN_ROW_SLOT_LEN:-}"
 TPU_SYNC_VERIFY_PARITY="${TPU_SYNC_VERIFY_PARITY:-off}"
 TPU_SYNC_RELEASE_BUFFERS="${TPU_SYNC_RELEASE_BUFFERS:-True}"
-# Advantage and rollout correction follow the reference run on the MLPerf R2E-Gym-Easy 700/70 split
-# (google-trellis/verl-tpu-deepswe, q35b_deepswe_v7x_mlperf700_16_lookahead_val_6r):
-#   - rloo: leave-one-out baseline, r_i - mean(r_-i), with no std scaling.
-#   - rollout_is=seq_mask_tis: per-token truncated IS weights; a sequence whose geometric-mean pi_train / pi_rollout
-#     ratio leaves the ROLLOUT_IS_THRESHOLD band gets zero weight but stays in the loss denominator.
-#   - rollout_rs=seq_mean_abs_exp: drop a sequence when mean_t exp(|log pi_train - log pi_rollout|) exceeds
-#     ROLLOUT_RS_THRESHOLD.
+# rloo: leave-one-out baseline, r_i - mean(r_-i), with no std scaling, as in the reference run on the MLPerf
+# R2E-Gym-Easy 700/70 split (google-trellis/verl-tpu-deepswe, q35b_deepswe_v7x_mlperf700_16_lookahead_val_6r).
 export ADV_ESTIMATOR="${ADV_ESTIMATOR:-rloo}"
-ROLLOUT_IS="${ROLLOUT_IS:-seq_mask_tis}"
+# Rollout correction. The reference run used the modes added by verl-project/verl#8677:
+#   ROLLOUT_IS=seq_mask_tis ROLLOUT_IS_THRESHOLD=0.998_1.002 ROLLOUT_RS=seq_mean_abs_exp ROLLOUT_RS_THRESHOLD=2.0
+# TODO: make those the defaults once verl#8677 is in verl main. Until then the defaults are what verl main has: no
+# IS weights, and sequence rejection with seq_mean_k1 (lower edge 0.998 for this stack's ~+0.0009 log-prob bias).
+ROLLOUT_IS="${ROLLOUT_IS:-null}"
 ROLLOUT_IS_THRESHOLD="${ROLLOUT_IS_THRESHOLD:-0.998_1.002}"
-ROLLOUT_RS="${ROLLOUT_RS:-seq_mean_abs_exp}"
-ROLLOUT_RS_THRESHOLD="${ROLLOUT_RS_THRESHOLD:-2.0}"
+ROLLOUT_RS="${ROLLOUT_RS:-seq_mean_k1}"
+ROLLOUT_RS_THRESHOLD="${ROLLOUT_RS_THRESHOLD:-0.998_1.002}"
+ROLLOUT_CORRECTION_OVERRIDES=(
+  "algorithm.rollout_correction.rollout_is=${ROLLOUT_IS}"
+  "algorithm.rollout_correction.rollout_rs=${ROLLOUT_RS}"
+  "algorithm.rollout_correction.rollout_rs_threshold='${ROLLOUT_RS_THRESHOLD}'"
+)
+if [[ "${ROLLOUT_IS}" != "null" ]]; then
+  ROLLOUT_CORRECTION_OVERRIDES+=("algorithm.rollout_correction.rollout_is_threshold='${ROLLOUT_IS_THRESHOLD}'")
+fi
 # seq_mask_tis / seq_mean_abs_exp come with verl-project/verl#8677; fail here rather than at step 1 without it.
 if [[ "${ROLLOUT_IS}" == "seq_mask_tis" || "${ROLLOUT_RS}" == "seq_mean_abs_exp" ]] &&
   ! grep -q "seq_mask_tis" "${VERL_ROOT}/verl/trainer/ppo/rollout_corr_helper.py"; then
@@ -248,10 +255,7 @@ exec bash "${VERL_ROOT}/examples/tpu/grpo/run_qwen3_5_torchtitan.sh" \
     algorithm.adv_estimator="${ADV_ESTIMATOR}" \
     algorithm.use_kl_in_reward=False \
     algorithm.rollout_correction.bypass_mode=False \
-    algorithm.rollout_correction.rollout_is="${ROLLOUT_IS}" \
-    "algorithm.rollout_correction.rollout_is_threshold='${ROLLOUT_IS_THRESHOLD}'" \
-    algorithm.rollout_correction.rollout_rs="${ROLLOUT_RS}" \
-    "algorithm.rollout_correction.rollout_rs_threshold='${ROLLOUT_RS_THRESHOLD}'" \
+    "${ROLLOUT_CORRECTION_OVERRIDES[@]}" \
     actor_rollout_ref.actor.policy_loss.loss_mode=vanilla \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.kl_loss_coef=0.0 \
