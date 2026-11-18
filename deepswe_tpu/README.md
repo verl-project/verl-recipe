@@ -293,7 +293,7 @@ kubectl exec -n "${NAMESPACE}" "${HEAD_POD}" -- ray status
 ## 8. Running the Recipe in `verl`
 
 ### Required `verl` version
-This recipe targets upstream `verl` `main` together with `verl-hardware-plugin` `main` (for TPU support) and `uni-agent`. See [`REQUIRED_VERL.txt`](./REQUIRED_VERL.txt).
+This recipe targets `askhat-g/verl` `main` (upstream `verl` `main` plus the `seq_mask_tis` / `seq_mean_abs_exp` rollout correction its defaults use, which upstream does not have yet) together with `verl-hardware-plugin` `main` (for TPU support) and `uni-agent`. See [`REQUIRED_VERL.txt`](./REQUIRED_VERL.txt) for the pinned commit.
 
 ### What it is for
 [`run_qwen3_5_35b_deepswe.sh`](./run_qwen3_5_35b_deepswe.sh) wires `uni-agent`'s `AgentFrameworkRolloutAdapter` (`ReActAgent` + `r2e_gym` + `GKEAgentSandbox`) into `verl`'s V1 async PPO/RLOO trainer (`verl/examples/tpu/grpo/run_qwen3_5_torchtitan.sh`).

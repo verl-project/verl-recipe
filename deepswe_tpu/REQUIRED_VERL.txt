@@ -1,10 +1,10 @@
-# deepswe_tpu — rolling; needs verl main plus the seq_mask_tis / seq_mean_abs_exp rollout-correction commit, and
-# verl-hardware-plugin main
-UPSTREAM=https://github.com/verl-project/verl.git
+# deepswe_tpu — rolling; tested against askhat-g/verl main (verl main + seq_mask_tis / seq_mean_abs_exp rollout
+# correction) + verl-hardware-plugin main
+UPSTREAM=https://github.com/askhat-g/verl.git
 MODE=rolling
 BRANCH=main
-VERL_COMMIT=44cdff30191583b9aa14d90872b6ba1447a7275d
-PIP_INSTALL=pip install verl@git+https://github.com/verl-project/verl.git@44cdff30191583b9aa14d90872b6ba1447a7275d
+VERL_COMMIT=b256a402fade4bacb0c8779d4d4014e43ac5509a
+PIP_INSTALL=pip install verl@git+https://github.com/askhat-g/verl.git@b256a402fade4bacb0c8779d4d4014e43ac5509a
 TPU_PLUGIN_COMMIT=16be0a491de807bbd9767f7894aa21feb41e1b52
 RECIPE_FOLDER=deepswe_tpu
-NOTES=Requires verl main plus the seq_mask_tis / seq_mean_abs_exp rollout correction (not in verl main as of 565bc5ca; available as commit 799af449 on https://github.com/askhat-g/verl branch feat/deepswe-rloo-seq-mask-tis), verl-hardware-plugin main (TPU_PLUGIN_COMMIT), and uni-agent with GKEAgentSandbox / R2E-Gym support. The run script exits early if the verl checkout lacks it.
+NOTES=The default rollout correction (seq_mask_tis / seq_mean_abs_exp) is not in verl-project/verl main yet (checked at 565bc5ca), so this points at askhat-g/verl main, which is verl-project/verl main as of b0871fd8 plus that change. Switch back to verl-project/verl once it lands there. Also requires verl-hardware-plugin main (TPU_PLUGIN_COMMIT) and uni-agent with GKEAgentSandbox / R2E-Gym support. The run script exits early if the verl checkout lacks the rollout correction.
