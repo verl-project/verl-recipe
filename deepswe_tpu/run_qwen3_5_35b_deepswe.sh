@@ -121,6 +121,10 @@ export VERL_SANDBOX_LOOKAHEAD="${VERL_SANDBOX_LOOKAHEAD:-1}"
 export SANDBOX_EVAL_REPLICAS="${SANDBOX_EVAL_REPLICAS:-1}"
 export SANDBOX_MAX_WARMPOOL_SIZE="${SANDBOX_MAX_WARMPOOL_SIZE:-${ROLLOUT_N}}"
 export SANDBOX_NETWORK_POLICY_MANAGEMENT="${SANDBOX_NETWORK_POLICY_MANAGEMENT:-Managed}"
+# A per-run id keeps this job's warm pools, templates and claims separate from other jobs in the namespace (unset,
+# uni-agent shares them under "uni-agent-shared") and is what the reaper selects on after a crash (see README).
+# Lowercase letters, digits and "-" only: it becomes part of Kubernetes resource names.
+export SANDBOX_RUN_ID="${SANDBOX_RUN_ID:-deepswe-$(date +%m%d-%H%M%S)}"
 
 # vLLM-TorchTPU kernel flags, TorchTitan TPU options, tpu-sync options, and rollout correction band.
 TPU_MOE_SKIP_PADDED_TOKENS="${TPU_MOE_SKIP_PADDED_TOKENS:-1}"
@@ -147,6 +151,13 @@ AGENT_LOG_DIR="${AGENT_LOG_DIR:-/tmp/uni_agent_logs/${EXPERIMENT_NAME}}"
 MASK_UNFINISHED_EPISODE="${MASK_UNFINISHED_EPISODE:-False}"
 
 VERL_EXT_MODULES="${VERL_EXT_MODULES:-verl_hardware_plugin,${DEEPSWE_MODULE}}"
+# With lookahead on, rollout workers do not warm sandbox pools themselves: the trainers registered by
+# ${DEEPSWE_MODULE} do. Without that module every rollout would fail on a missing warm pool.
+if [[ ! "${VERL_SANDBOX_LOOKAHEAD,,}" =~ ^(0|false|no)$ && ",${VERL_EXT_MODULES}," != *",${DEEPSWE_MODULE},"* ]]; then
+  echo "ERROR: VERL_SANDBOX_LOOKAHEAD=${VERL_SANDBOX_LOOKAHEAD} needs ${DEEPSWE_MODULE} in VERL_EXT_MODULES" \
+    "(got '${VERL_EXT_MODULES}'); add it or set VERL_SANDBOX_LOOKAHEAD=0." >&2
+  exit 1
+fi
 AGENT_OVERRIDES=(
   "++ray_kwargs.ray_init.runtime_env.env_vars.VERL_USE_EXTERNAL_MODULES='${VERL_EXT_MODULES}'"
   "++ray_kwargs.ray_init.runtime_env.env_vars.VERL_REFILL_AFTER_SAMPLE='${VERL_REFILL_AFTER_SAMPLE}'"
@@ -173,6 +184,10 @@ AGENT_OVERRIDES=(
 )
 # Only forward optional sandbox/node-selector env vars when set, so unset vars do not arrive as "".
 for _opt_var in SANDBOX_NAMESPACE SANDBOX_RUN_ID SANDBOX_IMAGE_MAP SANDBOX_POD_ANNOTATIONS NODE_SELECTOR_KEY NODE_SELECTOR_VAL; do
+  if [[ "${!_opt_var:-}" == *"'"* ]]; then
+    echo "ERROR: ${_opt_var} must not contain a single quote (it is passed as a quoted Hydra override)." >&2
+    exit 1
+  fi
   if [[ -n "${!_opt_var:-}" ]]; then
     AGENT_OVERRIDES+=("++ray_kwargs.ray_init.runtime_env.env_vars.${_opt_var}='${!_opt_var}'")
   fi

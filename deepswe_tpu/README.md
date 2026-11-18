@@ -205,12 +205,7 @@ roleRef:
 EOF
 ```
 
-Install the Python sandbox client packages into your training image (`agent-sandbox-rl` is not published on PyPI yet, so install both client packages from `kubernetes-sigs/agent-sandbox`):
-```bash
-pip install 'uni-agent[gke]'
-pip install 'git+https://github.com/kubernetes-sigs/agent-sandbox.git@9afee7039342f18fa9ad402929cabf8b66eebaa7#subdirectory=clients/python/agentic-sandbox-client'
-pip install 'git+https://github.com/kubernetes-sigs/agent-sandbox.git@9afee7039342f18fa9ad402929cabf8b66eebaa7#subdirectory=examples/agent-sandbox-rl'
-```
+Install the Python sandbox client packages into your training image: `pip install 'uni-agent[gke]'`, plus the two `kubernetes-sigs/agent-sandbox` client packages (`agent-sandbox-rl` is not on PyPI yet). Use the pinned install commands in the GKE Agent Sandbox section of `uni-agent/docs/source/concepts/sandbox.md`, which is the single place that pin is kept.
 
 ---
 
@@ -347,8 +342,10 @@ kubectl exec -n "${NAMESPACE}" "${HEAD_POD}" -- \
 # Check warm pools and active sandbox claims in your namespace
 kubectl get sandboxwarmpools,sandboxclaims -n "${NAMESPACE}"
 
-# If a job is preempted or killed before on_train_end() tears down warm pools, clean up by SANDBOX_RUN_ID:
-for res in sandboxclaims sandboxwarmpools sandboxtemplates; do
-  kubectl -n "${NAMESPACE}" get "${res}" -o name | grep "${SANDBOX_RUN_ID}" | xargs -r kubectl -n "${NAMESPACE}" delete
-done
+# If a job is preempted or killed before on_train_end() tears down its sandboxes, reap that run by its run-id label.
+# SANDBOX_RUN_ID is the value you exported, or the generated "deepswe-<MMDD-HHMMSS>" printed at the top of the job
+# log. The ":?" guard aborts if it is unset; never match on names with grep, an empty pattern matches every job.
+kubectl exec -n "${NAMESPACE}" "${HEAD_POD}" -- \
+  python3 -m agent_sandbox_rl.reaper --in-cluster --namespace "${NAMESPACE}" \
+    --run-id "${SANDBOX_RUN_ID:?set SANDBOX_RUN_ID to the run to clean up}"
 ```
