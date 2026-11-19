@@ -421,22 +421,23 @@ class DynamoHttpServer:
 
         ``{prefill_shards: k, transfer_backend: nixl}``: the first ``k`` shards of
         the pool run ``--disaggregation-mode prefill`` and the rest ``decode``.
-        dynamo.sglang registers prefill shards under the ``prefill`` component and
-        the frontend activates its prefill router on its own, so generate traffic
-        and the control plane are unchanged: every shard, P or D, is still one
-        engine with one ``/engine/*`` surface and one TP slice of trainer ranks,
-        and weight refit, pause and memory release fan out to all of them.
+        In worker mode dynamo.sglang registers prefill shards under the ``prefill``
+        component; in sidecar mode the sidecar gets the same
+        ``--disaggregation-mode`` and registers as a prefill or decode worker. The
+        frontend activates its prefill router on its own either way, so generate
+        traffic and the control plane are unchanged: every shard, P or D, is still
+        one engine with one control surface and one TP slice of trainer ranks, and
+        weight refit, pause and memory release fan out to all of them.
         Returns None when PD is off.
         """
         cfg = self._sglang_cfg().get("disaggregation") or {}
         k = int(cfg.get("prefill_shards", 0) or 0)
         if k <= 0:
             return None
-        if self._is_sglang_sidecar():
-            raise ValueError(
-                "dynamo.sglang.disaggregation is implemented for launch_mode=worker only "
-                "(the sidecar registers one aggregated engine per shard)."
-            )
+        if self._routing_replay_enabled():
+            # Prefill runs the prompt's forward pass on another engine; whether the
+            # decode response still carries routing for the full sequence is unverified.
+            raise ValueError("dynamo.sglang.disaggregation does not support rollout routing replay (R3) yet.")
         if self._use_direct_generate():
             raise ValueError(
                 "dynamo.sglang.disaggregation needs generation through the frontend; disable direct_generate."
@@ -1199,6 +1200,7 @@ class DynamoHttpServer:
                     env=env,
                     kv_events_config_json=kv_events_config_json,
                     log_dir=log_dir,
+                    disagg_role=disagg_role,
                 )
                 continue
 
@@ -1260,6 +1262,7 @@ class DynamoHttpServer:
         env: dict[str, str],
         kv_events_config_json: Optional[str],
         log_dir: str,
+        disagg_role: Optional[str] = None,
     ) -> None:
         """Start one sidecar-mode shard: stock SGLang plus ``dynamo.sglang.sidecar``.
 
@@ -1276,6 +1279,12 @@ class DynamoHttpServer:
         url_host = f"[{host}]" if is_valid_ipv6_address(host) else host
         http_port = self._allocate_stable_node_port(_SGLANG_ENGINE_PORT_BASE, spec_idx, window=8)
         grpc_port = self._allocate_stable_node_port(_SGLANG_ENGINE_PORT_BASE, spec_idx, window=8)
+        # A prefill engine's bootstrap server is bound after the model loads too.
+        bootstrap_port = (
+            self._allocate_stable_node_port(_SGLANG_ENGINE_PORT_BASE, spec_idx, window=8)
+            if disagg_role == "prefill"
+            else None
+        )
 
         engine_cmd = self._build_sglang_cmd(
             served_model_name,
@@ -1283,8 +1292,16 @@ class DynamoHttpServer:
             nccl_port=self._allocate_tcp_port(),
             kv_events_config_json=kv_events_config_json,
             sidecar_engine=(host, http_port, grpc_port),
+            disagg_role=disagg_role,
+            bootstrap_port=bootstrap_port,
         )
-        sidecar_cmd = self._build_sglang_sidecar_cmd(f"http://{url_host}:{grpc_port}")
+        # The engine binds --host (this node's address), bootstrap server included;
+        # pass it explicitly so decode never gets a loopback or wildcard address.
+        sidecar_cmd = self._build_sglang_sidecar_cmd(
+            f"http://{url_host}:{grpc_port}",
+            disagg_role=disagg_role,
+            bootstrap_host=host if disagg_role == "prefill" else None,
+        )
 
         # The engine runs no Dynamo runtime; DYN_SYSTEM_PORT belongs to the sidecar.
         engine_env = {k: v for k, v in env.items() if not k.startswith("DYN_SYSTEM_")}
@@ -1320,13 +1337,23 @@ class DynamoHttpServer:
             proc = subprocess.Popen(cmd, env=proc_env, stdout=stdout_fp, stderr=subprocess.STDOUT)
             self._engine_processes.append(proc)
 
-    def _build_sglang_sidecar_cmd(self, grpc_endpoint: str) -> list[str]:
+    def _build_sglang_sidecar_cmd(
+        self,
+        grpc_endpoint: str,
+        disagg_role: Optional[str] = None,
+        bootstrap_host: Optional[str] = None,
+    ) -> list[str]:
         """``dynamo.sglang.sidecar`` CLI for one shard.
 
         The sidecar's gRPC startup deadline defaults to 300 s, which a large model
         (load + CUDA graph capture) can exceed; past it the sidecar exits and the
         watchdog reports the shard dead. Default it to the frontend readiness
         budget, which bounds startup anyway.
+
+        For PD, ``--disaggregation-mode`` must match the engine's (a prefill sidecar
+        registers as a prefill worker, a decode sidecar advertises no KV indexer),
+        and ``--bootstrap-host`` is the address decode dials for prefill's bootstrap
+        server.
         """
         cfg = self._sglang_cfg()
         deadline_s = cfg.get("sidecar_startup_deadline_s", _FRONTEND_READY_TIMEOUT_S)
@@ -1339,6 +1366,10 @@ class DynamoHttpServer:
             "--grpc-startup-deadline-secs",
             str(max(1, int(float(deadline_s)))),
         ]
+        if disagg_role is not None:
+            cmd += ["--disaggregation-mode", disagg_role]
+        if bootstrap_host is not None:
+            cmd += ["--bootstrap-host", bootstrap_host]
         extra = cfg.get("sidecar_extra_args") or []
         if isinstance(extra, list):
             cmd += [str(x) for x in extra]
@@ -1638,9 +1669,12 @@ class DynamoHttpServer:
                 cmd += ["--disaggregation-bootstrap-port", str(bootstrap_port)]
                 # The bootstrap server binds ServerArgs.host (127.0.0.1 by default) but
                 # decode reaches it at this node's routable address: without a wildcard
-                # bind every handshake is refused and requests hang.
+                # bind every handshake is refused and requests hang. A sidecar engine
+                # already binds --host to that address.
                 user_args = self._sglang_cfg().get("extra_args") or self._dynamo_cfg().get("extra_args") or []
-                if not any(str(x) == "--host" or str(x).startswith("--host=") for x in user_args):
+                if sidecar_engine is None and not any(
+                    str(x) == "--host" or str(x).startswith("--host=") for x in user_args
+                ):
                     cmd += ["--host", "0.0.0.0"]
         if self.config.enable_sleep_mode:
             # Without this SGLang's torch_memory_saver never arms, and

@@ -1681,12 +1681,90 @@ def test_disaggregation_needs_a_decode_shard(k):
         _pd_server(prefill_shards=k)._sglang_disagg_roles(2)
 
 
-def test_disaggregation_rejects_sidecar_mode():
-    server = _make_server(
-        {"engine": "sglang", "sglang": {"launch_mode": "sidecar", "disaggregation": {"prefill_shards": 1}}}
+def _pd_sidecar_server(**rollout_cfg):
+    return _make_server(
+        {"engine": "sglang", "sglang": {"launch_mode": "sidecar", "disaggregation": {"prefill_shards": 1}}},
+        **rollout_cfg,
     )
-    with pytest.raises(ValueError, match="launch_mode=worker"):
-        server._sglang_disagg_roles(2)
+
+
+def test_disaggregation_works_in_sidecar_mode():
+    assert _pd_sidecar_server()._sglang_disagg_roles(2) == ["prefill", "decode"]
+
+
+def test_disaggregation_rejects_routing_replay():
+    with pytest.raises(ValueError, match="routing replay"):
+        _pd_sidecar_server(enable_rollout_routing_replay=True)._sglang_disagg_roles(2)
+
+
+def test_disaggregation_sidecar_cmd_flags():
+    server = _pd_sidecar_server()
+    pre = server._build_sglang_sidecar_cmd("http://10.0.0.1:2049", disagg_role="prefill", bootstrap_host="10.0.0.1")
+    dec = server._build_sglang_sidecar_cmd("http://10.0.0.1:2057", disagg_role="decode")
+    assert pre[pre.index("--disaggregation-mode") + 1] == "prefill"
+    assert pre[pre.index("--bootstrap-host") + 1] == "10.0.0.1"
+    assert dec[dec.index("--disaggregation-mode") + 1] == "decode"
+    assert "--bootstrap-host" not in dec
+    agg = server._build_sglang_sidecar_cmd("http://10.0.0.1:2049")
+    assert "--disaggregation-mode" not in agg and "--bootstrap-host" not in agg
+
+
+def test_disaggregation_sidecar_engine_keeps_its_node_host():
+    # A sidecar engine already binds --host to the node address; no wildcard rebind.
+    cmd = _pd_sidecar_server()._build_sglang_cmd(
+        "m", 1, sidecar_engine=("10.0.0.1", 2048, 2049), disagg_role="prefill", bootstrap_port=2050
+    )
+    assert cmd.count("--host") == 1 and cmd[cmd.index("--host") + 1] == "10.0.0.1"
+    assert cmd[cmd.index("--disaggregation-bootstrap-port") + 1] == "2050"
+
+
+@pytest.mark.parametrize("role", ["prefill", "decode"])
+def test_spawn_sidecar_pd_shard_matches_engine_and_sidecar_roles(tmp_path, monkeypatch, role):
+    server = _pd_sidecar_server()
+    server.replica_rank = 0
+    server.node_rank = 0
+    server._server_address = "127.0.0.1"
+    server._allocated_tcp_ports = set()
+    server._engine_processes = []
+    server._engine_log_fps = []
+    server._engine_log_paths = []
+    server._can_bind_tcp_port = lambda port, bind_wildcard=False: True
+    launched = []
+
+    class _Proc:
+        def __init__(self, cmd, env=None, stdout=None, stderr=None):
+            launched.append(cmd)
+
+    monkeypatch.setattr("recipe.dynamo.dynamo_async_server.subprocess.Popen", _Proc)
+    spec = SimpleNamespace(replica_rank=0, rank_offset=0, cuda_visible_devices="0", label="replica0_shard0")
+    try:
+        server._spawn_sglang_sidecar_shard(
+            spec=spec,
+            spec_idx=0,
+            n_specs=2,
+            served_model_name="m",
+            tp=1,
+            env={"CUDA_VISIBLE_DEVICES": "0"},
+            kv_events_config_json=None,
+            log_dir=str(tmp_path),
+            disagg_role=role,
+        )
+    finally:
+        for fp in server._engine_log_fps:
+            fp.close()
+
+    sidecar_cmd, engine_cmd = launched
+    assert sidecar_cmd[sidecar_cmd.index("--disaggregation-mode") + 1] == role
+    assert engine_cmd[engine_cmd.index("--disaggregation-mode") + 1] == role
+    if role == "prefill":
+        assert sidecar_cmd[sidecar_cmd.index("--bootstrap-host") + 1] == "127.0.0.1"
+        ports = {
+            engine_cmd[engine_cmd.index(f) + 1] for f in ("--port", "--grpc-port", "--disaggregation-bootstrap-port")
+        }
+        assert len(ports) == 3
+    else:
+        assert "--bootstrap-host" not in sidecar_cmd
+        assert "--disaggregation-bootstrap-port" not in engine_cmd
 
 
 def test_disaggregation_cmd_flags():

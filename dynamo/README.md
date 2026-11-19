@@ -139,7 +139,7 @@ The shared defaults are in [dynamo_base.yaml](config/dynamo_base.yaml).
 | `request_completion_token_ids` | Return exact generated token IDs for RL |
 | `enable_worker_system_metrics` | Required for SGLang's `dynamo.sglang` worker control routes |
 | `sglang.launch_mode` | `worker` (default, `dynamo.sglang`) or `sidecar` (see below) |
-| `sglang.disaggregation.prefill_shards` | Worker mode only: run the first K shards as SGLang prefill, the rest as decode (see below) |
+| `sglang.disaggregation.prefill_shards` | Run the first K shards as SGLang prefill, the rest as decode (worker or sidecar mode; see below) |
 | `generate_api` | `completions` (default, `/v1/completions`) or `generate` (SGLang-native `/generate`, SGLang only) |
 | `free_engine_on_train` | Must match `rollout.free_cache_engine` |
 
@@ -217,15 +217,22 @@ Raise it with `VERL_DYNAMO_FE_READY_TIMEOUT`, which also sets the sidecar's gRPC
 
 ### SGLang prefill/decode disaggregation
 
-In worker mode, `sglang.disaggregation.prefill_shards: K` splits a node's shards into
-K prefill shards (`--disaggregation-mode prefill`) and the rest decode. KV moves over
-`transfer_backend` (default `nixl`). `dynamo.sglang` registers the prefill shards
-under the `prefill` component and the frontend turns on its prefill router by itself,
-so the generate path is unchanged. Every shard, P or D, keeps its own `/engine/*`
-control routes and TP slice of trainer ranks, so weight refit, pause and memory
+`sglang.disaggregation.prefill_shards: K` splits a node's shards into K prefill shards
+(`--disaggregation-mode prefill`) and the rest decode. KV moves over
+`transfer_backend` (default `nixl`). The frontend turns on its prefill router by
+itself, so the generate path is unchanged. Every shard, P or D, keeps its own control
+routes and TP slice of trainer ranks, so weight refit, pause and memory
 release/resume reach both roles. Decode shards run without a radix cache and publish
-no KV events. Prefill shards bind `--host 0.0.0.0` (unless `extra_args` sets `--host`)
-so decode can reach their bootstrap server.
+no KV events.
+
+- **Worker mode:** `dynamo.sglang` registers the prefill shards under the `prefill`
+  component. Prefill shards bind `--host 0.0.0.0` (unless `extra_args` sets `--host`)
+  so decode can reach their bootstrap server.
+- **Sidecar mode:** each sidecar gets the engine's `--disaggregation-mode` and
+  registers as a prefill or decode worker. The engine already binds the node address,
+  and the prefill sidecar passes it to decode as `--bootstrap-host`. The bootstrap port
+  comes from the shard's stable port window. Needs an `ai-dynamo` whose sidecar has
+  `--disaggregation-mode` (1.7.0.dev20261110 does).
 
 ```yaml
 engine_kwargs:
@@ -237,8 +244,8 @@ engine_kwargs:
         # transfer_backend: nixl
 ```
 
-PD is refused with `launch_mode: sidecar` and with `direct_generate`, and needs at
-least one decode shard. `PD_PREFILL=K` in the colocate smoke turns it on, and the A/B
+PD is refused with `direct_generate` and with rollout routing replay (R3), and needs
+at least one decode shard. `PD_PREFILL=K` in the colocate smoke turns it on, and the A/B
 runner accepts a `pdK` arm mode. On 8xH100 with Qwen3-Coder-30B-A3B (FSDP, 3 GRPO
 steps), the PD arm matched native SGLang (pearson 0.9976 vs 0.9976). In worker mode,
 keep `checkpoint_engine.update_weights_bucket_megabytes` at 256 or below: larger
