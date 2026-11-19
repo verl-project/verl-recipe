@@ -7,8 +7,9 @@
 #   dpattn4  the same with DP-attention 4 / EP4
 #
 # An arm is name:rollout:dp_attn[:mode]. mode is how a dynamo arm runs its shards:
-# sidecar (default) or worker (dynamo.sglang, aggregated), e.g.
-# ARMS="native:sglang:1 tp4:dynamo:1 agg:dynamo:1:worker".
+# sidecar (default), worker (dynamo.sglang, aggregated) or pdK (dynamo.sglang
+# disaggregated, the first K shards prefill), e.g. ARMS="native:sglang:1
+# agg:dynamo:1:worker pd:dynamo:1:pd1".
 #
 # A Dynamo arm passes when its step-mean rollout/actor logprob pearson is at most
 # MAX_PEARSON_DROP (0.01) below native, its probs_diff_mean at most
@@ -107,6 +108,7 @@ for arm in $ARMS; do
         case ${mode:-sidecar} in
             sidecar) arm_env=(SIDECAR=1) ;;
             worker) arm_env=(SIDECAR=0) ;;
+            pd[1-9]*) arm_env=(SIDECAR=0 PD_PREFILL="${mode#pd}") ;;
             *) echo "arm $arm: unknown mode $mode" >&2; exit 2 ;;
         esac
         arm_env+=(REF_SMOKE_LOG="$REF_SMOKE_LOG")

@@ -416,6 +416,38 @@ class DynamoHttpServer:
 
         return self._is_sglang() and self._sglang_launch_mode() == LAUNCH_MODE_SIDECAR
 
+    def _sglang_disagg_roles(self, n_shards: int) -> Optional[list[str]]:
+        """Per-shard PD role from ``engine_kwargs.dynamo.sglang.disaggregation``.
+
+        ``{prefill_shards: k, transfer_backend: nixl}``: the first ``k`` shards of
+        the pool run ``--disaggregation-mode prefill`` and the rest ``decode``.
+        dynamo.sglang registers prefill shards under the ``prefill`` component and
+        the frontend activates its prefill router on its own, so generate traffic
+        and the control plane are unchanged: every shard, P or D, is still one
+        engine with one ``/engine/*`` surface and one TP slice of trainer ranks,
+        and weight refit, pause and memory release fan out to all of them.
+        Returns None when PD is off.
+        """
+        cfg = self._sglang_cfg().get("disaggregation") or {}
+        k = int(cfg.get("prefill_shards", 0) or 0)
+        if k <= 0:
+            return None
+        if self._is_sglang_sidecar():
+            raise ValueError(
+                "dynamo.sglang.disaggregation is implemented for launch_mode=worker only "
+                "(the sidecar registers one aggregated engine per shard)."
+            )
+        if self._use_direct_generate():
+            raise ValueError(
+                "dynamo.sglang.disaggregation needs generation through the frontend; disable direct_generate."
+            )
+        if not 0 < k < n_shards:
+            raise ValueError(
+                f"dynamo.sglang.disaggregation.prefill_shards={k} must leave at least one decode shard "
+                f"(this pool has {n_shards} shards)"
+            )
+        return ["prefill"] * k + ["decode"] * (n_shards - k)
+
     def get_engine_control_endpoints(self) -> list[str]:
         """Base URLs of this node's per-shard sglang control planes.
 
@@ -1005,9 +1037,11 @@ class DynamoHttpServer:
 
         is_sglang = self._is_sglang()
         sglang_sidecar = self._is_sglang_sidecar()
+        disagg_roles = self._sglang_disagg_roles(len(worker_specs)) if is_sglang else None
 
         for spec_idx, spec in enumerate(worker_specs):
             worker_cvd = spec.cuda_visible_devices
+            disagg_role = disagg_roles[spec_idx] if disagg_roles else None
             # sglang needs no verl-private ZMQ sidecar: dynamo.sglang registers
             # control/* engine routes itself, reached over DYN_SYSTEM_PORT below.
             control_endpoint = None
@@ -1078,7 +1112,9 @@ class DynamoHttpServer:
             # Placed after the config validations so a bad sglang config fails
             # before any port is allocated. Opt out with engine_kwargs.dynamo.enable_kv_events=false (e.g. for
             # round-robin, where the events are pure overhead).
-            publish_kv_events = self._kv_events_enabled()
+            # A decode shard holds no reusable prefix (its radix cache is off), so only
+            # prefill shards feed the router's KV index.
+            publish_kv_events = self._kv_events_enabled() and disagg_role != "decode"
             kv_event_port = self._allocate_kv_event_port(spec_idx) if publish_kv_events else None
             kv_events_config_json = self._build_kv_events_config_json(kv_event_port) if publish_kv_events else None
             system_metrics_port = (
@@ -1172,6 +1208,8 @@ class DynamoHttpServer:
                     tp,
                     nccl_port=self._allocate_tcp_port(),
                     kv_events_config_json=kv_events_config_json,
+                    disagg_role=disagg_role,
+                    bootstrap_port=self._allocate_tcp_port(bind_wildcard=True) if disagg_role == "prefill" else None,
                 )
             else:
                 cmd = self._build_vllm_cmd(
@@ -1514,6 +1552,8 @@ class DynamoHttpServer:
         nccl_port: Optional[int] = None,
         kv_events_config_json: Optional[str] = None,
         sidecar_engine: Optional[tuple[str, int, int]] = None,
+        disagg_role: Optional[str] = None,
+        bootstrap_port: Optional[int] = None,
     ) -> list[str]:
         """Construct the engine CLI for one DP shard.
 
@@ -1584,9 +1624,24 @@ class DynamoHttpServer:
         if self.config.enforce_eager:
             # SGLang's inverse of vLLM's --enforce-eager.
             cmd += ["--disable-cuda-graph"]
-        if not self.config.enable_prefix_caching:
+        if not self.config.enable_prefix_caching or disagg_role == "decode":
             # SGLang's radix cache is on by default; vLLM's prefix cache is not.
+            # A PD decode shard receives every prompt's KV from prefill and keeps no
+            # radix tree of its own.
             cmd += ["--disable-radix-cache"]
+        if disagg_role is not None:
+            backend = str((self._sglang_cfg().get("disaggregation") or {}).get("transfer_backend", "nixl"))
+            cmd += ["--disaggregation-mode", disagg_role, "--disaggregation-transfer-backend", backend]
+            if disagg_role == "prefill":
+                if bootstrap_port is None:
+                    raise ValueError("a prefill shard needs a bootstrap port")
+                cmd += ["--disaggregation-bootstrap-port", str(bootstrap_port)]
+                # The bootstrap server binds ServerArgs.host (127.0.0.1 by default) but
+                # decode reaches it at this node's routable address: without a wildcard
+                # bind every handshake is refused and requests hang.
+                user_args = self._sglang_cfg().get("extra_args") or self._dynamo_cfg().get("extra_args") or []
+                if not any(str(x) == "--host" or str(x).startswith("--host=") for x in user_args):
+                    cmd += ["--host", "0.0.0.0"]
         if self.config.enable_sleep_mode:
             # Without this SGLang's torch_memory_saver never arms, and
             # release_memory_occupation silently frees nothing.

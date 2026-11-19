@@ -13,6 +13,9 @@ set -xeuo pipefail
 # generate_api=generate); it needs ai-dynamo with the sidecar (1.7.0.dev20261110+).
 # DP_ATTN=N adds --dp-size N --enable-dp-attention --ep-size N to every engine
 # (rollout TP must be a multiple of N).
+# PD_PREFILL=K disaggregates the pool (worker mode only): the first K shards run
+# SGLang prefill, the rest decode, KV moves over NIXL and the frontend's prefill
+# router splits every request. Weight refit and sleep/wake go to both roles.
 #
 # ROLLOUT_NAME=sglang runs the same config on verl's native SGLang rollout instead
 # of Dynamo: the baseline the Dynamo numbers are judged against.
@@ -29,6 +32,7 @@ set -xeuo pipefail
 ROLLOUT_NAME=${ROLLOUT_NAME:-dynamo}
 SIDECAR=${SIDECAR:-0}
 DP_ATTN=${DP_ATTN:-1}
+PD_PREFILL=${PD_PREFILL:-0}
 GATE=${GATE:-0}
 MIN_PEARSON=${MIN_PEARSON:-0.99}
 MAX_PROBS_DIFF_MEAN=${MAX_PROBS_DIFF_MEAN:-0.02}
@@ -37,11 +41,14 @@ MAX_PEARSON_DROP=${MAX_PEARSON_DROP:-0.01}
 MAX_DIFF_MEAN_RISE=${MAX_DIFF_MEAN_RISE:-0.002}
 
 if [[ "${ROLLOUT_NAME}" != "dynamo" ]]; then
-  [[ "${SIDECAR}" != "1" && "${DP_ATTN}" == "1" ]] || {
-    echo "SIDECAR=1 and DP_ATTN need ROLLOUT_NAME=dynamo" >&2
+  [[ "${SIDECAR}" != "1" && "${DP_ATTN}" == "1" && "${PD_PREFILL}" == "0" ]] || {
+    echo "SIDECAR=1, DP_ATTN and PD_PREFILL need ROLLOUT_NAME=dynamo" >&2
     exit 2
   }
   python3 -c "import sglang" || { echo "sglang not importable" >&2; exit 2; }
+elif [[ "${PD_PREFILL}" != "0" && "${SIDECAR}" == "1" ]]; then
+  echo "PD_PREFILL needs the dynamo.sglang worker (SIDECAR=0)" >&2
+  exit 2
 elif [[ "${SIDECAR}" == "1" ]]; then
   python3 -c "import dynamo.sglang.sidecar" || {
     echo "dynamo.sglang.sidecar not importable — install ai-dynamo 1.7.0.dev20261110 or newer" >&2
@@ -95,6 +102,9 @@ if [[ "${SIDECAR}" == "1" ]]; then
     # A port picked before a large model finishes loading is often taken by then.
     ++actor_rollout_ref.rollout.engine_kwargs.dynamo.stable_kv_event_ports=true
   )
+fi
+if [[ "${PD_PREFILL}" != "0" ]]; then
+  ENGINE_ARGS+=(++actor_rollout_ref.rollout.engine_kwargs.dynamo.sglang.disaggregation.prefill_shards="${PD_PREFILL}")
 fi
 if [[ "${DP_ATTN}" != "1" ]]; then
   ENGINE_ARGS+=(
@@ -189,4 +199,9 @@ done
 if [[ "${SIDECAR}" == "1" ]]; then
   grep -a -q -F "starting sglang sidecar shard" "${SMOKE_LOG}" || fail "SIDECAR=1 but no sidecar shard was started"
 fi
-echo "PASS: V1 colocate SGLang smoke (rollout=${ROLLOUT_NAME}, sidecar=${SIDECAR}, dp_attn=${DP_ATTN}, pearson=${pearson} >= ${MIN_PEARSON}, probs_diff_mean=${diff_mean} <= ${MAX_PROBS_DIFF_MEAN})"
+if [[ "${PD_PREFILL}" != "0" ]]; then
+  for role in prefill decode; do
+    grep -a -q -F -e "--disaggregation-mode ${role}" "${SMOKE_LOG}" || fail "PD_PREFILL=${PD_PREFILL} but no ${role} shard was started"
+  done
+fi
+echo "PASS: V1 colocate SGLang smoke (rollout=${ROLLOUT_NAME}, sidecar=${SIDECAR}, dp_attn=${DP_ATTN}, pd_prefill=${PD_PREFILL}, pearson=${pearson} >= ${MIN_PEARSON}, probs_diff_mean=${diff_mean} <= ${MAX_PROBS_DIFF_MEAN})"

@@ -1654,3 +1654,67 @@ def test_flush_cache_raises_other_errors_and_gives_up_at_deadline():
     with pytest.raises(RuntimeError, match="HTTP 400"):
         asyncio.run(server._sglang_flush_cache_all(timeout_s=0, poll_s=0))
     assert calls == ["flush_cache"]
+
+
+# --------------------------------------------------------------------------- #
+# prefill/decode disaggregation
+# --------------------------------------------------------------------------- #
+
+
+def _pd_server(**disagg):
+    return _make_server({"engine": "sglang", "sglang": {"disaggregation": disagg}})
+
+
+def test_disaggregation_off_by_default():
+    assert _make_server({"engine": "sglang"})._sglang_disagg_roles(2) is None
+    assert _pd_server(prefill_shards=0)._sglang_disagg_roles(2) is None
+
+
+def test_disaggregation_splits_shards_prefill_first():
+    assert _pd_server(prefill_shards=1)._sglang_disagg_roles(2) == ["prefill", "decode"]
+    assert _pd_server(prefill_shards=3)._sglang_disagg_roles(8) == ["prefill"] * 3 + ["decode"] * 5
+
+
+@pytest.mark.parametrize("k", [2, 3])
+def test_disaggregation_needs_a_decode_shard(k):
+    with pytest.raises(ValueError, match="at least one decode shard"):
+        _pd_server(prefill_shards=k)._sglang_disagg_roles(2)
+
+
+def test_disaggregation_rejects_sidecar_mode():
+    server = _make_server(
+        {"engine": "sglang", "sglang": {"launch_mode": "sidecar", "disaggregation": {"prefill_shards": 1}}}
+    )
+    with pytest.raises(ValueError, match="launch_mode=worker"):
+        server._sglang_disagg_roles(2)
+
+
+def test_disaggregation_cmd_flags():
+    server = _pd_server(prefill_shards=1, transfer_backend="nixl")
+    pre = server._build_sglang_cmd("m", 1, disagg_role="prefill", bootstrap_port=31000)
+    dec = server._build_sglang_cmd("m", 1, disagg_role="decode")
+    assert pre[pre.index("--disaggregation-mode") + 1] == "prefill"
+    assert pre[pre.index("--disaggregation-bootstrap-port") + 1] == "31000"
+    assert pre[pre.index("--disaggregation-transfer-backend") + 1] == "nixl"
+    assert "--disable-radix-cache" not in pre
+    # decode reaches the bootstrap server at the node address, not loopback
+    assert pre[pre.index("--host") + 1] == "0.0.0.0"
+    assert "--host" not in dec
+    assert dec[dec.index("--disaggregation-mode") + 1] == "decode"
+    assert "--disaggregation-bootstrap-port" not in dec
+    assert "--disable-radix-cache" in dec
+    agg = server._build_sglang_cmd("m", 1)
+    assert "--disaggregation-mode" not in agg
+
+
+def test_disaggregation_prefill_needs_bootstrap_port():
+    with pytest.raises(ValueError, match="bootstrap port"):
+        _pd_server(prefill_shards=1)._build_sglang_cmd("m", 1, disagg_role="prefill")
+
+
+def test_disaggregation_keeps_an_explicit_host():
+    server = _make_server(
+        {"engine": "sglang", "sglang": {"disaggregation": {"prefill_shards": 1}, "extra_args": ["--host", "10.0.0.5"]}}
+    )
+    cmd = server._build_sglang_cmd("m", 1, disagg_role="prefill", bootstrap_port=31000)
+    assert cmd.count("--host") == 1 and cmd[cmd.index("--host") + 1] == "10.0.0.5"

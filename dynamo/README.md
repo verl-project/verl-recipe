@@ -139,6 +139,7 @@ The shared defaults are in [dynamo_base.yaml](config/dynamo_base.yaml).
 | `request_completion_token_ids` | Return exact generated token IDs for RL |
 | `enable_worker_system_metrics` | Required for SGLang's `dynamo.sglang` worker control routes |
 | `sglang.launch_mode` | `worker` (default, `dynamo.sglang`) or `sidecar` (see below) |
+| `sglang.disaggregation.prefill_shards` | Worker mode only: run the first K shards as SGLang prefill, the rest as decode (see below) |
 | `generate_api` | `completions` (default, `/v1/completions`) or `generate` (SGLang-native `/generate`, SGLang only) |
 | `free_engine_on_train` | Must match `rollout.free_cache_engine` |
 
@@ -213,6 +214,35 @@ on the same greedy requests.
 
 Loading a large checkpoint from network storage can exceed the default 600 s startup budget.
 Raise it with `VERL_DYNAMO_FE_READY_TIMEOUT`, which also sets the sidecar's gRPC deadline.
+
+### SGLang prefill/decode disaggregation
+
+In worker mode, `sglang.disaggregation.prefill_shards: K` splits a node's shards into
+K prefill shards (`--disaggregation-mode prefill`) and the rest decode. KV moves over
+`transfer_backend` (default `nixl`). `dynamo.sglang` registers the prefill shards
+under the `prefill` component and the frontend turns on its prefill router by itself,
+so the generate path is unchanged. Every shard, P or D, keeps its own `/engine/*`
+control routes and TP slice of trainer ranks, so weight refit, pause and memory
+release/resume reach both roles. Decode shards run without a radix cache and publish
+no KV events. Prefill shards bind `--host 0.0.0.0` (unless `extra_args` sets `--host`)
+so decode can reach their bootstrap server.
+
+```yaml
+engine_kwargs:
+  dynamo:
+    engine: sglang
+    sglang:
+      disaggregation:
+        prefill_shards: 1        # 2 TP4 shards on 8 GPUs -> 1 prefill + 1 decode
+        # transfer_backend: nixl
+```
+
+PD is refused with `launch_mode: sidecar` and with `direct_generate`, and needs at
+least one decode shard. `PD_PREFILL=K` in the colocate smoke turns it on, and the A/B
+runner accepts a `pdK` arm mode. On 8xH100 with Qwen3-Coder-30B-A3B (FSDP, 3 GRPO
+steps), the PD arm matched native SGLang (pearson 0.9976 vs 0.9976). In worker mode,
+keep `checkpoint_engine.update_weights_bucket_megabytes` at 256 or below: larger
+buckets exceed the size limit of `/engine/control/update_weights_from_tensor` (HTTP 413).
 
 - **V1:** keep `agent.agent_loop_manager_class=null` to use TransferQueue.
   Current Uni-Agent instead uses the [Gateway adapter](uniagent_gateway.py).
