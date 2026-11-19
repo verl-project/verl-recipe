@@ -175,13 +175,27 @@ restored. A request routed during that window waits; it does not reach freed mem
 The sidecar treats only a closed engine-state stream as engine loss, so pausing does
 not make it exit.
 
-To check that sidecar rollouts train like verl's own SGLang rollout,
-[`tests/smoke/run_sidecar_logprob_ab.sh`](tests/smoke/run_sidecar_logprob_ab.sh) runs the
-[colocate SGLang smoke](tests/smoke/smoke_dynamo_v1_colocate_sglang.sh) three times on one
-node: native SGLang first, then the sidecar with `/generate`, with and without
-DP-attention. A sidecar arm fails if its rollout/actor logprob agreement falls behind the
-native run, if a logprob fallback fires, or if every advantage is zero. On 8xH100 with
-Qwen3-Coder-30B-A3B and DAPO-Math-17k, all three arms were within 0.001 pearson.
+#### Run RL on the sidecar
+
+[`run_sglang_sidecar_rl.sh`](run_sglang_sidecar_rl.sh) runs GRPO with sidecar rollouts
+through `/generate`. Run it from the verl root with etcd and nats-server on `PATH`.
+Its defaults fit a 30B-A3B MoE on one node of 8x80 GB: FSDP colocate, two TP4 shards.
+
+```bash
+export MODEL_PATH=/models/Qwen3-Coder-30B-A3B-Instruct TRAIN_FILE=train.parquet TEST_FILE=test.parquet
+bash recipe/dynamo/run_sglang_sidecar_rl.sh                # sidecar, TP4 shards
+DP_ATTN=4 bash recipe/dynamo/run_sglang_sidecar_rl.sh      # + DP-attention 4 / EP4 per shard
+PD_PREFILL=1 bash recipe/dynamo/run_sglang_sidecar_rl.sh   # shard 0 prefill, shard 1 decode
+R3=1 bash recipe/dynamo/run_sglang_sidecar_rl.sh           # Megatron + routing replay
+bash recipe/dynamo/run_sglang_sidecar_rl.sh trainer.total_training_steps=10   # Hydra overrides go last
+```
+
+Other knobs (`NNODES`, `NGPUS_PER_NODE`, `ROLLOUT_TP`, `TRAIN_BATCH`, `ROLLOUT_N`,
+`TOTAL_STEPS`, prompt/response lengths, `GPU_MEM_UTIL`) are listed in the script header.
+`training/rollout_actor_probs_pearson_corr` shows whether rollouts train like verl's
+own SGLang rollout. On 8xH100 with Qwen3-Coder-30B-A3B and DAPO-Math-17k (3 GRPO
+steps), verl's native SGLang rollout gave 0.9975. The sidecar with TP4 shards gave
+0.9982, and with DP-attention 4 0.9976.
 
 `generate_api: generate` sends each turn to the frontend's SGLang-native `/generate`
 (the recipe sets `DYN_SGLANG_ENABLE_GENERATE=1` on the frontend) with the body verl's
@@ -204,13 +218,8 @@ sequence (`prompt + output - 1` rows, checked). Partial-rollout resumes are stit
 verl's `FullyAsyncLLMServerClient`, which keeps only the new rows. An aborted attempt
 without complete routing is dropped and retried, so a gap cannot shift later positions.
 [`config/dynamo_trainer_v1_colocate_sglang_r3.yaml`](config/dynamo_trainer_v1_colocate_sglang_r3.yaml)
-sets all of these and Megatron `router_replay.mode=R3`. Its smoke,
-[`tests/smoke/smoke_dynamo_v1_colocate_sglang_r3.sh`](tests/smoke/smoke_dynamo_v1_colocate_sglang_r3.sh),
-runs 3 GSM8K steps on a 30B-A3B MoE on 8 GPUs. To check the routing path on its own,
-[`tests/smoke/run_r3_compare.sh`](tests/smoke/run_r3_compare.sh) starts a stock SGLang server
-and the sidecar stack side by side. It then runs
-[`r3_compare.py`](tests/smoke/r3_compare.py) to compare token ids, logprobs and routed experts
-on the same greedy requests.
+sets all of these and Megatron `router_replay.mode=R3`; `R3=1` in
+[`run_sglang_sidecar_rl.sh`](run_sglang_sidecar_rl.sh) uses it.
 
 Loading a large checkpoint from network storage can exceed the default 600 s startup budget.
 Raise it with `VERL_DYNAMO_FE_READY_TIMEOUT`, which also sets the sidecar's gRPC deadline.
@@ -245,9 +254,11 @@ engine_kwargs:
 ```
 
 PD is refused with `direct_generate` and with rollout routing replay (R3), and needs
-at least one decode shard. `PD_PREFILL=K` in the colocate smoke turns it on, and the A/B
-runner accepts a `pdK` arm mode. On 8xH100 with Qwen3-Coder-30B-A3B (FSDP, 3 GRPO
-steps), the PD arm matched native SGLang (pearson 0.9976 vs 0.9976). In worker mode,
+at least one decode shard. `PD_PREFILL=K` in
+[`run_sglang_sidecar_rl.sh`](run_sglang_sidecar_rl.sh) turns it on in sidecar mode. On 8xH100 with Qwen3-Coder-30B-A3B (FSDP, 3 GRPO
+steps), PD with one prefill and one decode shard matched native SGLang (pearson 0.9976):
+0.9976 in worker mode and 0.9980 through the sidecar, with no KV transfer errors and
+both roles released and restored on every sleep/wake. In worker mode,
 keep `checkpoint_engine.update_weights_bucket_megabytes` at 256 or below: larger
 buckets exceed the size limit of `/engine/control/update_weights_from_tensor` (HTTP 413).
 

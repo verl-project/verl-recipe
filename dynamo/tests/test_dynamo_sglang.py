@@ -1697,27 +1697,6 @@ def test_disaggregation_rejects_routing_replay():
         _pd_sidecar_server(enable_rollout_routing_replay=True)._sglang_disagg_roles(2)
 
 
-def test_disaggregation_sidecar_cmd_flags():
-    server = _pd_sidecar_server()
-    pre = server._build_sglang_sidecar_cmd("http://10.0.0.1:2049", disagg_role="prefill", bootstrap_host="10.0.0.1")
-    dec = server._build_sglang_sidecar_cmd("http://10.0.0.1:2057", disagg_role="decode")
-    assert pre[pre.index("--disaggregation-mode") + 1] == "prefill"
-    assert pre[pre.index("--bootstrap-host") + 1] == "10.0.0.1"
-    assert dec[dec.index("--disaggregation-mode") + 1] == "decode"
-    assert "--bootstrap-host" not in dec
-    agg = server._build_sglang_sidecar_cmd("http://10.0.0.1:2049")
-    assert "--disaggregation-mode" not in agg and "--bootstrap-host" not in agg
-
-
-def test_disaggregation_sidecar_engine_keeps_its_node_host():
-    # A sidecar engine already binds --host to the node address; no wildcard rebind.
-    cmd = _pd_sidecar_server()._build_sglang_cmd(
-        "m", 1, sidecar_engine=("10.0.0.1", 2048, 2049), disagg_role="prefill", bootstrap_port=2050
-    )
-    assert cmd.count("--host") == 1 and cmd[cmd.index("--host") + 1] == "10.0.0.1"
-    assert cmd[cmd.index("--disaggregation-bootstrap-port") + 1] == "2050"
-
-
 @pytest.mark.parametrize("role", ["prefill", "decode"])
 def test_spawn_sidecar_pd_shard_matches_engine_and_sidecar_roles(tmp_path, monkeypatch, role):
     server = _pd_sidecar_server()
@@ -1756,6 +1735,8 @@ def test_spawn_sidecar_pd_shard_matches_engine_and_sidecar_roles(tmp_path, monke
     sidecar_cmd, engine_cmd = launched
     assert sidecar_cmd[sidecar_cmd.index("--disaggregation-mode") + 1] == role
     assert engine_cmd[engine_cmd.index("--disaggregation-mode") + 1] == role
+    # the engine binds the node address itself; no 0.0.0.0 rebind as in worker mode
+    assert engine_cmd.count("--host") == 1 and engine_cmd[engine_cmd.index("--host") + 1] == "127.0.0.1"
     if role == "prefill":
         assert sidecar_cmd[sidecar_cmd.index("--bootstrap-host") + 1] == "127.0.0.1"
         ports = {

@@ -17,8 +17,7 @@ The [KV-metrics Slurm job](smoke/validate_vllm_kv_metrics.sbatch) uses the sibli
 
 The launcher argument checks in [test_smoke_launchers.py](test_smoke_launchers.py)
 need only pytest and hydra-core; they run the Bash scripts with a captured Python
-child process and do not start training. They also cover the sidecar A/B driver
-with a stand-in smoke script.
+child process and do not start training.
 
 [test_thunderagent_vllm024_launcher.py](test_thunderagent_vllm024_launcher.py)
 checks the base, Uni-Agent and fully async launchers' arguments, GPU environment
