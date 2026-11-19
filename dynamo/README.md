@@ -174,6 +174,14 @@ restored. A request routed during that window waits; it does not reach freed mem
 The sidecar treats only a closed engine-state stream as engine loss, so pausing does
 not make it exit.
 
+To check that sidecar rollouts train like verl's own SGLang rollout,
+[`tests/smoke/run_sidecar_logprob_ab.sh`](tests/smoke/run_sidecar_logprob_ab.sh) runs the
+[colocate SGLang smoke](tests/smoke/smoke_dynamo_v1_colocate_sglang.sh) three times on one
+node: native SGLang first, then the sidecar with `/generate`, with and without
+DP-attention. A sidecar arm fails if its rollout/actor logprob agreement falls behind the
+native run, if a logprob fallback fires, or if every advantage is zero. On 8xH100 with
+Qwen3-Coder-30B-A3B and DAPO-Math-17k, all three arms were within 0.001 pearson.
+
 `generate_api: generate` sends each turn to the frontend's SGLang-native `/generate`
 (the recipe sets `DYN_SGLANG_ENABLE_GENERATE=1` on the frontend) with the body verl's
 native SGLang server builds: `input_ids`, `sampling_params` passed through with the
