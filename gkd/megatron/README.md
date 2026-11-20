@@ -128,8 +128,11 @@ Driver (TaskRunner)
 | actor_rollout_ref.teacher | Teacher server | server_ip, server_port, n_server_workers |
 | trainer | Global training control | total_epochs, save_freq, scheduler (one_step_off | two_step_off), n_gpus_per_node, nnodes |
 | rollout | Resource split for rollout | n_gpus_per_node, nnodes |
+| actor_rollout_ref.actor.distill_loss | Distillation objective | name (`kl`, `rkl`, `kl_rkl`, `jsd`), rkl_ratio, beta |
 
 **Remember to set `trainer.n_gpus_per_node`, `trainer.nnodes`, `rollout.n_gpus_per_node` and `rollout.nnodes` to allocate GPU resources.**
+
+`distill_loss` is not in the default config, so set it with a `+` prefix, e.g. `+actor_rollout_ref.actor.distill_loss.name=kl` (see `run_moonlight_dsv3_training.sh`). `jsd` mixes the teacher and student as `M = beta*P + (1-beta)*Q` and its loss vanishes as `beta` approaches 0 or 1, so it never reduces to a pure KL. Use `kl` or `rkl` for that, or `kl_rkl` to blend the two.
 
 ### Dynamic Batch Size
 

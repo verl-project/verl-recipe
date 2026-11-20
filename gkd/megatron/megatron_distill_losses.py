@@ -4,12 +4,14 @@
 #   2) RKL     : KL(Q_hat_topk || P_hat_topk)  (pure reverse KL on renormalized top-k)
 #   3) KL_RKL  : (1-r)*KL + r*RKL
 #   4) JSD     : JSD_beta(P_topk, Q_full) with analytic rest term for Q||M outside top-k
+#                (vanishes as beta -> 0 or 1; it never reduces to KL or RKL, use those modes instead)
 #
 # Usage:
 #   op = build_vocab_parallel_distill_loss(cfg).cuda()
 #   loss_per_token = op(vocab_parallel_logits, teacher_topk_logps, teacher_topk_indices)
 
 import math
+import warnings
 from typing import Any, Optional
 
 import torch
@@ -592,6 +594,9 @@ def vocab_parallel_jsd_divergence(vocab_parallel_logits, target_topk_logps, targ
 # ============================================================
 # Unified operator wrapper + factory
 # ============================================================
+_JSD_NAMES = ("jsd", "jensen_shannon", "jensen-shannon", "jensen_shannon_divergence")
+
+
 class VocabParallelDistillLoss(torch.nn.Module):
     """
     Unified operator:
@@ -605,7 +610,9 @@ class VocabParallelDistillLoss(torch.nn.Module):
 
     Params:
       - rkl_ratio: only used when name == "kl_rkl"
-      - beta:      only used when name == "jsd"
+      - beta:      only used when name == "jsd". Teacher weight in the mixture M = beta*P + (1-beta)*Q.
+                   beta is clamped to (1e-6, 1-1e-6) and the loss goes to zero as beta approaches 0 or 1,
+                   so the ends do not give a pure KL. Use "kl"/"rkl" for a pure KL and "kl_rkl" to blend them.
     """
 
     def __init__(self, name: str = "kl", rkl_ratio: float = 0.1, beta: float = 0.5):
@@ -613,6 +620,14 @@ class VocabParallelDistillLoss(torch.nn.Module):
         self.name = str(name).lower()
         self.rkl_ratio = float(rkl_ratio)
         self.beta = float(beta)
+
+        if self.name in _JSD_NAMES and not 0.01 < self.beta < 0.99:
+            warnings.warn(
+                f"distill loss 'jsd' with beta={self.beta}: beta is clamped to (1e-6, 1-1e-6) and the jsd loss "
+                "goes to zero as beta approaches 0 or 1 instead of becoming a pure KL, so a near-zero loss does "
+                "not mean the student matches the teacher. Use 'kl' or 'rkl' for a pure KL, or 'kl_rkl' to blend them.",
+                stacklevel=2,
+            )
 
     def forward(self, vocab_parallel_logits, teacher_topk_logps, teacher_topk_indices):
         n = self.name
@@ -628,7 +643,7 @@ class VocabParallelDistillLoss(torch.nn.Module):
                 vocab_parallel_logits, teacher_topk_logps, teacher_topk_indices, rkl_ratio=self.rkl_ratio
             )
 
-        if n in ["jsd", "jensen_shannon", "jensen-shannon", "jensen_shannon_divergence"]:
+        if n in _JSD_NAMES:
             return vocab_parallel_jsd_divergence(
                 vocab_parallel_logits, teacher_topk_logps, teacher_topk_indices, beta=self.beta
             )
