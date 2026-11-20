@@ -11,52 +11,49 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""DeepSWE-style TPU recipe hooks for 2-slot GKE sandbox lookahead and just-in-time evaluation pools.
+"""DeepSWE-style TPU recipe hooks: warm GKE sandboxes one training step ahead, and just in time for evaluation.
 
 This module lives in the TPU DeepSWE recipe folder (``verl-recipe/deepswe_tpu/deepswe.py``) and is loaded through
-``VERL_USE_EXTERNAL_MODULES`` so core ``verl`` trainer files remain untouched.
+``VERL_USE_EXTERNAL_MODULES`` so core ``verl`` trainer files remain untouched. The decisions about what to warm are
+in ``sandbox_lookahead.py``; the sandbox provider only supplies ``prewarm`` and ``unwarm``.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-import uuid
 from typing import Any
 
 from tensordict import TensorDict
-from uni_agent.sandbox.gke_agent_sandbox import (
-    PrewarmBatchIterator,
-    close_lookahead_warmer,
-    ensure_lookahead_batch_warm,
-    extract_sandbox_images,
-    finish_lookahead_batch_async,
-    load_image_map_from_task_config,
-    prefetch_lookahead_batch_async,
-)
+from uni_agent.sandbox.gke import GKEAgentSandbox
+from uni_agent.tasks import TaskConfigResolver
 
 from verl.trainer.ppo.v1.trainer_base import TRAINER_REGISTRY, PPOTrainer
 from verl.trainer.ppo.v1.trainer_separate_async import PPOTrainerSeparateAsync
 from verl.trainer.ppo.v1.trainer_sync import PPOTrainerSync
 from verl.utils import tensordict_utils as tu
 
+from .sandbox_lookahead import LookaheadBatches, PoolKey, WarmPools, sandbox_requests
+
 logger = logging.getLogger(__name__)
+
+_EVAL_BATCH = "eval"
 
 
 class _DeepSWESandboxLookaheadMixin:
-    """Mixin adding 2-slot ``PrewarmBatchIterator`` lookahead and just-in-time eval sandbox warming to ``PPOTrainer``.
+    """Mixin adding sandbox warming to ``PPOTrainer``: one training batch ahead, and just in time for evaluation.
 
     Evaluation sandboxes are not kept warm for the whole run. They start warming in the background once the rollouts
     of a step that ends in validation are sampled (so they warm during that step's update and weight sync), validation
     waits for them, and they are released as soon as validation ends.
     """
 
-    _prewarm_batch_iterator: PrewarmBatchIterator | None = None
     _sandbox_lookahead_initialized: bool = False
-    _sandbox_image_map: list[Any] | None = None
-    _eval_sandbox_images: list[str] | None = None
-    _eval_sandbox_replicas: int = 1
-    _eval_sandbox_batch_id: str | None = None
+    _warm_pools: WarmPools | None = None
+    _lookahead_batches: LookaheadBatches | None = None
+    _task_config_resolver: TaskConfigResolver | None = None
+    _eval_sandbox_requests: dict[PoolKey, int] | None = None
+    _eval_sandboxes_warming: bool = False
 
     def _resolve_task_config_path(self: PPOTrainer) -> str | None:
         try:
@@ -70,45 +67,38 @@ class _DeepSWESandboxLookaheadMixin:
         except Exception:
             return None
 
-    def _extract_batch_images(self: PPOTrainer, batch_or_items: Any) -> list[str]:
-        return extract_sandbox_images(batch_or_items, image_map=self._sandbox_image_map)
+    def _train_sandbox_requests(self: PPOTrainer, batch: Any) -> dict[PoolKey, int]:
+        rollout_n = int(self.config.actor_rollout_ref.rollout.get("n", 8) or 8)
+        return sandbox_requests(batch, self._task_config_resolver, per_sample=rollout_n)
 
     def _init_sandbox_lookahead(self: PPOTrainer) -> None:
         if getattr(self, "_sandbox_lookahead_initialized", False):
             return
         self._sandbox_lookahead_initialized = True
-        self._prewarm_batch_iterator = None
-        self._sandbox_image_map = None
-        self._eval_sandbox_images = None
-        self._eval_sandbox_batch_id = None
 
         if os.getenv("VERL_SANDBOX_LOOKAHEAD", "1").strip().lower() in ("0", "false", "no"):
             return
 
-        self._sandbox_image_map = load_image_map_from_task_config(self._resolve_task_config_path()) or None
-
-        self._eval_sandbox_images = self._extract_batch_images(self.val_dataset) or None
-        self._eval_sandbox_replicas = int(
+        path = self._resolve_task_config_path()
+        self._task_config_resolver = TaskConfigResolver.from_file(path) if path else TaskConfigResolver()
+        eval_replicas = int(
             os.getenv(
                 "SANDBOX_EVAL_REPLICAS",
                 str(self.config.actor_rollout_ref.rollout.val_kwargs.get("n", 1) or 1),
             )
         )
-
-        rollout_n = int(self.config.actor_rollout_ref.rollout.get("n", 8) or 8)
-        self._prewarm_batch_iterator = PrewarmBatchIterator(
-            fetch_batch_fn=self._raw_next_train_batch,
-            extract_images_fn=self._extract_batch_images,
-            ensure_warm_fn=ensure_lookahead_batch_warm,
-            prefetch_async_fn=prefetch_lookahead_batch_async,
-            finish_batch_fn=finish_lookahead_batch_async,
-            replicas_override=rollout_n,
+        self._eval_sandbox_requests = (
+            sandbox_requests(self.val_dataset, self._task_config_resolver, per_sample=eval_replicas) or None
+        )
+        self._warm_pools = WarmPools(GKEAgentSandbox.prewarm, GKEAgentSandbox.unwarm)
+        self._lookahead_batches = LookaheadBatches(
+            self._raw_next_train_batch, self._train_sandbox_requests, self._warm_pools
         )
 
     def _prime_sandbox_lookahead(self: PPOTrainer) -> None:
         self._init_sandbox_lookahead()
-        if self._prewarm_batch_iterator is not None:
-            self._prewarm_batch_iterator.prime()
+        if self._lookahead_batches is not None:
+            self._lookahead_batches.prime()
 
     def _step_ends_in_validation(self: PPOTrainer) -> bool:
         """Mirror ``PPOTrainer._fit``: validation follows the last step and every ``test_freq``-th step."""
@@ -117,56 +107,42 @@ class _DeepSWESandboxLookaheadMixin:
             return False
         return self.global_steps >= self.total_training_steps or self.global_steps % test_freq == 0
 
-    def _prefetch_eval_sandboxes(self: PPOTrainer) -> None:
-        """Start warming the evaluation sandboxes in the background ahead of this step's validation."""
-        if (
-            self._prewarm_batch_iterator is None
-            or not self._eval_sandbox_images
-            or self._eval_sandbox_batch_id is not None
-            or not self._step_ends_in_validation()
-        ):
+    def _start_eval_sandboxes(self: PPOTrainer) -> None:
+        if self._warm_pools is None or not self._eval_sandbox_requests or self._eval_sandboxes_warming:
             return
-        self._eval_sandbox_batch_id = f"eval_step_{self.global_steps}"
+        self._eval_sandboxes_warming = True
         logger.info(
-            "Pre-warming %d evaluation sandbox images for validation at step %d (replicas=%d)",
-            len(set(self._eval_sandbox_images)),
+            "Pre-warming %d evaluation sandbox images for validation at step %d",
+            len(self._eval_sandbox_requests),
             self.global_steps,
-            self._eval_sandbox_replicas,
         )
-        prefetch_lookahead_batch_async(
-            self._eval_sandbox_batch_id,
-            self._eval_sandbox_images,
-            replicas_override=self._eval_sandbox_replicas,
-        )
+        self._warm_pools.start(_EVAL_BATCH, self._eval_sandbox_requests)
 
     def _wait_eval_sandboxes_ready(self: PPOTrainer) -> None:
         """Block until the evaluation sandboxes are Ready, warming them now if no prefetch was started."""
         self._init_sandbox_lookahead()
-        if self._prewarm_batch_iterator is None or not self._eval_sandbox_images:
-            return
-        if self._eval_sandbox_batch_id is None:
-            self._eval_sandbox_batch_id = f"eval_step_{self.global_steps}"
-        ensure_lookahead_batch_warm(
-            self._eval_sandbox_batch_id,
-            self._eval_sandbox_images,
-            replicas_override=self._eval_sandbox_replicas,
-            wait=True,
-        )
+        self._start_eval_sandboxes()
+        if self._eval_sandboxes_warming:
+            self._warm_pools.wait(_EVAL_BATCH)
 
     def _release_eval_sandboxes(self: PPOTrainer) -> None:
-        """Retire the evaluation sandbox batch so its warm pools are torn down after validation."""
-        batch_id, self._eval_sandbox_batch_id = getattr(self, "_eval_sandbox_batch_id", None), None
-        if batch_id is not None:
-            finish_lookahead_batch_async(batch_id, wait=False)
+        """Let the evaluation warm pools be deleted now that validation has ended."""
+        if getattr(self, "_eval_sandboxes_warming", False):
+            self._eval_sandboxes_warming = False
+            self._warm_pools.finish(_EVAL_BATCH)
 
     def _finish_sampled_sandbox_batch(self: PPOTrainer) -> None:
-        if self._prewarm_batch_iterator is not None and self.local_trigger_step == self.parameter_sync_step - 1:
-            self._prewarm_batch_iterator.finish_oldest_inflight_batch(wait=False)
-            self._prefetch_eval_sandboxes()
+        if self._lookahead_batches is not None and self.local_trigger_step == self.parameter_sync_step - 1:
+            self._lookahead_batches.finish_oldest()
+            if self._step_ends_in_validation():
+                self._start_eval_sandboxes()
 
     def _close_sandbox_lookahead(self: PPOTrainer) -> None:
-        self._eval_sandbox_batch_id = None
-        close_lookahead_warmer()
+        self._eval_sandboxes_warming = False
+        self._lookahead_batches = None
+        pools, self._warm_pools = getattr(self, "_warm_pools", None), None
+        if pools is not None:
+            pools.close()
 
     def _raw_next_train_batch(self: PPOTrainer, num_prompts: int | None = None) -> TensorDict:
         return super()._next_train_batch(num_prompts)  # type: ignore[misc]
@@ -175,20 +151,15 @@ class _DeepSWESandboxLookaheadMixin:
         train_batch_size = self.config.data.train_batch_size
         if num_prompts is None:
             num_prompts = train_batch_size
-        if getattr(self, "_prewarm_batch_iterator", None) is not None and num_prompts == train_batch_size:
-            batch = self._prewarm_batch_iterator.next_batch()
+        lookahead = getattr(self, "_lookahead_batches", None)
+        if lookahead is not None and num_prompts == train_batch_size:
+            batch = lookahead.next_batch()
         else:
             batch = self._raw_next_train_batch(num_prompts)
-            if getattr(self, "_prewarm_batch_iterator", None) is not None:
-                imgs = self._extract_batch_images(batch)
-                if imgs:
-                    rollout_n = int(self.config.actor_rollout_ref.rollout.get("n", 8) or 8)
-                    ensure_lookahead_batch_warm(
-                        f"partial_{self.global_steps}_{uuid.uuid4().hex[:6]}",
-                        imgs,
-                        replicas_override=rollout_n,
-                        wait=True,
-                    )
+            if lookahead is not None:
+                # A batch of another size bypasses the lookahead, such as the async trainer's warm-up batches, which
+                # arrive as one batch several steps long. Warm it now; it is released like any other batch.
+                lookahead.warm_now(batch, num_prompts / train_batch_size)
         tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
         return batch
 
@@ -200,7 +171,7 @@ _CORE_HAS_ENV_REFILL_AFTER_SAMPLE = hasattr(PPOTrainerSeparateAsync, "_should_re
 
 
 class DeepSWESeparateAsyncPPOTrainer(_DeepSWESandboxLookaheadMixin, PPOTrainerSeparateAsync):
-    """Separate-async PPO trainer with 2-slot GKE sandbox lookahead pre-warming for DeepSWE."""
+    """Separate-async PPO trainer with one-step-ahead GKE sandbox warming for DeepSWE."""
 
     def _should_refill_after_sample(self) -> bool:
         num_warmup = self.config.trainer.v1.separate_async.get("num_warmup_batches", 0) or 0
@@ -252,7 +223,7 @@ class DeepSWESeparateAsyncPPOTrainer(_DeepSWESandboxLookaheadMixin, PPOTrainerSe
 
 
 class DeepSWESyncPPOTrainer(_DeepSWESandboxLookaheadMixin, PPOTrainerSync):
-    """Synchronous PPO trainer with 2-slot GKE sandbox lookahead pre-warming for DeepSWE."""
+    """Synchronous PPO trainer with one-step-ahead GKE sandbox warming for DeepSWE."""
 
     def on_train_begin(self) -> None:
         self._prime_sandbox_lookahead()
