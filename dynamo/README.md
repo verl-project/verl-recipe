@@ -137,8 +137,130 @@ The shared defaults are in [dynamo_base.yaml](config/dynamo_base.yaml).
 | `enable_kv_events` | Keep `true` for KV-aware routing |
 | `thunderagent.enabled` | `false` for the built-in KV router; V1 presets set this explicitly |
 | `request_completion_token_ids` | Return exact generated token IDs for RL |
-| `enable_worker_system_metrics` | Required for SGLang's native control routes |
+| `enable_worker_system_metrics` | Required for SGLang's `dynamo.sglang` worker control routes |
+| `sglang.launch_mode` | `worker` (default, `dynamo.sglang`) or `sidecar` (see below) |
+| `sglang.disaggregation.prefill_shards` | Run the first K shards as SGLang prefill, the rest as decode (worker or sidecar mode; see below) |
+| `generate_api` | `completions` (default, `/v1/completions`) or `generate` (SGLang-native `/generate`, SGLang only) |
 | `free_engine_on_train` | Must match `rollout.free_cache_engine` |
+
+### SGLang sidecar mode
+
+`sglang.launch_mode: sidecar` runs each shard as stock `sglang.launch_server`
+(HTTP + `--grpc-port` + `--incremental-streaming-output`) plus
+`python -m dynamo.sglang.sidecar`, which registers the engine with Dynamo over
+SGLang's native gRPC API and proxies the frontend's native `/generate` to SGLang's
+HTTP `/generate`. Weight sync, memory release/resume, pause and cache flush use
+SGLang's own HTTP routes on the engine's `--port`; the weight-sync verification uses
+its native `/get_weights_by_name`.
+
+```yaml
+engine_kwargs:
+  dynamo:
+    engine: sglang
+    request_completion_token_ids: true
+    sglang:
+      launch_mode: sidecar
+      sidecar_startup_deadline_s: 1800   # default: VERL_DYNAMO_FE_READY_TIMEOUT (600)
+      # sidecar_extra_args: [--grpc-connections, "8"]
+```
+
+Requirements: an SGLang build with the native gRPC server (v0.5.16+), and an
+`ai-dynamo` wheel that ships `dynamo.sglang.sidecar`. Engine ports come from a stable
+per-shard window starting at `VERL_DYNAMO_SGLANG_ENGINE_PORT_BASE` (default 2048).
+`--engine-route` is a `dynamo.sglang` flag and is rejected in this mode. Unlike the
+worker, the sidecar stays in Dynamo discovery while the engine is paused or its
+memory is released. Release pauses SGLang first, and SGLang holds new requests
+until `continue_generation`, which resume sends only after every released tag is
+restored. A request routed during that window waits; it does not reach freed memory.
+The sidecar treats only a closed engine-state stream as engine loss, so pausing does
+not make it exit.
+
+#### Run RL on the sidecar
+
+[`run_sglang_sidecar_rl.sh`](run_sglang_sidecar_rl.sh) runs GRPO with sidecar rollouts
+through `/generate`. Run it from the verl root with etcd and nats-server on `PATH`.
+Its defaults fit a 30B-A3B MoE on one node of 8x80 GB: FSDP colocate, two TP4 shards.
+
+```bash
+export MODEL_PATH=/models/Qwen3-Coder-30B-A3B-Instruct TRAIN_FILE=train.parquet TEST_FILE=test.parquet
+bash recipe/dynamo/run_sglang_sidecar_rl.sh                # sidecar, TP4 shards
+DP_ATTN=4 bash recipe/dynamo/run_sglang_sidecar_rl.sh      # + DP-attention 4 / EP4 per shard
+PD_PREFILL=1 bash recipe/dynamo/run_sglang_sidecar_rl.sh   # shard 0 prefill, shard 1 decode
+R3=1 bash recipe/dynamo/run_sglang_sidecar_rl.sh           # Megatron + routing replay
+bash recipe/dynamo/run_sglang_sidecar_rl.sh trainer.total_training_steps=10   # Hydra overrides go last
+```
+
+Other knobs (`NNODES`, `NGPUS_PER_NODE`, `ROLLOUT_TP`, `TRAIN_BATCH`, `ROLLOUT_N`,
+`TOTAL_STEPS`, prompt/response lengths, `GPU_MEM_UTIL`) are listed in the script header.
+`training/rollout_actor_probs_pearson_corr` shows whether rollouts train like verl's
+own SGLang rollout. On 8xH100 with Qwen3-Coder-30B-A3B and DAPO-Math-17k (3 GRPO
+steps), verl's native SGLang rollout gave 0.9975. The sidecar with TP4 shards gave
+0.9982, and with DP-attention 4 0.9976.
+
+`generate_api: generate` sends each turn to the frontend's SGLang-native `/generate`
+(the recipe sets `DYN_SGLANG_ENABLE_GENERATE=1` on the frontend) with the body verl's
+native SGLang server builds: `input_ids`, `sampling_params` passed through with the
+budget as `max_new_tokens`, and `return_logprob`. The response is SGLang's own
+`output_ids` and `meta_info`: token ids come straight from the engine, every
+`output_token_logprobs` entry must name the same token, and a plain `abort` keeps its
+partial tokens for partial-rollout resume (an abort with `status_code` raises).
+`request_completion_token_ids` is not needed on this path. Session headers are
+unchanged; ThunderAgent's one-token session-final request still uses
+`/v1/completions`, which the sidecar also serves.
+
+Rollout routing replay (`rollout.enable_rollout_routing_replay=True`) is supported on
+exactly this combination: `engine: sglang`, `sglang.launch_mode: sidecar`,
+`generate_api: generate`. Any other combination is refused at launch. The recipe launches
+the engine with `--enable-return-routed-experts` and sets `return_routed_experts` on each
+request. It decodes `meta_info.routed_experts` the way verl's native SGLang server does:
+base64 int32 reshaped to `(seq, num_hidden_layers, num_experts_per_tok)`, covering the full
+sequence (`prompt + output - 1` rows, checked). Partial-rollout resumes are stitched by
+verl's `FullyAsyncLLMServerClient`, which keeps only the new rows. An aborted attempt
+without complete routing is dropped and retried, so a gap cannot shift later positions.
+[`config/dynamo_trainer_v1_colocate_sglang_r3.yaml`](config/dynamo_trainer_v1_colocate_sglang_r3.yaml)
+sets all of these and Megatron `router_replay.mode=R3`; `R3=1` in
+[`run_sglang_sidecar_rl.sh`](run_sglang_sidecar_rl.sh) uses it.
+
+Loading a large checkpoint from network storage can exceed the default 600 s startup budget.
+Raise it with `VERL_DYNAMO_FE_READY_TIMEOUT`, which also sets the sidecar's gRPC deadline.
+
+### SGLang prefill/decode disaggregation
+
+`sglang.disaggregation.prefill_shards: K` splits a node's shards into K prefill shards
+(`--disaggregation-mode prefill`) and the rest decode. KV moves over
+`transfer_backend` (default `nixl`). The frontend turns on its prefill router by
+itself, so the generate path is unchanged. Every shard, P or D, keeps its own control
+routes and TP slice of trainer ranks, so weight refit, pause and memory
+release/resume reach both roles. Decode shards run without a radix cache and publish
+no KV events.
+
+- **Worker mode:** `dynamo.sglang` registers the prefill shards under the `prefill`
+  component. Prefill shards bind `--host 0.0.0.0` (unless `extra_args` sets `--host`)
+  so decode can reach their bootstrap server.
+- **Sidecar mode:** each sidecar gets the engine's `--disaggregation-mode` and
+  registers as a prefill or decode worker. The engine already binds the node address,
+  and the prefill sidecar passes it to decode as `--bootstrap-host`. The bootstrap port
+  comes from the shard's stable port window. Needs an `ai-dynamo` whose sidecar has
+  `--disaggregation-mode` (1.7.0.dev20261110 does).
+
+```yaml
+engine_kwargs:
+  dynamo:
+    engine: sglang
+    sglang:
+      disaggregation:
+        prefill_shards: 1        # 2 TP4 shards on 8 GPUs -> 1 prefill + 1 decode
+        # transfer_backend: nixl
+```
+
+PD is refused with `direct_generate` and with rollout routing replay (R3), and needs
+at least one decode shard. `PD_PREFILL=K` in
+[`run_sglang_sidecar_rl.sh`](run_sglang_sidecar_rl.sh) turns it on in sidecar mode. On 8xH100 with Qwen3-Coder-30B-A3B (FSDP, 3 GRPO
+steps), PD with one prefill and one decode shard matched native SGLang (pearson 0.9976):
+0.9976 in worker mode and 0.9980 through the sidecar, with no KV transfer errors and
+both roles released and restored on every sleep/wake. In worker mode,
+keep `checkpoint_engine.update_weights_bucket_megabytes` at 256 or below: larger
+buckets exceed the size limit of `/engine/control/update_weights_from_tensor` (HTTP 413).
 
 - **V1:** keep `agent.agent_loop_manager_class=null` to use TransferQueue.
   Current Uni-Agent instead uses the [Gateway adapter](uniagent_gateway.py).

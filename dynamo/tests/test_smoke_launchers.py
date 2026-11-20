@@ -74,3 +74,58 @@ def test_v1_launchers_use_native_entrypoint_and_forward_arguments(script, child_
     ) in argv
     if child_exit:
         assert "PASS:" not in result.stdout
+
+
+@pytest.mark.parametrize(
+    "knobs, config_name, expected",
+    [
+        ({}, "dynamo_trainer_v1_colocate_sglang", []),
+        (
+            {"PD_PREFILL": "1", "DP_ATTN": "4"},
+            "dynamo_trainer_v1_colocate_sglang",
+            [
+                "++actor_rollout_ref.rollout.engine_kwargs.dynamo.sglang.disaggregation.prefill_shards=1",
+                '++actor_rollout_ref.rollout.engine_kwargs.dynamo.sglang.extra_args=["--dp-size","4",'
+                '"--enable-dp-attention","--ep-size","4"]',
+            ],
+        ),
+        ({"R3": "1"}, "dynamo_trainer_v1_colocate_sglang_r3", []),
+    ],
+)
+def test_sidecar_rl_launcher_args(tmp_path, knobs, config_name, expected):
+    capture = tmp_path / "argv.json"
+    python = tmp_path / "python3"
+    python.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        "if sys.argv[1:2] == ['-c']: sys.exit(0)\n"
+        "json.dump(sys.argv[1:], open(os.environ['DYNAMO_LAUNCH_CAPTURE'], 'w'))\n"
+    )
+    python.chmod(0o755)
+    env = {
+        **os.environ,
+        **knobs,
+        "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+        "DYNAMO_LAUNCH_CAPTURE": str(capture),
+        "MODEL_PATH": "/models/m",
+        "TRAIN_FILE": "/data/train.parquet",
+    }
+    result = subprocess.run(
+        ["bash", str(RECIPE_ROOT / "run_sglang_sidecar_rl.sh"), "trainer.total_training_steps=3"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    argv = json.loads(capture.read_text())
+    assert argv[:2] == ["-m", "verl.trainer.main_ppo"]
+    assert get_args_parser().parse_args(argv[2:]).config_name == config_name
+    assert "++actor_rollout_ref.rollout.engine_kwargs.dynamo.sglang.launch_mode=sidecar" in argv
+    assert "++actor_rollout_ref.rollout.engine_kwargs.dynamo.generate_api=generate" in argv
+    assert "data.val_files=/data/train.parquet" in argv
+    for arg in expected:
+        assert arg in argv
+    assert not any("disaggregation" in a for a in argv) or "PD_PREFILL" in knobs
+    assert argv[-1] == "trainer.total_training_steps=3"
