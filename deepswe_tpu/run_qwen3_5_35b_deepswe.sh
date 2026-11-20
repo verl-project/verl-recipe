@@ -112,10 +112,8 @@ else
 fi
 export VERL_SANDBOX_LOOKAHEAD="${VERL_SANDBOX_LOOKAHEAD:-1}"
 export SANDBOX_EVAL_REPLICAS="${SANDBOX_EVAL_REPLICAS:-1}"
-export SANDBOX_MAX_WARMPOOL_SIZE="${SANDBOX_MAX_WARMPOOL_SIZE:-${ROLLOUT_N}}"
-export SANDBOX_NETWORK_POLICY_MANAGEMENT="${SANDBOX_NETWORK_POLICY_MANAGEMENT:-Managed}"
-# A per-run id keeps this job's warm pools, templates and claims separate from other jobs in the namespace (unset,
-# uni-agent shares them under "uni-agent-shared") and is what the reaper selects on after a crash (see README).
+# A per-run id lets the trainer's warm pools serve the rollout workers' sandboxes, keeps them separate from other jobs
+# in the namespace, and is what the reaper selects on after a crash (see README).
 # Lowercase letters, digits and "-" only: it becomes part of Kubernetes resource names.
 export SANDBOX_RUN_ID="${SANDBOX_RUN_ID:-deepswe-$(date +%m%d-%H%M%S)}"
 
@@ -155,20 +153,19 @@ if [[ "${ROLLOUT_IS}" == "seq_mask_tis" || "${ROLLOUT_RS}" == "seq_mean_abs_exp"
   exit 1
 fi
 
-UNI_AGENT_HOME="${UNI_AGENT_HOME:-/workspace/uni-agent}"
-TASK_CONFIG="${TASK_CONFIG:-${UNI_AGENT_HOME}/examples/quickstart/training/task_config_react_gke.yaml}"
+# Agent, tools, prompt and sandbox options (image mirror, network policy mode): see the file. Every Ray node reads it.
+TASK_CONFIG="${TASK_CONFIG:-${SCRIPT_DIR}/task_config.yaml}"
 GATEWAY_COUNT="${GATEWAY_COUNT:-8}"
 # One agent session per decode slot (3 replicas x 128).
 CONCURRENCY="${CONCURRENCY:-384}"
-export SANDBOX_MAX_CONCURRENT="${SANDBOX_MAX_CONCURRENT:-$((CONCURRENCY > 512 ? CONCURRENCY : 512))}"
 DISPATCH_MODE="${DISPATCH_MODE:-inline_async}"
 TRAJECTORY_SELECTION="${TRAJECTORY_SELECTION:-all}"
 AGENT_LOG_DIR="${AGENT_LOG_DIR:-/tmp/uni_agent_logs/${EXPERIMENT_NAME}}"
 MASK_UNFINISHED_EPISODE="${MASK_UNFINISHED_EPISODE:-False}"
 
 VERL_EXT_MODULES="${VERL_EXT_MODULES:-verl_hardware_plugin,${DEEPSWE_MODULE}}"
-# With lookahead on, rollout workers do not warm sandbox pools themselves: the trainers registered by
-# ${DEEPSWE_MODULE} do. Without that module every rollout would fail on a missing warm pool.
+# With lookahead on, the trainers registered by ${DEEPSWE_MODULE} warm the sandboxes of each batch one step ahead.
+# Without that module nothing is warmed and every sandbox cold-starts, so treat it as a configuration error.
 if [[ ! "${VERL_SANDBOX_LOOKAHEAD,,}" =~ ^(0|false|no)$ && ",${VERL_EXT_MODULES}," != *",${DEEPSWE_MODULE},"* ]]; then
   echo "ERROR: VERL_SANDBOX_LOOKAHEAD=${VERL_SANDBOX_LOOKAHEAD} needs ${DEEPSWE_MODULE} in VERL_EXT_MODULES" \
     "(got '${VERL_EXT_MODULES}'); add it or set VERL_SANDBOX_LOOKAHEAD=0." >&2
@@ -179,9 +176,6 @@ AGENT_OVERRIDES=(
   "++ray_kwargs.ray_init.runtime_env.env_vars.VERL_REFILL_AFTER_SAMPLE='${VERL_REFILL_AFTER_SAMPLE}'"
   "++ray_kwargs.ray_init.runtime_env.env_vars.VERL_SANDBOX_LOOKAHEAD='${VERL_SANDBOX_LOOKAHEAD}'"
   "++ray_kwargs.ray_init.runtime_env.env_vars.SANDBOX_EVAL_REPLICAS='${SANDBOX_EVAL_REPLICAS}'"
-  "++ray_kwargs.ray_init.runtime_env.env_vars.SANDBOX_MAX_WARMPOOL_SIZE='${SANDBOX_MAX_WARMPOOL_SIZE}'"
-  "++ray_kwargs.ray_init.runtime_env.env_vars.SANDBOX_MAX_CONCURRENT='${SANDBOX_MAX_CONCURRENT}'"
-  "++ray_kwargs.ray_init.runtime_env.env_vars.SANDBOX_NETWORK_POLICY_MANAGEMENT='${SANDBOX_NETWORK_POLICY_MANAGEMENT}'"
   "++actor_rollout_ref.rollout.multi_turn.format=qwen3_coder"
   "++actor_rollout_ref.rollout.agent.agent_loop_manager_class=uni_agent.framework.entry.AgentFrameworkRolloutAdapter"
   "++actor_rollout_ref.rollout.custom.agent_framework.gateway_count=${GATEWAY_COUNT}"
@@ -199,7 +193,7 @@ AGENT_OVERRIDES=(
   "reward.custom_reward_function.name=score_from_runner_result"
 )
 # Only forward optional sandbox/node-selector env vars when set, so unset vars do not arrive as "".
-for _opt_var in SANDBOX_NAMESPACE SANDBOX_RUN_ID SANDBOX_IMAGE_MAP SANDBOX_POD_ANNOTATIONS NODE_SELECTOR_KEY NODE_SELECTOR_VAL; do
+for _opt_var in SANDBOX_NAMESPACE SANDBOX_RUN_ID NODE_SELECTOR_KEY NODE_SELECTOR_VAL; do
   if [[ "${!_opt_var:-}" == *"'"* ]]; then
     echo "ERROR: ${_opt_var} must not contain a single quote (it is passed as a quoted Hydra override)." >&2
     exit 1

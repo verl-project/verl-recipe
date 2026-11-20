@@ -62,7 +62,7 @@ Each R2E-Gym rollout episode spins up an isolated repository container (such as 
 
 **Mental model:** Each training run puts two kinds of sandbox pods on this CPU node pool:
 1. **Working sandboxes** — containers actively running shell commands and `pytest` for the trajectories currently in flight. These are what actually consume CPU and RAM (typically bursting to ~`1–2` vCPUs and `2–4 GiB` RAM each).
-2. **Warm standby sandboxes** — idle containers pre-started ahead of time (2-slot lookahead for the current + next batch, plus just-in-time eval containers on validation steps) so rollouts do not block on multi-gigabyte image pulls. Standby pods use almost no CPU, so they mainly count toward Kubernetes' per-node pod limit and local disk cache.
+2. **Warm standby sandboxes** — idle containers pre-started ahead of time (for the current and the next batch, plus just-in-time eval containers on validation steps) so rollouts do not block on multi-gigabyte image pulls. Standby pods use almost no CPU, so they mainly count toward Kubernetes' per-node pod limit and local disk cache.
 
 If `K` training runs share the same sandbox pool in parallel, both buckets scale linearly by `K`.
 
@@ -79,8 +79,8 @@ If `K` training runs share the same sandbox pool in parallel, both buckets scale
    nodes = ceil(K * active_per_run / 20)   # conservative: divide by 16; tighter: divide by 24
    ```
 3. **Quick sanity checks for pod limit and disk:**
-   - **Pod cap (`110` pods/node on GKE, ~`100` usable):** Standby warm pools add roughly `2 * TRAIN_BATCH_SIZE * min(ROLLOUT_N, SANDBOX_MAX_WARMPOOL_SIZE)` pods (plus `VAL_MAX_SAMPLES * SANDBOX_EVAL_REPLICAS` during validation) — around `~740` total pods at peak for one default v7x run (`VAL_MAX_SAMPLES=100`). Make sure `nodes >= ceil(K * peak_pods / 100)` (compute dominates on `n2-standard-32`, but the pod cap can bind on `n2-standard-64+`).
-   - **Boot disk (`200–300 GB`):** R2E-Gym images are ~`2–5 GB` uncompressed. Replicas of the same image co-locate onto one node by default (`colocate_replicas=True`) to reuse cached containerd layers; `200 GB+` disks keep ~`30–50` images cached per node.
+   - **Pod cap (`110` pods/node on GKE, ~`100` usable):** Standby warm pools add roughly `2 * TRAIN_BATCH_SIZE * ROLLOUT_N` pods (plus `VAL_MAX_SAMPLES * SANDBOX_EVAL_REPLICAS` during validation) — around `~740` total pods at peak for one default v7x run (`VAL_MAX_SAMPLES=100`). Make sure `nodes >= ceil(K * peak_pods / 100)` (compute dominates on `n2-standard-32`, but the pod cap can bind on `n2-standard-64+`).
+   - **Boot disk (`200–300 GB`):** R2E-Gym images are ~`2–5 GB` uncompressed. Replicas of the same image co-locate onto one node where possible to reuse cached containerd layers; `200 GB+` disks keep ~`30–50` images cached per node.
 
 **Quick-reference examples (`n2-standard-32`):**
 
@@ -152,9 +152,9 @@ done
 ## 4. Agent Sandbox CRDs, Controller, and Namespace RBAC
 
 ### What it is for
-`uni-agent`'s `GKEAgentSandbox` (`uni_agent/sandbox/gke_agent_sandbox.py`) uses `agent_sandbox_rl` (`SandboxFleet`) to manage pre-warmed pools of R2E-Gym containers in Kubernetes. Under the hood, this relies on the `kubernetes-sigs/agent-sandbox` controller and four custom resources (`Sandbox`, `SandboxTemplate`, `SandboxWarmPool`, and `SandboxClaim`), plus RBAC permissions for the Ray worker's Kubernetes ServiceAccount to create those resources and exec into the claimed sandbox pods.
+`uni-agent`'s `GKEAgentSandbox` (`uni_agent/sandbox/gke_agent_sandbox.py`) uses `agent_sandbox_rl` (`SandboxFleet`) to run each task's container as a Kubernetes pod. The provider can keep pods started ahead of time in warm pools; this recipe decides which ones in [`sandbox_lookahead.py`](./sandbox_lookahead.py), warming every batch's images one training step ahead. Under the hood, this relies on the `kubernetes-sigs/agent-sandbox` controller and four custom resources (`Sandbox`, `SandboxTemplate`, `SandboxWarmPool`, and `SandboxClaim`), plus RBAC permissions for the Ray worker's Kubernetes ServiceAccount to create those resources and exec into the claimed sandbox pods.
 
-By default, `GKEAgentSandbox` configures every `SandboxTemplate` with `networkPolicyManagement: Managed` and an empty `networkPolicy` (`{ingress: [], egress: []}`), blocking all ingress and egress traffic (including public internet, internal cluster services, and cloud metadata endpoints) while keeping pod loopback (`localhost`) and Kubernetes API `pods/exec` working.
+By default, `GKEAgentSandbox` configures every `SandboxTemplate` with `networkPolicyManagement: Managed` and an empty `networkPolicy` (`{ingress: [], egress: []}`), blocking all ingress and egress traffic (including public internet, internal cluster services, and cloud metadata endpoints) while keeping pod loopback (`localhost`) and Kubernetes API `pods/exec` working. To use a different policy, or `Unmanaged` mode on a cluster whose namespace NetworkPolicy already isolates the sandboxes, set `sandbox.sandbox_kwargs` in [`task_config.yaml`](./task_config.yaml).
 
 ### How it should look
 - **CRDs & Controller**: `sandboxes.agents.x-k8s.io`, `sandboxtemplates.extensions.agents.x-k8s.io`, `sandboxwarmpools.extensions.agents.x-k8s.io`, and `sandboxclaims.extensions.agents.x-k8s.io` installed in the cluster, with `agent-sandbox-controller` running in `agent-sandbox-system`.
@@ -224,11 +224,11 @@ Build the training image from `verl/examples/tpu/grpo/Dockerfile` and add the sa
 ## 5. Regional Artifact Registry Mirror for R2E-Gym Images
 
 ### What it is for
-Each row in the R2E-Gym dataset specifies a Docker Hub image (`namanjain12/<repo>_final:<commit>`). If dozens of GKE nodes pull those multi-gigabyte images directly from Docker Hub at once, Docker Hub blocks the pulls with `429 Too Many Requests` rate-limit errors. Hosting a mirror of the R2E-Gym repositories (`aiohttp_final`, `coveragepy_final`, `datalad_final`, `numpy_final`, `orange3_final`, `pandas_final`, `pillow_final`, `pyramid_final`, `scrapy_final`, `tornado_final`) in a regional Artifact Registry repository lets `GKEAgentSandbox` rewrite dataset images to your regional mirror via `sandbox.image_map` in `task_config_react_gke.yaml` or via `SANDBOX_IMAGE_MAP` (or pass `--repos` to `prepare_data.py` if you mirror only a subset).
+Each row in the R2E-Gym dataset specifies a Docker Hub image (`namanjain12/<repo>_final:<commit>`). If dozens of GKE nodes pull those multi-gigabyte images directly from Docker Hub at once, Docker Hub blocks the pulls with `429 Too Many Requests` rate-limit errors. Hosting a mirror of the R2E-Gym repositories (`aiohttp_final`, `coveragepy_final`, `datalad_final`, `numpy_final`, `orange3_final`, `pandas_final`, `pillow_final`, `pyramid_final`, `scrapy_final`, `tornado_final`) in a regional Artifact Registry repository lets the run pull them from your region instead: `sandbox.image_map` in [`task_config.yaml`](./task_config.yaml) rewrites the dataset images to the mirror (or pass `--repos` to `prepare_data.py` if you mirror only a subset).
 
 ### How it should look
 - An Artifact Registry Docker repository in the same region as your cluster (for example, `us-central1-docker.pkg.dev/<PROJECT>/<REPO>`) containing the mirrored `<repo>_final:<commit>` tags.
-- Either configure `sandbox.image_map` in `task_config_react_gke.yaml`, or pass `SANDBOX_IMAGE_MAP="namanjain12/**=<REGION>-docker.pkg.dev/<PROJECT>/<REPO>/**"` when launching the job.
+- `sandbox.image_map` uncommented in [`task_config.yaml`](./task_config.yaml), with `to:` set to `<REGION>-docker.pkg.dev/<PROJECT>/<REPO>/**`. Every Ray node reads this file; to keep it elsewhere, point `TASK_CONFIG` at a copy that exists at the same path on all of them.
 
 ---
 
@@ -325,8 +325,8 @@ This recipe targets upstream `verl` `main` together with `verl-hardware-plugin` 
 ### How the launch command should look
 - Because `ray job submit` starts in `/app` with a clean environment on the head pod, pass your `export` statements inside `bash -c "..."` so both the shell script and `ray.init(runtime_env=...)` inherit them.
 - Mount or copy `verl-recipe` at `${VERL_ROOT}/recipe` (or set `VERL_ROOT` and include `verl-recipe` on `PYTHONPATH`).
-- Set `SANDBOX_NAMESPACE`, `SANDBOX_IMAGE_MAP`, `NODE_SELECTOR_KEY=cloud.google.com/gke-nodepool`, and `NODE_SELECTOR_VAL=sandbox-cpu-pool` so `GKEAgentSandbox` provisions warm pools in your namespace on the sandbox CPU pool using the mirrored images.
-- If your cluster uses custom pod annotations (for example, admission-webhook ownership metadata), pass them via `SANDBOX_POD_ANNOTATIONS='{"key":"value"}'`. They are applied to each `SandboxClaim`'s pod metadata as well as to the `SandboxTemplate`, so leave the variable unset on clusters whose admission policy forbids setting those annotations on claims (claims are then rejected with `400 Bad Request` and every rollout session fails).
+- Set `SANDBOX_NAMESPACE`, `NODE_SELECTOR_KEY=cloud.google.com/gke-nodepool`, and `NODE_SELECTOR_VAL=sandbox-cpu-pool` so `GKEAgentSandbox` starts the sandboxes in your namespace on the sandbox CPU pool.
+- Agent settings (`max_steps`, tools, prompt) and sandbox options (image mirror, network policy) come from [`task_config.yaml`](./task_config.yaml); set `TASK_CONFIG` to use another file.
 - Defaults are optimized for **TPU v7x**: `2x2x2` trainer (`NNODES_TRAINER=2`, `N_CHIPS_TRAINER=8`, FSDP16, on-device `PARAM_DTYPE=float32`, fused AdamW, SparseCore async FSDP collective offload, `TRAINER_SCOPED_VMEM_LIMIT_KIB=65472`, `AC_SAVE_SPLASH_AND_ROUTING=True`, `SPLASH_MAX_BLOCK_SIZE=1024`, `FROZEN_PARAM_REGEX=moe.router.gate`) and 3 rollout replicas of `2x2x1` (`NNODES_ROLLOUT=3`, `N_CHIPS_ROLLOUT=8`, TP8/EP8, `USE_MOE_FUSED_EP_KERNEL=1`, `TPU_MOE_SKIP_PADDED_TOKENS=1`, `TPU_ENABLE_GDN_DYNAMIC_TILING=1`, `ENABLE_PREFIX_CACHING=True`, `VLLM_BLOCK_SIZE=512`, `VLLM_ASYNC_SCHEDULING=False`, `MAX_NUM_SEQS=128`, `CONCURRENCY=384`), 32k context (`MAX_PROMPT_LEN=8192`, `MAX_RESPONSE_LEN=24576`, `STATIC_MICRO_BATCH_LEN=32768`), and `ROLLOUT_RS_THRESHOLD=0.998_1.002`.
 - **Optional `GDN_ROW_SLOT_LEN=32768` speedup**: For an image built from `verl/examples/tpu/grpo/Dockerfile` with `--build-arg TORCHTITAN_COMMIT=4e16e67aed8c1e702e6f440b1ff81619bb6873d4` (`google-pytorch/torchtitan#142`), export `GDN_ROW_SLOT_LEN=32768` to put one sequence per GatedDeltaNet row slot. It is left unset by default so the recipe runs out of the box on `verl main`'s default image.
 
@@ -339,14 +339,12 @@ kubectl exec -n "${NAMESPACE}" "${HEAD_POD}" -- \
     export PYTHONPATH='/tmp/deepswe_src/uni-agent:/tmp/deepswe_src/verl:/tmp/deepswe_src/verl-hardware-plugin:/torchtitan:/torchtitan/torchtitan' &&
     export VERL_ROOT='/tmp/deepswe_src/verl' &&
     export RAY_DATA_HOME='/data/${USER_DIR}' &&
-    export UNI_AGENT_HOME='/tmp/deepswe_src/uni-agent' &&
     export PROJECT_NAME='verl-tpu-deepswe' &&
     export EXPERIMENT_NAME='qwen3_5_35b_deepswe_r2e_gym_v7x_50steps' &&
     export TOTAL_TRAINING_STEPS=50 &&
     export TEST_FREQ=10 &&
     export VAL_BEFORE_TRAIN=False &&
     export SANDBOX_NAMESPACE='${NAMESPACE}' &&
-    export SANDBOX_IMAGE_MAP='namanjain12/**=<REGION>-docker.pkg.dev/<PROJECT>/<REPO>/**' &&
     export NODE_SELECTOR_KEY='cloud.google.com/gke-nodepool' &&
     export NODE_SELECTOR_VAL='sandbox-cpu-pool' &&
     # Optional (only when image was built with TORCHTITAN_COMMIT=4e16e67aed8c1e702e6f440b1ff81619bb6873d4):
