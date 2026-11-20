@@ -162,7 +162,9 @@ class SWEAgentFramework(OpenAICompatibleAgentFramework):
             server_actor_ids=server_addresses,
         )
 
-        gateway_count = int(OmegaConf.select(config, "actor_rollout_ref.rollout.agent_framework.gateway_count", default=1))
+        gateway_count = int(
+            OmegaConf.select(config, "actor_rollout_ref.rollout.agent_framework.gateway_count", default=1)
+        )
         servers = list(zip(server_addresses, server_handles, strict=True))
 
         from transformers import AutoTokenizer
