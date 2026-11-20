@@ -232,13 +232,11 @@ async def _control_listener(endpoint: str):
 
     ctx = zmq.asyncio.Context()
     sock = ctx.socket(zmq.REP)
-    sock.bind(endpoint)
-    logger.info("control listener bound to %s", endpoint)
-
-    # Wait for the engine to be alive before serving requests.
-    await _wait_for_engine()
-
     try:
+        sock.bind(endpoint)
+        logger.info("control listener bound to %s", endpoint)
+        # Wait for the engine to be alive before serving requests.
+        await _wait_for_engine()
         while True:
             try:
                 raw = await sock.recv()
@@ -268,10 +266,6 @@ async def _control_listener(endpoint: str):
 
 
 async def _amain():
-    import dynamo.vllm.main as dyn_main
-
-    _install_engine_capture()
-
     control_ep = os.environ.get("VERL_DYNAMO_CONTROL_ZMQ")
     if control_ep:
         listener = asyncio.create_task(_control_listener(control_ep))
@@ -283,6 +277,15 @@ async def _amain():
         listener = None
 
     try:
+        if listener is not None:
+            # Bind before importing/initializing vLLM: its synchronous startup
+            # otherwise blocks this task and a TP worker can take the port.
+            await asyncio.sleep(0)
+            if listener.done():
+                await listener  # Surface bind failures before loading the model.
+        import dynamo.vllm.main as dyn_main
+
+        _install_engine_capture()
         await dyn_main.worker()
     finally:
         if listener is not None:

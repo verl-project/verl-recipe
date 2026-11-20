@@ -1,0 +1,17 @@
+# @package _global_
+# One 8-GPU node, shared between training and two TP4 rollout engines.
+trainer:
+  v1:
+    trainer_mode: colocate_async
+    colocate_async:
+      num_warmup_batches: 1
+
+actor_rollout_ref:
+  hybrid_engine: true
+  rollout:
+    nnodes: 0
+
+ray_kwargs:
+  ray_init:
+    address: null
+    num_cpus: ${oc.decode:${oc.env:RAY_NUM_CPUS,32}}

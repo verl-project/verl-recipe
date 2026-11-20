@@ -60,9 +60,6 @@ fi
 # there (only 1.3.0.post1 / 1.3.1 / dev builds), so `pip install ai_dynamo[sglang]`
 # fails with "No matching distribution found".
 #
-# Verified working in verl_vllm024.dev2.sqsh (job 16212011): torch 2.11.0+cu130 is
-# untouched and sglang / dynamo.sglang / dynamo.vllm / vllm / verl all still import.
-#
 # WARNING: do NOT bake this into the .sqsh. Installing sglang downgrades vLLM's
 # guided-decoding stack (llguidance, outlines_core, xgrammar) and two kernel
 # packages (tilelang, tokenspeed-mla). `import vllm` still succeeds, so the damage

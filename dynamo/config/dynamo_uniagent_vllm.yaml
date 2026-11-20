@@ -1,0 +1,153 @@
+# Qwen3-Coder-30B-A3B / H100 reference for the vLLM 0.29 image and its bundled verl.
+# Requires requirements-uniagent.txt and a Dynamo build with the Rust TA plugin.
+# Supply model/data/task paths; select uniagent_mode=separate for 8+8 GPUs.
+hydra:
+  searchpath:
+    - pkg://verl/trainer/config
+  run:
+    dir: ${oc.env:OUTPUT_DIR}/hydra
+
+defaults:
+  - ppo_trainer
+  - dynamo_base
+  - _self_
+  - uniagent_mode: colocate
+
+algorithm:
+  adv_estimator: grpo
+  use_kl_in_reward: false
+  rollout_correction:
+    bypass_mode: true
+    loss_type: ppo_clip
+
+data:
+  train_files: ${oc.env:TRAIN_FILE}
+  val_files: ${oc.env:TEST_FILE,${data.train_files}}
+  return_raw_chat: true
+  train_batch_size: 2
+  # Claude's system prompt and tool schemas need more than a single-turn 8K budget.
+  max_prompt_length: 16384
+  max_response_length: 16384
+  filter_overlong_prompts: true
+  filter_overlong_prompts_workers: 1
+  truncation: error
+  shuffle: false
+  seed: 42
+
+actor_rollout_ref:
+  model:
+    path: ${oc.env:MODEL_PATH}
+    use_remove_padding: true
+    enable_gradient_checkpointing: true
+  actor:
+    strategy: fsdp2
+    optim:
+      lr: 1.0e-6
+      override_optimizer_config:
+        foreach: false
+    use_kl_loss: false
+    clip_ratio_low: 0.2
+    clip_ratio_high: 0.28
+    use_dynamic_bsz: true
+    ppo_mini_batch_size: ${data.train_batch_size}
+    ppo_micro_batch_size_per_gpu: 1
+    ppo_max_token_len_per_gpu: 8192
+    ulysses_sequence_parallel_size: 4
+    use_torch_compile: false
+    entropy_from_logits_with_chunking: true
+    fsdp_config:
+      use_torch_compile: false
+      param_offload: true
+      optimizer_offload: true
+      fsdp_size: -1
+      use_no_sync_for_gradient_accumulation: false
+  rollout:
+    tensor_model_parallel_size: 4
+    gpu_memory_utilization: 0.6
+    max_model_len: 32768
+    max_num_batched_tokens: 8192
+    max_num_seqs: 1024
+    disable_log_stats: false
+    temperature: 1.0
+    top_p: 1.0
+    top_k: -1
+    n: 2
+    enable_prefix_caching: true
+    enforce_eager: true
+    free_cache_engine: true
+    calculate_log_probs: true
+    log_prob_micro_batch_size_per_gpu: 1
+    multi_turn:
+      enable: true
+      format: qwen3_coder
+    agent:
+      num_workers: 2
+      default_agent_loop: task
+      agent_loop_config_path: null
+      agent_loop_manager_class: recipe.dynamo.uniagent_gateway.DynamoAgentFrameworkRolloutAdapter
+    custom:
+      agent_framework:
+        gateway_count: ${oc.decode:${oc.env:GATEWAY_COUNT,2}}
+        log_dir: ${oc.env:OUTPUT_DIR}/agent_logs
+        allowed_request_sampling_param_keys: [temperature, top_p, top_k]
+        agent_runners:
+          task:
+            runner_fqn: ${oc.env:AGENT_RUNNER_FQN,uni_agent.framework.task_runner.run_task}
+            runner_kwargs:
+              task_config_path: ${oc.env:TASK_CONFIG,null}
+              model_name: ${actor_rollout_ref.model.path}
+            dispatch_mode: inline_async
+            max_concurrent_sessions: ${oc.decode:${oc.env:AGENT_CONCURRENCY,4}}
+            trajectory_selection: longest
+    engine_kwargs:
+      dynamo:
+        engine: vllm
+        router_mode: kv
+        enable_kv_events: true
+        router_session_affinity_ttl_secs: 0
+        direct_generate: false
+        request_engine_data: true
+        request_completion_token_ids: true
+        request_timeout_s: 7200
+        enable_worker_system_metrics: true
+        stable_kv_event_ports: true
+        free_engine_on_train: ${actor_rollout_ref.rollout.free_cache_engine}
+        namespace: ${trainer.experiment_name}
+        thunderagent:
+          enabled: true
+          native: true
+          auto_finalize: false
+          subagent_programs: tree
+          router_block_size: 16
+        extra_args: [--seed, '42', --block-size, '16']
+        frontend_extra_args: [--kv-cache-block-size, '16']
+
+trainer:
+  use_v1: true
+  v1:
+    sampler:
+      max_off_policy_threshold: 8
+      max_off_policy_strategy: drop
+  logger: [console]
+  project_name: thunderagent
+  experiment_name: ${oc.env:RUN_NAME,uniagent-rustta-smoke}
+  nnodes: 1
+  n_gpus_per_node: 8
+  val_before_train: false
+  test_freq: -1
+  save_freq: -1
+  total_epochs: 1000
+  total_training_steps: ${oc.decode:${oc.env:TOTAL_STEPS,2}}
+  resume_mode: disable
+  default_local_dir: ${oc.env:OUTPUT_DIR}/checkpoints
+  rollout_data_dir: ${oc.env:OUTPUT_DIR}/rollouts
+
+transfer_queue:
+  enable: true
+
+ray_kwargs:
+  ray_init:
+    runtime_env:
+      py_executable: null
+      env_vars:
+        VERL_DYNAMO_REFIT_STRICT: '1'

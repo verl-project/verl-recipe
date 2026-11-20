@@ -16,11 +16,12 @@ import asyncio
 import importlib.metadata
 import inspect
 import json
+import socket
 import subprocess
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 import yaml
@@ -30,9 +31,11 @@ from recipe.dynamo.dynamo_agent_loop import (
     DynamoFullyAsyncLLMServerClient,
     DynamoLLMServerManager,
     DynamoServerManager,
+    GenerationPaused,
 )
 from recipe.dynamo.dynamo_async_server import DynamoHttpServer
 from recipe.dynamo.dynamo_thunderagent import (
+    _REQUEST_PROGRAM,
     DynamoThunderAgentHttpServer,
     DynamoThunderAgentReplica,
 )
@@ -42,6 +45,54 @@ from verl.workers.rollout.llm_server import FullyAsyncLLMServerClient
 
 RECIPE_ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY_ROOT = RECIPE_ROOT.parent
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("port_occupied", [False, True])
+async def test_control_port_reserved_before_engine_start(monkeypatch, port_occupied):
+    import zmq
+    from recipe.dynamo import _dynamo_vllm_with_control as control
+
+    reservation = socket.socket()
+    reservation.bind(("127.0.0.1", 0))
+    port = reservation.getsockname()[1]
+    if not port_occupied:
+        reservation.close()
+    monkeypatch.setenv("VERL_DYNAMO_CONTROL_ZMQ", f"tcp://127.0.0.1:{port}")
+    monkeypatch.setitem(control._engine_holder, "engine", None)
+    calls = []
+
+    def capture():
+        # Simulate a TP worker allocating a port during synchronous engine init.
+        with socket.socket() as competitor, pytest.raises(OSError):
+            competitor.bind(("127.0.0.1", port))
+        calls.append("capture")
+
+    async def worker():
+        calls.append("worker")
+
+    main = ModuleType("dynamo.vllm.main")
+    main.worker = worker
+    vllm = ModuleType("dynamo.vllm")
+    vllm.main = main
+    dynamo = ModuleType("dynamo")
+    dynamo.vllm = vllm
+    for name, module in [("dynamo", dynamo), ("dynamo.vllm", vllm), ("dynamo.vllm.main", main)]:
+        monkeypatch.setitem(sys.modules, name, module)
+    monkeypatch.setattr(control, "_install_engine_capture", capture)
+    try:
+        if port_occupied:
+            with pytest.raises(zmq.ZMQError):
+                await control._amain()
+            assert not calls
+        else:
+            await control._amain()
+            assert calls == ["capture", "worker"]
+    finally:
+        reservation.close()
+    # Cancellation while waiting for an engine must release the listener.
+    with socket.socket() as released:
+        released.bind(("127.0.0.1", port))
 
 
 def _make_http_server(thunderagent: dict | None = None) -> DynamoThunderAgentHttpServer:
@@ -55,6 +106,8 @@ def _make_http_server(thunderagent: dict | None = None) -> DynamoThunderAgentHtt
     server._frontend_process = None
     server._thunderagent_process = None
     server._thunderagent_log_fp = None
+    server._generation_resumed = asyncio.Event()
+    server._generation_resumed.set()
     return server
 
 
@@ -441,7 +494,7 @@ def test_session_affinity_header_survives_on_the_thunderagent_class() -> None:
     server = _make_http_server({"enabled": False})
     server.config.engine_kwargs["dynamo"]["router_session_affinity_ttl_secs"] = 600
     assert server._frontend_headers("traj-1") == {"X-Request-Id": "traj-1", "x-dynamo-session-id": "traj-1"}
-    token = dynamo_thunderagent._REQUEST_PROGRAM.set(("program-a", False))
+    token = dynamo_thunderagent._REQUEST_PROGRAM.set(("program-a", None, False))
     try:
         headers = server._frontend_headers("traj-1")
     finally:
@@ -492,6 +545,25 @@ async def test_finalize_retries_and_accepts_empty_choices(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_native_finalize_does_not_post_while_generation_is_paused(monkeypatch) -> None:
+    server = _make_http_server({"enabled": True, "native": True, "finalize_max_attempts": 1})
+    calls = []
+
+    async def frontend_post(_payload, request_id):
+        calls.append(request_id)
+        return 200, ""
+
+    monkeypatch.setattr(server, "_frontend_post", frontend_post)
+
+    server._generation_resumed.clear()
+    assert await server.finalize_program("program-a") is False
+    assert calls == []  # a one-token final would park on the paused workers
+    server._generation_resumed.set()
+    assert await server.finalize_program("program-a") is True
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_finalize_rejects_nonempty_choices_as_router_bypass(monkeypatch) -> None:
     server = _make_http_server({"enabled": True, "finalize_max_attempts": 1})
 
@@ -534,6 +606,12 @@ async def test_shutdown_stops_frontend_then_thunderagent_then_base(monkeypatch) 
 
 def test_registered_replica_uses_thunderagent_server_class() -> None:
     assert DynamoThunderAgentReplica.__name__ == "DynamoThunderAgentReplica"
+
+
+def test_replica_honors_verl_configured_actor_concurrency() -> None:
+    replica = object.__new__(DynamoThunderAgentReplica)
+    replica.config = SimpleNamespace(ray_actor_max_concurrency=2048)
+    assert replica.max_concurrency == 2048
 
 
 def test_recipe_registry_loads_thunderagent_replica() -> None:
@@ -792,6 +870,8 @@ class _FakeLoadBalancer:
         self.acquire_keys: list[str] = []
         self.acquire_server = _RemoteMethod(self._acquire)
         self.release_server = SimpleNamespace(remote=lambda **_kwargs: None)
+        self.require_acquire_fields = _RemoteMethod(lambda: [])
+        self.require_release_fields = _RemoteMethod(lambda: [])
 
     def _acquire(self, request_id: str):
         self.acquire_keys.append(request_id)
@@ -827,6 +907,38 @@ async def test_finalize_routes_by_request_id_not_session_id() -> None:
 
     assert lb.acquire_keys == ["request-B"]  # sticky lookup uses the routing key
     assert server.finalize_calls == ["session-A"]  # program key stays the session
+
+
+class _PausedServer(_FakeServer):
+    paused = True
+
+    def _finalize_program(self, session_id: str):
+        if self.paused:
+            return False
+        self.finalize_calls.append(session_id)
+        return True
+
+
+@pytest.mark.asyncio
+async def test_finalize_reports_a_pause_and_recovery_waits_it_out() -> None:
+    server = _PausedServer()
+    lb = _FakeLoadBalancer(server)
+    client = _make_fully_async_client(lb, [server])
+    client._pause_poll_s = 0.01
+
+    # The gateway is told at once so it can hand the trajectories back and release later.
+    with pytest.raises(GenerationPaused):
+        await client.finalize_program("session-A", routing_key="request-A")
+    assert server.finalize_calls == []
+
+    async def resume():
+        await asyncio.sleep(0.03)
+        server.paused = False
+
+    # auto_finalize polls through the pause instead of counting it as a leak.
+    await asyncio.gather(resume(), client._finalize_with_recovery("session-A", routing_key="session-A"))
+    assert server.finalize_calls == ["session-A"]
+    assert client._unresolved_finalize_leaks == 0
 
 
 @pytest.mark.asyncio
@@ -954,6 +1066,36 @@ async def test_cross_pool_retry_finalizes_all_served_frontends() -> None:
     assert standalone.finalize_calls == ["traj-1"]
     assert client._unresolved_finalize_leaks == 0
     assert "traj-1" not in client._session_servers  # dropped after confirm-all
+
+
+@pytest.mark.asyncio
+async def test_finalize_waits_for_every_frontend_before_reporting_a_pause() -> None:
+    # One frontend answers "paused" at once; the other's final request is still running. Reporting
+    # before it ends would let a release be retried while that final is in flight.
+    paused, slow = _FakeServer(), _FakeServer()
+    paused.finalize_program = SimpleNamespace(remote=lambda **_kwargs: _ready(False))
+    gate = asyncio.Event()
+
+    async def slow_finalize(session_id):
+        await gate.wait()
+        slow.finalize_calls.append(session_id)
+
+    slow.finalize_program = SimpleNamespace(remote=slow_finalize)
+    client = _make_fully_async_client(_FakeLoadBalancer(slow), [slow])
+    client._record_served_server("s1", "a", paused)
+    client._record_served_server("s1", "b", slow)
+
+    finalize = asyncio.create_task(client.finalize_program("s1"))
+    await asyncio.sleep(0.01)
+    assert not finalize.done()
+    gate.set()
+    with pytest.raises(GenerationPaused):
+        await finalize
+    assert slow.finalize_calls == ["s1"]
+
+
+async def _ready(value):
+    return value
 
 
 @pytest.mark.asyncio
@@ -1168,3 +1310,260 @@ def test_thunderagent_sglang_workers_use_internal_model_name(monkeypatch) -> Non
     base_calls.clear()
     server._build_sglang_cmd("test-model", 1, kv_events_config_json="{}")
     assert base_calls == [("test-model", {"kv_events_config_json": "{}"})]
+
+
+# --------------------------------------------------------------------------- #
+# Frontend request identity: one X-Request-Id per request, one session key per
+# trajectory.
+# --------------------------------------------------------------------------- #
+
+
+def _make_posting_server(responses):
+    """A bare server whose frontend POST is captured instead of sent."""
+    server = _make_bare_server()
+    server.posts = []
+    replies = list(responses)
+
+    async def post(payload, request_id, http_request_id=None):
+        server.posts.append((payload.get("request_id"), request_id, http_request_id))
+        return replies.pop(0)
+
+    server._frontend_post = post
+    server._build_frontend_completion_payload = lambda prompt_ids, sampling_params, request_id: {
+        "request_id": request_id
+    }
+    server._completion_response_to_token_output = lambda body, include_log_probs=False: body
+    return server
+
+
+def _ok_body() -> str:
+    return json.dumps({"choices": [{"text": "", "finish_reason": "stop"}]})
+
+
+@pytest.mark.asyncio
+async def test_concurrent_turns_of_one_trajectory_get_distinct_frontend_request_ids() -> None:
+    # verl reuses one request_id for every turn of a trajectory; Claude Code
+    # subagents make those turns concurrent, so the frontend must still see a
+    # unique id per request while the session key stays the trajectory's.
+    server = _make_posting_server([(200, _ok_body()), (200, _ok_body())])
+
+    await asyncio.gather(
+        server.generate(prompt_ids=[1], sampling_params={}, request_id="traj-1"),
+        server.generate(prompt_ids=[2], sampling_params={}, request_id="traj-1"),
+    )
+
+    payload_ids, session_keys, http_ids = zip(*server.posts, strict=True)
+    assert session_keys == ("traj-1", "traj-1")
+    assert http_ids[0] != http_ids[1]
+    assert payload_ids == http_ids
+    assert all(http_id.startswith("traj-1-") for http_id in http_ids)
+
+
+@pytest.mark.asyncio
+async def test_extension_field_retry_is_the_same_frontend_request() -> None:
+    server = _make_posting_server([(400, "Unsupported parameter: nvext"), (200, _ok_body())])
+
+    await server.generate(prompt_ids=[1], sampling_params={}, request_id="traj-1")
+
+    assert len(server.posts) == 2
+    assert server.posts[0][2] == server.posts[1][2]
+
+
+@pytest.mark.asyncio
+async def test_frontend_post_keeps_the_session_key_and_overrides_the_request_id() -> None:
+    server = _make_bare_server()
+    server.config = SimpleNamespace(engine_kwargs={"dynamo": {"router_session_affinity_ttl_secs": 60}})
+    server._server_address, server._server_port = "127.0.0.1", 8000
+    sent = {}
+
+    class _Response:
+        status = 200
+
+        async def text(self):
+            return ""
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    async def get_session():
+        return SimpleNamespace(post=lambda url, *, json, headers, timeout: sent.update(headers) or _Response())
+
+    server._get_http_session = get_session
+    await server._frontend_post({}, "traj-1", "traj-1-0001")
+    assert (sent["x-dynamo-session-id"], sent["X-Request-Id"]) == ("traj-1", "traj-1-0001")
+
+
+# --------------------------------------------------------------------------- #
+# Subagent programs: a Claude Code subagent turn is a program of its own, linked
+# to the program that dispatched it.
+# --------------------------------------------------------------------------- #
+
+
+def _headers_for(program, parent, final) -> dict[str, str]:
+    server = _make_http_server()
+    token = _REQUEST_PROGRAM.set((program, parent, final))
+    try:
+        return server._frontend_headers("req-1")
+    finally:
+        _REQUEST_PROGRAM.reset(token)
+
+
+def test_parent_session_header_is_sent_only_on_subagent_turns() -> None:
+    headers = _headers_for("sub-a", "root", False)
+    assert (headers["X-Dynamo-Session-ID"], headers["X-Dynamo-Parent-Session-ID"]) == ("sub-a", "root")
+    assert "X-Dynamo-Session-Final" not in headers
+    assert "X-Dynamo-Parent-Session-ID" not in _headers_for("root", None, False)
+    final = _headers_for("sub-a", None, True)
+    assert final["X-Dynamo-Session-Final"] == "true"
+    assert "X-Dynamo-Parent-Session-ID" not in final
+
+
+@pytest.mark.asyncio
+async def test_server_rejects_a_program_that_is_its_own_parent() -> None:
+    server = _make_http_server()
+    with pytest.raises(ValueError, match="must differ"):
+        await server.generate(thunderagent_session_id="p", thunderagent_parent_session_id="p")
+
+
+class _BlockingServer(_FakeServer):
+    """Holds every generate until released, so turns can be observed in flight."""
+
+    def __init__(self):
+        super().__init__()
+        self.release = asyncio.Event()
+
+    async def _generate(self, **kwargs):
+        from verl.workers.rollout.replica import TokenOutput
+
+        self.generate_calls.append(kwargs)
+        await self.release.wait()
+        return TokenOutput(token_ids=[7], log_probs=[-0.1], num_preempted=0, stop_reason="stop")
+
+
+@pytest.mark.asyncio
+async def test_concurrent_sibling_turns_keep_programs_and_shared_routing_key() -> None:
+    # Siblings retain separate programs while sharing the outer routing key.
+    server = _BlockingServer()
+    lb = _FakeLoadBalancer(server)
+    client = _make_fully_async_client(lb, [server])
+    client._auto_finalize = False
+
+    turns = [
+        asyncio.create_task(
+            client.generate("traj-1", prompt_ids=[1], sampling_params={}, program_id=sub, parent_program_id="root")
+        )
+        for sub in ("sub-a", "sub-b")
+    ]
+    while len(server.generate_calls) < 2:
+        await asyncio.sleep(0)
+    server.release.set()
+    await asyncio.gather(*turns)
+
+    assert [(c["thunderagent_session_id"], c["thunderagent_parent_session_id"]) for c in server.generate_calls] == [
+        ("sub-a", "root"),
+        ("sub-b", "root"),
+    ]
+    assert lb.acquire_keys == ["traj-1", "traj-1"]  # the tree stays on the trajectory's frontend
+    assert set(client._session_servers) == {"sub-a", "sub-b"}
+    await client.finalize_program("sub-b")
+    await client.finalize_program("sub-a")
+    assert server.finalize_calls == ["sub-b", "sub-a"]
+
+
+def _make_native_server(parameters: dict | None = None, router_mode: str = "kv") -> DynamoThunderAgentHttpServer:
+    config = {"enabled": True, "native": True}
+    if parameters is not None:
+        config["native_parameters"] = parameters
+    server = _make_http_server(config)
+    server._router_mode = router_mode
+    return server
+
+
+def test_native_thunderagent_configures_the_frontend_plugin_instead_of_a_router_process(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("VERL_DYNAMO_LOG_DIR", str(tmp_path))
+    monkeypatch.setattr(DynamoHttpServer, "_frontend_router_args", lambda _self: ["--kv-cache-block-size", "16"])
+    server = _make_native_server({"pause_threshold": 0.9, "scheduler_interval_seconds": 1})
+
+    args = server._frontend_router_args()
+    server._start_thunderagent()
+
+    assert args[:2] == ["--kv-cache-block-size", "16"]
+    assert args[args.index("--router-session-affinity-mode") + 1] == "soft"
+    policy = yaml.safe_load(Path(args[args.index("--router-policy-config") + 1]).read_text())
+    assert policy == {
+        "request_classifier": {
+            "type": "thunderagent",
+            "parameters": {"pause_threshold": 0.9, "scheduler_interval_seconds": 1},
+        },
+        "worker_selection": {
+            "aggregated": "thunderagent",
+            "instances": [{"name": "thunderagent", "type": "thunderagent"}],
+        },
+    }
+    assert server._thunderagent_process is None
+
+
+def test_native_thunderagent_requires_the_kv_router() -> None:
+    with pytest.raises(ValueError, match="router_mode=kv"):
+        _make_native_server(router_mode="round-robin")._validate_thunderagent_router_mode()
+    _make_native_server()._validate_thunderagent_router_mode()
+    _make_http_server()._validate_thunderagent_router_mode()
+
+
+def test_native_thunderagent_workers_keep_the_public_model_name(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(
+        DynamoHttpServer,
+        "_build_vllm_cmd",
+        lambda _self, model, _tp, kv_events_config_json=None: calls.append(model) or ["python", "-m", "dynamo.vllm"],
+    )
+
+    command = _make_native_server()._build_vllm_cmd("test-model", 1, "{}")
+
+    assert calls == ["test-model"]
+    assert command[-2:] == ["--block-size", "16"]
+
+
+def test_native_thunderagent_final_request_may_complete_on_a_worker() -> None:
+    body = json.dumps({"choices": [{"text": "x"}]})
+    _make_native_server()._validate_final_response(200, body)
+    with pytest.raises(RuntimeError, match="reached a model worker"):
+        _make_http_server()._validate_final_response(200, body)
+    with pytest.raises(RuntimeError, match="status=503"):
+        _make_native_server()._validate_final_response(503, "")
+
+
+def test_native_thunderagent_frontend_options_are_accepted_by_dynamo_parser(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("VERL_DYNAMO_LOG_DIR", str(tmp_path))
+    server = _make_native_server()
+    _check_installed_dynamo_parser("dynamo.frontend.main", ["--router-mode", "kv", *server._frontend_router_args()])
+
+
+@pytest.mark.asyncio
+async def test_health_probe_waits_for_the_completions_route(monkeypatch) -> None:
+    server = _make_native_server()
+    attempts = []
+
+    async def finalize(session_id):
+        attempts.append(session_id)
+        if len(attempts) < 3:
+            raise dynamo_thunderagent.FinalRequestError(404, "")
+
+    async def no_sleep(_seconds):
+        pass
+
+    monkeypatch.setattr(server, "finalize_program", finalize)
+    monkeypatch.setattr(dynamo_thunderagent.asyncio, "sleep", no_sleep)
+
+    await server._probe_final_request()
+    assert len(attempts) == 3
+
+    async def unavailable(_session_id):
+        raise dynamo_thunderagent.FinalRequestError(503, "")
+
+    monkeypatch.setattr(server, "finalize_program", unavailable)
+    with pytest.raises(dynamo_thunderagent.FinalRequestError, match="status=503"):
+        await server._probe_final_request()  # anything but a 404 is raised at once
