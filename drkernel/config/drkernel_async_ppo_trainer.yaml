@@ -1,0 +1,60 @@
+# Copyright (c) 2026, HUAWEI CORPORATION. All rights reserved.
+
+# DR.Kernel-flavored fully-async PPO trainer config.
+#
+# Extends `fully_async_ppo_trainer.yaml` (from verl/experimental/fully_async_policy/config/)
+# and adds the `algorithm.batch_filter` sub-tree consumed by the
+# `_fit_filter_batch` hook in fully_async_trainer.
+#
+# Default: filter is DISABLED. Flip `enable: True` to turn on MRS.
+
+hydra:
+  searchpath:
+    - pkg://verl.trainer.config
+    - pkg://verl.experimental.fully_async_policy.config
+
+defaults:
+  - fully_async_ppo_trainer
+  - _self_
+
+algorithm:
+  # DR.Kernel multi-turn rejection sampling (MRS) batch filter.
+  # See recipe/drkernel/filters/README.md for stage-by-stage description.
+  batch_filter:
+    # Master switch. When False, the trainer hook is a no-op and no filter
+    # pipeline is constructed. Default off so this yaml can be used as a
+    # straight drop-in for fully_async_ppo_trainer with zero behavior change.
+    enable: False
+
+    # Stage 3 sample-selection strategy within a group.
+    # Options: "uniform", "efficiency", "efficiency_stochastic".
+    sample_selection_strategy: efficiency_stochastic
+
+    # Group sizing. target_group_size should match `actor_rollout_ref.rollout.n`.
+    # min_group_size: null auto-resolves to target_group_size // 2 + 1.
+    # target_num_groups: null disables the across-groups complete-group
+    # prioritization (i.e., keep all valid groups).
+    target_group_size: 8
+    min_group_size: null
+    target_num_groups: null
+
+    # Stage 1 group-level filters.
+    reject_low_variance_groups: True
+    max_response_length: null   # null = no over-length group rejection
+    remove_clip: False
+    min_rollout_n: null
+
+    # Stage 2 individual-sample filter.
+    reward_threshold: null      # null = keep all samples regardless of reward
+
+    # Stage 0 two-gate precision filter (off by default — verl's bypass_mode
+    # already covers most of this on the rollout-correction side).
+    enable_two_gate_filter: False
+    gate1_enabled: True
+    gate1_bias_epsilon: 0.01
+    gate2_enabled: True
+    gate2_instability_threshold: -15.0
+
+    # Logging.
+    save_metrics: True
+    log_rejection_reasons: False

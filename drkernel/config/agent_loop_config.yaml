@@ -1,0 +1,83 @@
+# Copyright (c) 2026, HUAWEI CORPORATION. All rights reserved.
+
+# Agent-loop registry entries for the DR.Kernel multi-turn loop.
+#
+# Loaded by `verl.experimental.agent_loop.agent_loop.AgentLoopWorker.__init__`
+# (lines 508-513) when `actor_rollout_ref.rollout.agent.agent_loop_config_path`
+# points here. Each entry is an OmegaConf node that Hydra later
+# instantiates via `hydra.utils.instantiate(config=entry, ...)` — so the
+# `_target_` field is what binds the registry name to a Python class.
+# Extra fields below (`prompt_config_path`, `kernel_eval`) are passed
+# through as kwargs to `KernelAgentLoop.__init__`.
+#
+# Using `_target_` instead of `@register("kernel_agent")` means we do
+# *not* need our recipe module imported inside the rollouter Ray actor
+# process; Hydra resolves the dotted path on demand.
+#
+# Why these fields live HERE rather than under `actor_rollout_ref.rollout.multi_turn`:
+#   `multi_turn` is a strict dataclass (`MultiTurnConfig`) that rejects
+#   any field not predeclared in the dataclass. This YAML, by contrast,
+#   is a free-form DictConfig — adding fields is safe.
+#
+# `server_url`: leave null and let the launch script's
+# `KERNELGYM_SERVER_URL` env var take effect at runtime, OR set it
+# explicitly via Hydra CLI override at launch (see the launcher script).
+
+- name: kernel_agent
+  _target_: recipe.drkernel.agent.kernel_agent_loop.KernelAgentLoop
+  prompt_config_path: recipe/drkernel/config/prompt_config/multi_turn_kernel.yaml
+  kernel_eval:
+    enabled: True
+    server_url: null         # falls back to env KERNELGYM_SERVER_URL
+    task_timeout: 600
+    client_timeout: 1200
+    # Eval payload knobs — defaults match the reward-path client
+    # (`recipe.drkernel.rewards.reward_client.KernelRewardClient`,
+    # `reward_client.py:621-636`) so the per-turn feedback uses the
+    # same payload as the training reward. Setting num_perf_trials=0
+    # used to violate the server's `EvaluationRequest` validator
+    # (`Field(default=100, ge=1, le=1000)`) and produce HTTP 400 on
+    # every turn.
+    num_correct_trials: 5
+    num_perf_trials: 100
+    enable_profiling: True
+    verbose_errors: True
+    detect_decoy_kernel: True
+    # KernelGym evaluation toolkit ("kernelbench" | "sandbox_v3"). Keep in
+    # sync with the trainer YAML's reward_kwargs.toolkit so per-turn feedback
+    # matches the training reward. The `KERNELGYM_TOOLKIT` env var (set by
+    # the launcher script) wins over yaml — same pattern as feedback_mode.
+    toolkit: kernelbench
+    # Feedback rendering for the user message between turns:
+    #   full_json (default) — JSON-dump the full result dict, mirroring
+    #     the original DR.Kernel pipeline
+    #     (`vllm_async_engine.py:1750` for the 8b/14b runs, which use
+    #     `MultiTurnAsyncvLLMEngine`).
+    #   drop_keys — same as full_json but strips `feedback_drop_keys`
+    #     from the JSON. Use to trim verbose IDs/timestamps/coverage
+    #     internals that bloat the prompt without informing the next
+    #     turn.
+    #   summary — legacy compact key:value form (status/compiled/
+    #     correctness/[speedup]/[error]); kept for ablations only.
+    #
+    # Both `feedback_mode` and `feedback_drop_keys` can be overridden
+    # per-run from the launcher script via env vars
+    # `KERNELGYM_FEEDBACK_MODE` and `KERNELGYM_FEEDBACK_DROP_KEYS`
+    # (comma-separated). Env vars win over this yaml — same pattern
+    # as `KERNELGYM_SERVER_URL` above. (This yaml is loaded by
+    # `OmegaConf.load` directly, not Hydra-composed, so Hydra CLI
+    # overrides cannot reach these fields.)
+    feedback_mode: full_json
+    # Keys to strip from the model-facing feedback dict when
+    # `feedback_mode == drop_keys`. Empty list → use the built-in
+    # default in `recipe/drkernel/agent/kernel_eval.py::_FEEDBACK_DROP_KEYS`.
+    feedback_drop_keys: []
+    # When True, the dict that gets JSON-dumped into `{feedback}` is
+    # passed through `KernelRewardSummarizer.summarize` first — same
+    # `_merge_reward_result(reward_func(raw))` step the reward path
+    # applies (`reward_client.py:735-739`). This is what makes the
+    # per-turn feedback byte-identical to the original `env_state`,
+    # including the derived `reward`, `score`, `num_custom_kernel`,
+    # `num_total_kernels`, `*_in_profiling_us`, `success` fields.
+    # Set False to send only the raw /results JSON between turns.
+    merge_reward_summary: True
