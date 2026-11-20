@@ -379,11 +379,9 @@ class AsyncFlowGRPOTrainer(RayPPOTrainer):
             timing_wg_metrics = timing_wg_metrics[_version]
         timing_metrics_aggregated = reduce_timing_metrics(timing_wg_metrics)
         total_gpus = self.worker_ngpus + self.resource_pool_manager.get_n_gpus()
+        timing_metrics_aggregated.update({"perf/throughput": timing_metrics_aggregated["perf/throughput"] / total_gpus})
         timing_metrics_aggregated.update(
-            {"perf/throughtput": timing_metrics_aggregated["perf/throughtput"] / total_gpus}
-        )
-        timing_metrics_aggregated.update(
-            {"compute/throughtput": timing_metrics_aggregated["compute/throughtput"] / total_gpus}
+            {"compute/throughput": timing_metrics_aggregated["compute/throughput"] / total_gpus}
         )
         self.logger_tracking.log(data=timing_metrics_aggregated, step=self.global_steps)
 
