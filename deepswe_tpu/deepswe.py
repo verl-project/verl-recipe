@@ -25,7 +25,7 @@ import os
 from typing import Any
 
 from tensordict import TensorDict
-from uni_agent.sandbox.gke_agent_sandbox import GKEAgentSandbox
+from uni_agent.sandbox.gke import GKEAgentSandbox
 from uni_agent.tasks import TaskConfigResolver
 
 from verl.trainer.ppo.v1.trainer_base import TRAINER_REGISTRY, PPOTrainer
