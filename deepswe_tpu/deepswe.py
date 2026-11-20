@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import logging
 import os
-import uuid
 from typing import Any
 
 from tensordict import TensorDict
@@ -158,10 +157,9 @@ class _DeepSWESandboxLookaheadMixin:
         else:
             batch = self._raw_next_train_batch(num_prompts)
             if lookahead is not None:
-                # A batch of another size bypasses the lookahead; warm it now. Its pools stay until training ends.
-                batch_id = f"partial_{self.global_steps}_{uuid.uuid4().hex[:6]}"
-                self._warm_pools.start(batch_id, self._train_sandbox_requests(batch))
-                self._warm_pools.wait(batch_id)
+                # A batch of another size bypasses the lookahead, such as the async trainer's warm-up batches, which
+                # arrive as one batch several steps long. Warm it now; it is released like any other batch.
+                lookahead.warm_now(batch, num_prompts / train_batch_size)
         tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
         return batch
 

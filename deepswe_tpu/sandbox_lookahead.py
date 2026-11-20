@@ -171,8 +171,9 @@ class WarmPools:
 class LookaheadBatches:
     """Hand out training batches whose sandboxes are warm, while the next batch's warm in the background.
 
-    ``fetch`` returns the next batch and ``requests_of`` the pools it needs. Call :meth:`finish_oldest` once the
-    rollouts of the oldest batch handed out are complete.
+    ``fetch`` returns the next batch and ``requests_of`` the pools it needs. Batches are trained on in the order they
+    were handed out, so call :meth:`finish_oldest` once per training step, when its rollouts have been sampled: it
+    releases the pools of the oldest batch once every step that batch feeds has been sampled.
     """
 
     def __init__(
@@ -183,7 +184,7 @@ class LookaheadBatches:
         self._pools = pools
         self._count = 0
         self._ahead: tuple[str, Any] | None = None
-        self._handed_out: collections.deque[str] = collections.deque()
+        self._handed_out: collections.deque[list[Any]] = collections.deque()  # [batch id, training steps left]
 
     def _fetch_ahead(self) -> None:
         self._count += 1
@@ -202,11 +203,27 @@ class LookaheadBatches:
         """Return the batch that was warmed ahead and start warming the one after it."""
         self.prime()
         batch_id, batch = self._ahead
-        self._handed_out.append(batch_id)
+        self._handed_out.append([batch_id, 1.0])
         self._fetch_ahead()
         return batch
 
+    def warm_now(self, batch: Any, steps: float) -> None:
+        """Warm a batch that was fetched outside the lookahead and feeds ``steps`` training steps.
+
+        The async trainer fetches its warm-up batches this way, as one batch several steps long.
+        """
+        self._count += 1
+        batch_id = f"extra_{self._count}"
+        self._pools.start(batch_id, self._requests_of(batch))
+        self._pools.wait(batch_id)
+        self._handed_out.append([batch_id, steps])
+
     def finish_oldest(self) -> None:
-        """Release the pools of the oldest batch handed out."""
-        if self._handed_out:
-            self._pools.finish(self._handed_out.popleft())
+        """Count one sampled training step against the oldest batch handed out; release its pools when it is used up."""
+        if not self._handed_out:
+            return
+        oldest = self._handed_out[0]
+        oldest[1] -= 1
+        if oldest[1] <= 0:
+            self._handed_out.popleft()
+            self._pools.finish(oldest[0])
