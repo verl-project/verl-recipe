@@ -23,6 +23,9 @@ Example::
         --num-train 700 \
         --num-eval 100 \
         --seed 42
+
+Instances listed in ``excluded_instances.txt`` (next to this file) are left out: their gold patch does not
+reliably pass the dataset's own tests in a sandbox without network access. ``--exclude-file ''`` keeps them.
 """
 
 from __future__ import annotations
@@ -33,6 +36,7 @@ import os
 import random
 from collections import Counter
 from collections.abc import Collection, Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 from datasets import Dataset, load_dataset
@@ -43,6 +47,7 @@ DEFAULT_SPLIT = "train"
 DEFAULT_NUM_TRAIN = 700
 DEFAULT_NUM_EVAL = 100
 DEFAULT_SEED = 42
+DEFAULT_EXCLUDE_FILE = Path(__file__).with_name("excluded_instances.txt")
 
 
 def _parse_expected_output(value: Any) -> str | None:
@@ -103,6 +108,14 @@ def format_r2e_gym_row(example: Mapping[str, Any], *, data_source: str) -> dict[
     }
 
 
+def load_excluded_instance_ids(path: str | os.PathLike[str] | None) -> frozenset[str]:
+    """Read instance ids to leave out: one per line, ``#`` starts a comment. ``None`` or ``''`` means none."""
+    if not path:
+        return frozenset()
+    ids = (line.split("#", 1)[0].strip() for line in Path(path).read_text(encoding="utf-8").splitlines())
+    return frozenset(instance_id for instance_id in ids if instance_id)
+
+
 def _row_identity(row: Mapping[str, Any]) -> tuple[str, str]:
     task = row["extra_info"]["tools_kwargs"]["task"]
     return str(task["metadata"]["instance_id"]), str(task["sandbox"]["image"])
@@ -120,8 +133,13 @@ def select_train_eval_splits(
     num_eval: int = DEFAULT_NUM_EVAL,
     seed: int = DEFAULT_SEED,
     repos: Collection[str] | None = None,
+    exclude_ids: Collection[str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Filter, deduplicate, shuffle deterministically, and split into disjoint train/eval lists."""
+    """Filter, deduplicate, shuffle deterministically, and split into disjoint train/eval lists.
+
+    Instances in ``exclude_ids`` are dropped after the shuffle, so a seed keeps its order and the following
+    instances move up to fill the gaps.
+    """
     if num_train < 0 or num_eval < 0:
         raise ValueError(f"num_train and num_eval must be non-negative, got ({num_train}, {num_eval})")
 
@@ -145,19 +163,25 @@ def select_train_eval_splits(
         seen_images.add(docker_image)
         rows.append(row)
 
-    needed = num_train + num_eval
-    if len(rows) < needed:
-        raise ValueError(
-            f"Requested {num_train} train + {num_eval} eval = {needed} non-overlapping examples, "
-            f"but only {len(rows)} valid unique examples are available."
-        )
-
     rng = random.Random(seed)
     indices = list(range(len(rows)))
     rng.shuffle(indices)
 
-    train_rows = [rows[i] for i in indices[:num_train]]
-    eval_rows = [rows[i] for i in indices[num_train:needed]]
+    excluded = frozenset(exclude_ids or ())
+    kept = [rows[i] for i in indices if _row_identity(rows[i])[0] not in excluded]
+    num_excluded = len(rows) - len(kept)
+    if num_excluded:
+        print(f"Left out {num_excluded} excluded instances ({len(kept)} of {len(rows)} remain)", flush=True)
+
+    needed = num_train + num_eval
+    if len(kept) < needed:
+        raise ValueError(
+            f"Requested {num_train} train + {num_eval} eval = {needed} non-overlapping examples, "
+            f"but only {len(kept)} valid unique examples are available ({num_excluded} excluded)."
+        )
+
+    train_rows = kept[:num_train]
+    eval_rows = kept[num_train:needed]
 
     train_ids = {_row_identity(r)[0] for r in train_rows}
     eval_ids = {_row_identity(r)[0] for r in eval_rows}
@@ -176,6 +200,7 @@ def prepare_r2e_gym_datasets(
     num_eval: int = DEFAULT_NUM_EVAL,
     seed: int = DEFAULT_SEED,
     repos: Collection[str] | None = None,
+    exclude_ids: Collection[str] | None = None,
 ) -> tuple[Dataset, Dataset]:
     """Load an R2E-Gym dataset from Hugging Face and build disjoint train/eval ``Dataset`` splits."""
     print(f"Loading {data_source} (split={split!r}) from Hugging Face...", flush=True)
@@ -189,6 +214,7 @@ def prepare_r2e_gym_datasets(
         num_eval=num_eval,
         seed=seed,
         repos=repos,
+        exclude_ids=exclude_ids,
     )
     return Dataset.from_list(train_rows), Dataset.from_list(eval_rows)
 
@@ -241,6 +267,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Optional comma-separated list of repo names to include (e.g. 'numpy,pandas,pillow').",
     )
     parser.add_argument(
+        "--exclude-file",
+        default=str(DEFAULT_EXCLUDE_FILE),
+        help="File of instance ids to leave out, one per line (default: excluded_instances.txt next to this "
+        "script). Pass '' to keep every instance.",
+    )
+    parser.add_argument(
         "--train-filename",
         default="train.parquet",
         help="Output filename for the training split (default: train.parquet).",
@@ -267,6 +299,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         num_eval=args.num_eval,
         seed=args.seed,
         repos=repos,
+        exclude_ids=load_excluded_instance_ids(args.exclude_file),
     )
 
     train_path = os.path.join(save_dir, args.train_filename)
