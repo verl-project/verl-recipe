@@ -1,4 +1,4 @@
-# Task Config for the 64k Qwen3.5-397B DeepSWE TPU recipe: R2E-Gym tasks solved by a ReAct agent in GKE Agent Sandbox pods (max_steps: 60).
+# Task Config for the 64k Qwen3.5-397B DeepSWE TPU recipe: R2E-Gym tasks solved by a ReAct agent in GKE Agent Sandbox pods (max_steps: 50).
 #
 # The launcher passes this file to uni-agent as `task_config_path` (override with TASK_CONFIG). Every Ray node
 # reads it, so a copy you point TASK_CONFIG at must exist at the same path on all of them.
@@ -15,11 +15,11 @@
     #   network_policy_management: Unmanaged
   agent:
     name: react
-    max_steps: 60
+    max_steps: 50
     tools:
       - name: str_replace_editor
       - name: stateful_shell
-        command_timeout: 120
+        command_timeout: 60
         env_vars:
           PAGER: "cat"
           GIT_PAGER: "cat"
