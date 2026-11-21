@@ -31,13 +31,10 @@ import shutil
 import tempfile
 import time
 import uuid
-from typing import Any, Optional
+from typing import Optional
 
-import numpy as np
 import torch
 from omegaconf import DictConfig, OmegaConf
-from tensordict import TensorDict
-
 from recipe.swe_agent.config import (
     SWEAgentRuntimeConfig,
     apply_data_overrides,
@@ -76,11 +73,7 @@ async def initialize_llm_servers(
         * rollout_config.data_parallel_size
         * rollout_config.pipeline_model_parallel_size
     )
-    world_size = (
-        worker_group.world_size
-        if worker_group
-        else rollout_config.n_gpus_per_node * rollout_config.nnodes
-    )
+    world_size = worker_group.world_size if worker_group else rollout_config.n_gpus_per_node * rollout_config.nnodes
     num_replicas = world_size // rollout_world_size
 
     rollout_replicas = [
@@ -96,9 +89,7 @@ async def initialize_llm_servers(
     if worker_group and rollout_config.name != "trtllm":
         await asyncio.gather(*[r.init_hybrid(worker_group) for r in rollout_replicas])
     elif worker_group and rollout_config.name == "trtllm":
-        await asyncio.gather(
-            *[r.init_hybrid_colocated(worker_group, rollout_resource_pool) for r in rollout_replicas]
-        )
+        await asyncio.gather(*[r.init_hybrid_colocated(worker_group, rollout_resource_pool) for r in rollout_replicas])
     else:
         await asyncio.gather(*[r.init_standalone() for r in rollout_replicas])
 
@@ -114,9 +105,7 @@ async def initialize_llm_servers(
 
 
 class SWEAgentFramework(OpenAICompatibleAgentFramework):
-    """SWE-Agent framework backed by the agent gateway.
-
-    """
+    """SWE-Agent framework backed by the agent gateway."""
 
     def __init__(
         self,
@@ -137,7 +126,6 @@ class SWEAgentFramework(OpenAICompatibleAgentFramework):
         self.rollout_replicas = rollout_replicas
         self._max_model_len = max_model_len
 
-
     @classmethod
     @auto_await
     async def create(
@@ -147,7 +135,7 @@ class SWEAgentFramework(OpenAICompatibleAgentFramework):
         rollout_resource_pool=None,
         reward_loop_worker_handles=None,
         teacher_model_manager=None,
-    ) -> "SWEAgentFramework":
+    ) -> SWEAgentFramework:
         """Initialise LLM servers then construct the framework."""
         rollout_config, model_config = _get_rollout_and_model_config(config)
 
@@ -156,6 +144,7 @@ class SWEAgentFramework(OpenAICompatibleAgentFramework):
         )
 
         from transformers import AutoTokenizer
+
         tokenizer = AutoTokenizer.from_pretrained(model_config.path, trust_remote_code=True)
 
         load_balancer = GlobalRequestLoadBalancer.remote(
@@ -168,9 +157,11 @@ class SWEAgentFramework(OpenAICompatibleAgentFramework):
         servers = list(zip(server_addresses, server_handles, strict=True))
 
         from transformers import AutoTokenizer
+
         tokenizer = AutoTokenizer.from_pretrained(model_config.path, trust_remote_code=True)
 
         from verl.agent.gateway.runtime import GatewayServingRuntime
+
         session_runtime = GatewayServingRuntime(
             servers,
             load_balancer,
@@ -214,7 +205,6 @@ class SWEAgentFramework(OpenAICompatibleAgentFramework):
         import inspect
         from dataclasses import replace as dc_replace
 
-        import torch
         from tensordict.tensorclass import NonTensorData, NonTensorStack
 
         from verl.utils import tensordict_utils as tu
