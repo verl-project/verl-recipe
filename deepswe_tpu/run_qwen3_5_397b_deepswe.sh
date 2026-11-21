@@ -3,7 +3,7 @@
 #
 # Defaults match our validated 384-chip TPU v7x run (32 hosts / 128 chips / 256 TensorCores trainer with
 # TP=1, CP=4 Ulysses, DP_shard=64, EP=8, static RoE dispatcher, 8 token chunks, paired grouped MM, bf16 params +
-# fp32 masters + CPU optimizer offload; 64 x 2x2x1 rollout replicas = 256 chips / 512 TensorCores with on-load
+# fp32 masters + CPU optimizer offload, bf16 gradient reduce-scatter; 64 x 2x2x1 rollout replicas = 256 chips / 512 TensorCores with on-load
 # online FP8 MoE quantization and dummy weight load), 64k context (8k prompt + 56k response), RLOO, wait off-policy,
 # lookahead sandbox warming, and 0.992_1.008 rollout correction band.
 #
@@ -32,6 +32,9 @@ export USE_KL_LOSS="${USE_KL_LOSS:-False}"
 # Trainer memory & EP compute
 export PARAM_DTYPE="${PARAM_DTYPE:-bfloat16}"
 export FP32_MASTER="${FP32_MASTER:-True}"
+# dtype of the FSDP gradient reduce-scatter. The parameters are bf16 already (the fp32 masters stay on the host), so
+# bf16 halves the reduce-scatter traffic across the DP shards; set float32 for torchtitan's default.
+MIXED_PRECISION_REDUCE="${MIXED_PRECISION_REDUCE:-bfloat16}"
 export OPTIMIZER_HOST_OFFLOAD="${OPTIMIZER_HOST_OFFLOAD:-True}"
 export OPTIM_IMPL="${OPTIM_IMPL:-fused}"
 export EP_DISPATCHER="${EP_DISPATCHER:-static}"
@@ -55,7 +58,10 @@ export ROLLOUT_TENSOR_PARALLEL_SIZE="${ROLLOUT_TENSOR_PARALLEL_SIZE:-8}"
 export ROLLOUT_EXPERT_PARALLEL_SIZE="${ROLLOUT_EXPERT_PARALLEL_SIZE:-8}"
 export ROLLOUT_LOAD_FORMAT="${ROLLOUT_LOAD_FORMAT:-dummy}"
 export QUANTIZE_ON_LOAD_PREFIXES="${QUANTIZE_ON_LOAD_PREFIXES:-experts}"
-export VLLM_RAY_EXTRA_ENV_VARS_TO_COPY="${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY:-QUANTIZE_ON_LOAD_PREFIXES}"
+# vllm-torchtpu quantizes the experts to FP8 at load time in fp32 chunks of this many bytes (its default is 1 GiB).
+# On a one-host 2x2x1 replica that default leaves almost no HBM headroom at startup, so use 256 MiB chunks.
+export TPU_MOE_REQUANT_CHUNK_BYTES="${TPU_MOE_REQUANT_CHUNK_BYTES:-268435456}"
+export VLLM_RAY_EXTRA_ENV_VARS_TO_COPY="${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY:-QUANTIZE_ON_LOAD_PREFIXES,TPU_MOE_REQUANT_CHUNK_BYTES}"
 export ROLLOUT_FP8_MOE="${ROLLOUT_FP8_MOE:-True}"
 
 # 64k context window (8k prompt + 56k response) & static compiled micro-batch shape
@@ -63,8 +69,14 @@ export MAX_PROMPT_LEN="${MAX_PROMPT_LEN:-8192}"
 export MAX_RESPONSE_LEN="${MAX_RESPONSE_LEN:-57344}"
 export MAX_MODEL_LEN="${MAX_MODEL_LEN:-65536}"
 export MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-1}"
-export MAX_TOKEN_LEN_PER_DEVICE="${MAX_TOKEN_LEN_PER_DEVICE:-$((MICRO_BATCH_SIZE * MAX_MODEL_LEN))}"
-export STATIC_MICRO_BATCH_LEN="${STATIC_MICRO_BATCH_LEN-${MAX_TOKEN_LEN_PER_DEVICE}}"
+# With USE_DYNAMIC_BSZ=True a micro-batch is packed up to MAX_TOKEN_LEN_PER_DEVICE x TP x CP tokens, so the per-device
+# budget is divided by TP x CP to keep a micro-batch at MICRO_BATCH_SIZE full-length sequences (the compiled shape).
+if [[ "${USE_DYNAMIC_BSZ,,}" == "true" ]]; then
+  export MAX_TOKEN_LEN_PER_DEVICE="${MAX_TOKEN_LEN_PER_DEVICE:-$((MICRO_BATCH_SIZE * MAX_MODEL_LEN / (TENSOR_PARALLEL_SIZE * CONTEXT_PARALLEL_SIZE)))}"
+else
+  export MAX_TOKEN_LEN_PER_DEVICE="${MAX_TOKEN_LEN_PER_DEVICE:-$((MICRO_BATCH_SIZE * MAX_MODEL_LEN))}"
+fi
+export STATIC_MICRO_BATCH_LEN="${STATIC_MICRO_BATCH_LEN-$((MICRO_BATCH_SIZE * MAX_MODEL_LEN))}"
 export STATIC_MAX_RESPONSE_LEN="${STATIC_MAX_RESPONSE_LEN-${MAX_RESPONSE_LEN}}"
 export PAD_TO_LENGTH_BUCKET="${PAD_TO_LENGTH_BUCKET:-4096}"
 
@@ -103,6 +115,12 @@ export ADV_ESTIMATOR="${ADV_ESTIMATOR:-rloo}"
 export ROLLOUT_IS="${ROLLOUT_IS:-null}"
 export ROLLOUT_RS="${ROLLOUT_RS:-seq_mean_k1}"
 export ROLLOUT_RS_THRESHOLD="${ROLLOUT_RS_THRESHOLD:-0.992_1.008}"
+# BYPASS_MODE=False (default): decoupled PPO, the trainer recomputes old_log_prob with a forward-only pass.
+# BYPASS_MODE=True: the rollout's own log-probs are used as old_log_prob, which skips that pass.
+BYPASS_MODE="${BYPASS_MODE:-False}"
+# Optional, BYPASS_MODE=False only: static micro-batch length in tokens for the forward-only old_log_prob pass
+# (for example 131072, twice the training micro-batch). Empty uses STATIC_MICRO_BATCH_LEN.
+STATIC_LOG_PROB_MICRO_BATCH_LEN="${STATIC_LOG_PROB_MICRO_BATCH_LEN:-}"
 
 # Agent & sandbox concurrency (1024 concurrent R2E-Gym trajectories = 64 x 16)
 export TASK_CONFIG="${TASK_CONFIG:-${SCRIPT_DIR}/task_config_64k.yaml}"
@@ -110,12 +128,28 @@ export GATEWAY_COUNT="${GATEWAY_COUNT:-16}"
 export CONCURRENCY="${CONCURRENCY:-1024}"
 export MASK_UNFINISHED_EPISODE="${MASK_UNFINISHED_EPISODE:-False}"
 
+# These come after the overrides of run_qwen3_5_35b_deepswe.sh on the command line, so they take precedence.
+MODE_OVERRIDES=()
+if [[ "${BYPASS_MODE,,}" == "true" ]]; then
+  MODE_OVERRIDES+=(
+    "algorithm.rollout_correction.bypass_mode=True"
+    "actor_rollout_ref.actor.policy_loss.loss_mode=bypass_mode"
+  )
+elif [[ -n "${STATIC_LOG_PROB_MICRO_BATCH_LEN}" ]]; then
+  MODE_OVERRIDES+=(
+    "++actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.static_log_prob_micro_batch_len=${STATIC_LOG_PROB_MICRO_BATCH_LEN}"
+  )
+fi
+
 exec bash "${SCRIPT_DIR}/run_qwen3_5_35b_deepswe.sh" \
   "++actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.rollout_fp8_moe=${ROLLOUT_FP8_MOE}" \
+  "++actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.mixed_precision_reduce=${MIXED_PRECISION_REDUCE}" \
   "actor_rollout_ref.actor.optim.clip_grad=${CLIP_GRAD}" \
   "actor_rollout_ref.rollout.top_k=-1" \
   "actor_rollout_ref.rollout.val_kwargs.top_k=-1" \
   "++actor_rollout_ref.rollout.engine_kwargs.vllm.max_logprobs=0" \
   "++ray_kwargs.ray_init.runtime_env.env_vars.QUANTIZE_ON_LOAD_PREFIXES='${QUANTIZE_ON_LOAD_PREFIXES}'" \
+  "++ray_kwargs.ray_init.runtime_env.env_vars.TPU_MOE_REQUANT_CHUNK_BYTES='${TPU_MOE_REQUANT_CHUNK_BYTES}'" \
   "++ray_kwargs.ray_init.runtime_env.env_vars.VLLM_RAY_EXTRA_ENV_VARS_TO_COPY='${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY}'" \
+  ${MODE_OVERRIDES[@]+"${MODE_OVERRIDES[@]}"} \
   "$@"
