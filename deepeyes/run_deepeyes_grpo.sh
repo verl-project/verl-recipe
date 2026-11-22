@@ -15,6 +15,9 @@ DATASET_VAL=${BASEDIR}/dataset/val.parquet
 
 REF_MODEL_PATH=ref_model_path
 
+# Select normalized-coordinate cropping explicitly; keep the existing pixel-coordinate default.
+TOOL_CONFIG_PATH=${TOOL_CONFIG_PATH:-recipe/deepeyes/configs/image_zoom_in_tool_config.yaml}
+
 PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
     --config-path=${BASEDIR}/recipe/deepeyes/configs \
     --config-name='deepeyes_multiturn_grpo' \
@@ -57,7 +60,7 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.multi_turn.max_assistant_turns=5 \
     actor_rollout_ref.rollout.multi_turn.max_user_turns=5 \
     actor_rollout_ref.rollout.multi_turn.max_parallel_calls=1 \
-    actor_rollout_ref.rollout.multi_turn.tool_config_path=recipe/deepeyes/configs/image_zoom_in_tool_config.yaml \
+    actor_rollout_ref.rollout.multi_turn.tool_config_path="${TOOL_CONFIG_PATH}" \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb','tensorboard'] \
     trainer.val_before_train=False \
