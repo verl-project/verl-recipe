@@ -320,7 +320,15 @@ def compute_score(data_source: str, solution_str: str, ground_truth: str, extra_
     )
 
     # Tool reward: only give if tools were used AND answer is correct
-    tool_reward = 1.0 if has_tool_usage and acc_reward > 0.5 else 0.0
+    # A call tag also appears when execution fails. Only count the crop tool's
+    # success response, not a success phrase quoted in the assistant answer.
+    tool_success = False
+    for tool_response in re.findall(r"<tool_response>(.*?)</tool_response>", solution_str, re.DOTALL):
+        response_text = re.sub(r"<\|(?:vision_start|image_pad|vision_end)\|>", "", tool_response).strip()
+        if response_text.startswith("Zoomed in on the image to the region "):
+            tool_success = True
+            break
+    tool_reward = 1.0 if tool_success and acc_reward > 0.5 else 0.0
 
     # Format reward: penalty for format errors
     format_reward = -1.0 if is_format_error else 0.0
