@@ -1,0 +1,72 @@
+# R2E-Gym instances that prepare_data.py leaves out of the train/eval splits.
+#
+# For these instances the dataset's own gold patch does not reliably reproduce the expected test results in a
+# GKEAgentSandbox pod without network access, so a correct fix would not be rewarded. They were found by oracle
+# verification of all 4,578 instances of R2E-Gym/R2E-Gym-Subset, three passes each: apply the gold patch, run
+# the image's tests, compare with expected_output_json. An instance is listed if any pass did not match.
+#
+# One instance id per line; '#' starts a comment. Pass --exclude-file '' to prepare_data.py to keep every instance.
+
+# Tests download from or connect to hosts on the internet. (16)
+datalad__0174e66d85
+datalad__0498f37231
+datalad__07b952ca7c
+datalad__2cd755fec5
+datalad__4484ab9ed8
+datalad__dcad257988
+orange3__2b857a37ba
+orange3__41bb6d7be5
+orange3__62a7605ba4
+orange3__6f25bda8b1
+pandas__0a18ad7eb6
+pandas__3adfcff164
+pandas__72a10906bf
+pandas__7aab3b4b6a
+pandas__eeff2b0c3b
+pandas__f9248f0de2
+
+# Tests need IPv6 loopback (::1), which the sandbox pods do not have. (11)
+tornado__2d5f396407
+tornado__48d8144a03
+tornado__57d15bb285
+tornado__5896bbec44
+tornado__84bb2e285e
+tornado__a42b028ca2
+tornado__b20ca363c7
+tornado__c3c263de0a
+tornado__e704489dd1
+tornado__fa38173fe2
+tornado__fab9550e87
+
+# Tests need real DNS answers. (7)
+tornado__149159d193
+tornado__465e15f354
+tornado__58434a0419
+tornado__da4130b341
+tornado__de39a398fb
+tornado__e366c4490e
+tornado__fffaa2f7f7
+
+# Flaky: the gold patch was verified in only some of the three passes. (8)
+coveragepy__2094909df3
+coveragepy__423fa59632
+numpy__156cd054e0
+numpy__7127cdfb85
+numpy__8066b45451
+numpy__a2b9c2d5b6
+numpy__c3a887e55e
+orange3__86d052baba
+
+# Fails in every pass; cause not identified. (12)
+aiohttp__0415a4ca18
+aiohttp__1c1c0ea353
+aiohttp__306e42d8de
+aiohttp__41968f892d
+aiohttp__43f3e23b1c
+aiohttp__45d6e4f145
+aiohttp__62173bea1e
+aiohttp__7e16dd198e
+aiohttp__af647c3cfc
+coveragepy__016af5f635
+coveragepy__80bfea74c1
+orange3__f813020a9c
