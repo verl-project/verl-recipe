@@ -127,30 +127,30 @@ FROZEN_PARAM_REGEX="${FROZEN_PARAM_REGEX-moe.router.gate}"
 GDN_ROW_SLOT_LEN="${GDN_ROW_SLOT_LEN:-}"
 TPU_SYNC_VERIFY_PARITY="${TPU_SYNC_VERIFY_PARITY:-off}"
 TPU_SYNC_RELEASE_BUFFERS="${TPU_SYNC_RELEASE_BUFFERS:-True}"
-# rloo: leave-one-out baseline, r_i - mean(r_-i), with no std scaling.
-export ADV_ESTIMATOR="${ADV_ESTIMATOR:-rloo}"
-# Rollout correction. The intended modes are the ones added by verl-project/verl#8677:
-#   ROLLOUT_IS=seq_mask_tis ROLLOUT_IS_THRESHOLD=0.998_1.002 ROLLOUT_RS=seq_mean_abs_exp ROLLOUT_RS_THRESHOLD=2.0
-# TODO: make those the defaults once verl#8677 is in verl main. Until then the defaults are what verl main has: no
-# IS weights, and sequence rejection with seq_mean_k1 (lower edge 0.998 for this stack's ~+0.0009 log-prob bias).
-ROLLOUT_IS="${ROLLOUT_IS:-null}"
-ROLLOUT_IS_THRESHOLD="${ROLLOUT_IS_THRESHOLD:-0.998_1.002}"
-ROLLOUT_RS="${ROLLOUT_RS:-seq_mean_k1}"
-ROLLOUT_RS_THRESHOLD="${ROLLOUT_RS_THRESHOLD:-0.998_1.002}"
+# Advantage estimator: rloo (LOO mean, unscaled) or grpo_loo (LOO mean + LOO std scale, registered in deepswe.py).
+export ADV_ESTIMATOR="${ADV_ESTIMATOR:-grpo_loo}"
+# Rollout correction: token-level TIS paired with geometric-mean (seq_mean_k1) and symmetric K2 (seq_mean_k2)
+# sequence rejection. Quote ROLLOUT_RS when non-null so comma-separated filters do not trigger Hydra multirun sweeps.
+ROLLOUT_IS="${ROLLOUT_IS:-token}"
+ROLLOUT_IS_THRESHOLD="${ROLLOUT_IS_THRESHOLD:-5.0}"
+ROLLOUT_RS="${ROLLOUT_RS:-seq_mean_k1,seq_mean_k2}"
+ROLLOUT_RS_THRESHOLD="${ROLLOUT_RS_THRESHOLD:-0.998_1.002,0.25}"
+BYPASS_MODE="${BYPASS_MODE:-False}"
+BYPASS_LOSS_TYPE="${BYPASS_LOSS_TYPE:-reinforce}"
+STATIC_LOG_PROB_MICRO_BATCH_LEN="${STATIC_LOG_PROB_MICRO_BATCH_LEN:-}"
 ROLLOUT_CORRECTION_OVERRIDES=(
   "algorithm.rollout_correction.rollout_is=${ROLLOUT_IS}"
-  "algorithm.rollout_correction.rollout_rs=${ROLLOUT_RS}"
-  "algorithm.rollout_correction.rollout_rs_threshold='${ROLLOUT_RS_THRESHOLD}'"
 )
+if [[ "${ROLLOUT_RS}" == "null" ]]; then
+  ROLLOUT_CORRECTION_OVERRIDES+=("algorithm.rollout_correction.rollout_rs=null")
+else
+  ROLLOUT_CORRECTION_OVERRIDES+=(
+    "algorithm.rollout_correction.rollout_rs='${ROLLOUT_RS}'"
+    "algorithm.rollout_correction.rollout_rs_threshold='${ROLLOUT_RS_THRESHOLD}'"
+  )
+fi
 if [[ "${ROLLOUT_IS}" != "null" ]]; then
   ROLLOUT_CORRECTION_OVERRIDES+=("algorithm.rollout_correction.rollout_is_threshold='${ROLLOUT_IS_THRESHOLD}'")
-fi
-# seq_mask_tis / seq_mean_abs_exp come with verl-project/verl#8677; fail here rather than at step 1 without it.
-if [[ "${ROLLOUT_IS}" == "seq_mask_tis" || "${ROLLOUT_RS}" == "seq_mean_abs_exp" ]] &&
-  ! grep -q "seq_mask_tis" "${VERL_ROOT}/verl/trainer/ppo/rollout_corr_helper.py"; then
-  echo "ERROR: ${VERL_ROOT} has no seq_mask_tis / seq_mean_abs_exp rollout correction (verl-project/verl#8677)." \
-    "Use a verl main that includes it, or set ROLLOUT_IS / ROLLOUT_RS to modes this checkout supports." >&2
-  exit 1
 fi
 
 # Agent, tools, prompt and sandbox options (image mirror, network policy mode): see the file. Every Ray node reads it.
@@ -237,12 +237,27 @@ if [[ -n "${GDN_ROW_SLOT_LEN}" ]]; then
   OPTIMIZATION_OVERRIDES+=("++actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.gdn_row_slot_len=${GDN_ROW_SLOT_LEN}")
 fi
 
+MODE_OVERRIDES=(
+  "algorithm.rollout_correction.bypass_mode=False"
+  "actor_rollout_ref.actor.policy_loss.loss_mode=vanilla"
+)
+if [[ "${BYPASS_MODE,,}" == "true" ]]; then
+  MODE_OVERRIDES=(
+    "algorithm.rollout_correction.bypass_mode=True"
+    "algorithm.rollout_correction.loss_type=${BYPASS_LOSS_TYPE}"
+    "actor_rollout_ref.actor.policy_loss.loss_mode=bypass_mode"
+  )
+elif [[ -n "${STATIC_LOG_PROB_MICRO_BATCH_LEN}" ]]; then
+  MODE_OVERRIDES+=(
+    "++actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.static_log_prob_micro_batch_len=${STATIC_LOG_PROB_MICRO_BATCH_LEN}"
+  )
+fi
+
 exec bash "${VERL_ROOT}/examples/tpu/grpo/run_qwen3_5_torchtitan.sh" \
     algorithm.adv_estimator="${ADV_ESTIMATOR}" \
     algorithm.use_kl_in_reward=False \
-    algorithm.rollout_correction.bypass_mode=False \
+    "${MODE_OVERRIDES[@]}" \
     "${ROLLOUT_CORRECTION_OVERRIDES[@]}" \
-    actor_rollout_ref.actor.policy_loss.loss_mode=vanilla \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.kl_loss_coef=0.0 \
     actor_rollout_ref.actor.clip_ratio_low=0.2 \

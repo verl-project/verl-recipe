@@ -20,14 +20,23 @@ in ``sandbox_lookahead.py``; the sandbox provider only supplies ``prewarm`` and 
 
 from __future__ import annotations
 
+from collections import defaultdict
 import logging
 import os
 from typing import Any
 
+import numpy as np
 from tensordict import TensorDict
-from uni_agent.sandbox.gke import GKEAgentSandbox
-from uni_agent.tasks import TaskConfigResolver
+import torch
 
+try:
+    from uni_agent.sandbox.gke import GKEAgentSandbox
+    from uni_agent.tasks import TaskConfigResolver
+except ImportError:
+    GKEAgentSandbox = None  # type: ignore[assignment,misc]
+    TaskConfigResolver = None  # type: ignore[assignment,misc]
+
+from verl.trainer.ppo.core_algos import ADV_ESTIMATOR_REGISTRY, register_adv_est
 from verl.trainer.ppo.v1.trainer_base import TRAINER_REGISTRY, PPOTrainer
 from verl.trainer.ppo.v1.trainer_separate_async import PPOTrainerSeparateAsync
 from verl.trainer.ppo.v1.trainer_sync import PPOTrainerSync
@@ -250,10 +259,63 @@ class DeepSWESyncPPOTrainer(_DeepSWESandboxLookaheadMixin, PPOTrainerSync):
         super().on_sample_end()
 
 
+
+
+_LOO_VAR_NOISE_FLOOR = 1e-5
+_MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE = 2
+
+
+@register_adv_est("grpo_loo")
+@register_adv_est("grpo-loo")
+def compute_grpo_loo_outcome_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    epsilon: float = 1e-6,
+    config: Any = None,
+    **kwargs: Any,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Group-relative outcome advantage with leave-one-out baseline and LOO std scale."""
+    del config, kwargs
+    scores = token_level_rewards.sum(dim=-1)
+    advantages_1d = torch.zeros_like(scores, dtype=torch.float32)
+
+    id2indices: dict[Any, list[int]] = defaultdict(list)
+    with torch.no_grad():
+        bsz = scores.shape[0]
+        for i in range(bsz):
+            id2indices[index[i]].append(i)
+
+        for row_indices in id2indices.values():
+            group_size = len(row_indices)
+            if group_size < _MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE:
+                continue
+            group_scores = scores[row_indices].float()
+            group_mean = group_scores.mean()
+            centered = group_scores - group_mean
+            loo_centered = centered * (group_size / (group_size - 1))
+            sum_sq = (centered * centered).sum()
+            if group_size > 2 and sum_sq > 0:
+                loo_var = (sum_sq - (centered * centered) * (group_size / (group_size - 1))) / (group_size - 2)
+                group_adv = torch.where(
+                    loo_var > _LOO_VAR_NOISE_FLOOR * sum_sq,
+                    loo_centered / (torch.sqrt(loo_var.clamp_min(0.0)) + epsilon),
+                    torch.zeros_like(loo_centered),
+                )
+            else:
+                group_adv = loo_centered
+            advantages_1d[row_indices] = group_adv
+
+    advantages = advantages_1d.to(dtype=token_level_rewards.dtype).unsqueeze(-1) * response_mask
+    return advantages, advantages
+
+
 def register_deepswe_trainers() -> None:
-    """Register DeepSWE lookahead trainers in ``TRAINER_REGISTRY``."""
+    """Register DeepSWE lookahead trainers in ``TRAINER_REGISTRY`` and ``grpo_loo`` in ``ADV_ESTIMATOR_REGISTRY``."""
     TRAINER_REGISTRY["separate_async"] = DeepSWESeparateAsyncPPOTrainer
     TRAINER_REGISTRY["sync"] = DeepSWESyncPPOTrainer
+    ADV_ESTIMATOR_REGISTRY["grpo_loo"] = compute_grpo_loo_outcome_advantage
+    ADV_ESTIMATOR_REGISTRY["grpo-loo"] = compute_grpo_loo_outcome_advantage
 
 
 register_deepswe_trainers()
