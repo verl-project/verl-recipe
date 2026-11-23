@@ -28,13 +28,8 @@ from typing import Any
 import numpy as np
 from tensordict import TensorDict
 import torch
-
-try:
-    from uni_agent.sandbox.gke import GKEAgentSandbox
-    from uni_agent.tasks import TaskConfigResolver
-except ImportError:
-    GKEAgentSandbox = None  # type: ignore[assignment,misc]
-    TaskConfigResolver = None  # type: ignore[assignment,misc]
+from uni_agent.sandbox.gke import GKEAgentSandbox
+from uni_agent.tasks import TaskConfigResolver
 
 from verl.trainer.ppo.core_algos import ADV_ESTIMATOR_REGISTRY, register_adv_est
 from verl.trainer.ppo.v1.trainer_base import TRAINER_REGISTRY, PPOTrainer
@@ -257,8 +252,6 @@ class DeepSWESyncPPOTrainer(_DeepSWESandboxLookaheadMixin, PPOTrainerSync):
     def on_sample_end(self) -> None:
         self._finish_sampled_sandbox_batch()
         super().on_sample_end()
-
-
 
 
 _LOO_VAR_NOISE_FLOOR = 1e-5
