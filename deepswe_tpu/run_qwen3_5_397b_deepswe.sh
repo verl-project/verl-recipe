@@ -30,6 +30,7 @@ export FUSE_QKV="${FUSE_QKV:-True}"
 export USE_KL_LOSS="${USE_KL_LOSS:-False}"
 
 # Trainer memory & EP compute
+export USE_GRAPH_TRAINER_OPT="${USE_GRAPH_TRAINER_OPT:-False}"
 export PARAM_DTYPE="${PARAM_DTYPE:-bfloat16}"
 export FP32_MASTER="${FP32_MASTER:-True}"
 # dtype of the FSDP gradient reduce-scatter. The parameters are bf16 already (the fp32 masters stay on the host), so
@@ -37,7 +38,9 @@ export FP32_MASTER="${FP32_MASTER:-True}"
 MIXED_PRECISION_REDUCE="${MIXED_PRECISION_REDUCE:-bfloat16}"
 export OPTIMIZER_HOST_OFFLOAD="${OPTIMIZER_HOST_OFFLOAD:-True}"
 export OPTIM_IMPL="${OPTIM_IMPL:-fused}"
-export EP_DISPATCHER="${EP_DISPATCHER:-static}"
+# verl-hardware-plugin#187 replaced ep_dispatcher with ep_transport (default "auto" -> Ring-of-Experts when EP <= top_k).
+export EP_DISPATCHER="${EP_DISPATCHER:-}"
+export EP_TRANSPORT="${EP_TRANSPORT:-auto}"
 export EP_TOKEN_CHUNKS="${EP_TOKEN_CHUNKS:-8}"
 export EP_PAIRED_GROUPED_MM="${EP_PAIRED_GROUPED_MM:-True}"
 export AC_SAVE_SPLASH_AND_ROUTING="${AC_SAVE_SPLASH_AND_ROUTING:-True}"
@@ -131,6 +134,7 @@ export CONCURRENCY="${CONCURRENCY:-1024}"
 export MASK_UNFINISHED_EPISODE="${MASK_UNFINISHED_EPISODE:-False}"
 
 exec bash "${SCRIPT_DIR}/run_qwen3_5_35b_deepswe.sh" \
+  "++actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.ep_transport=${EP_TRANSPORT}" \
   "++actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.rollout_fp8_moe=${ROLLOUT_FP8_MOE}" \
   "++actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.mixed_precision_reduce=${MIXED_PRECISION_REDUCE}" \
   "actor_rollout_ref.actor.optim.clip_grad=${CLIP_GRAD}" \
