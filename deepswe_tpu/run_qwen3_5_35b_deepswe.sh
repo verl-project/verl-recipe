@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # DeepSWE | Qwen3.5-35B-A3B | R2E-Gym + ReAct (uni-agent) | TorchTitan trainer + vLLM rollout | TPU v7x
 #
-# Defaults are tuned for TPU v7x (2x2x2 FSDP16 trainer + 3 x 2x2x1 EP8 rollout replicas, 32k context,
+# Defaults are tuned for TPU v7x (2x2x2 FSDP8 x CP2 Ulysses trainer + 6 x 2x2x1 EP8 FP8 rollout replicas, 64k context,
 # 16 issues x 16 attempts = 256 trajectories/step, prefix caching + 512-token KV blocks, fused EP MoE
 # kernel, on-device fp32 AdamW, Splash block size 1024, frozen MoE router gate, 0.998_1.002 rollout
 # correction band, vLLM async_scheduling disabled for tpu-sync stability).
@@ -31,33 +31,34 @@ else
   DEEPSWE_MODULE="${DEEPSWE_MODULE:-deepswe_tpu.deepswe}"
 fi
 
-# Topology: trainer 2 hosts x 8 TensorCores (2x2x2), FSDP16; 3 rollout replicas of 8 chips (2x2x1), TP8/EP8.
+# Topology: trainer 2 hosts x 8 TensorCores (2x2x2), FSDP8 x CP2 Ulysses; 6 rollout replicas of 8 chips (2x2x1), TP8/EP8.
 export TPU_ACCELERATOR_TYPE="${TPU_ACCELERATOR_TYPE:-tpu7x}"
 export NNODES_TRAINER="${NNODES_TRAINER:-2}"
 export N_CHIPS_TRAINER="${N_CHIPS_TRAINER:-8}"
-export NNODES_ROLLOUT="${NNODES_ROLLOUT:-3}"
+export NNODES_ROLLOUT="${NNODES_ROLLOUT:-6}"
 export N_CHIPS_ROLLOUT="${N_CHIPS_ROLLOUT:-8}"
 export ROLLOUT_TENSOR_PARALLEL_SIZE="${ROLLOUT_TENSOR_PARALLEL_SIZE:-8}"
 export ROLLOUT_EXPERT_PARALLEL_SIZE="${ROLLOUT_EXPERT_PARALLEL_SIZE:-8}"
 export ROLLOUT_LOAD_FORMAT="${ROLLOUT_LOAD_FORMAT:-dummy}"
 export TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-1}"
-export CONTEXT_PARALLEL_SIZE="${CONTEXT_PARALLEL_SIZE:-1}"
-export CONTEXT_PARALLEL_STRATEGY="${CONTEXT_PARALLEL_STRATEGY:-all_gather}"
+export CONTEXT_PARALLEL_SIZE="${CONTEXT_PARALLEL_SIZE:-2}"
+export CONTEXT_PARALLEL_STRATEGY="${CONTEXT_PARALLEL_STRATEGY:-ulysses}"
 export DATA_PARALLEL_SHARD_SIZE="${DATA_PARALLEL_SHARD_SIZE:-$((NNODES_TRAINER * N_CHIPS_TRAINER / TENSOR_PARALLEL_SIZE / CONTEXT_PARALLEL_SIZE))}"
 export EXPERT_PARALLEL_SIZE="${EXPERT_PARALLEL_SIZE:-1}"
 export FUSE_QKV="${FUSE_QKV:-True}"
 export USE_KL_LOSS="${USE_KL_LOSS:-False}"
 
 # Trainer memory/compute: on-device fp32 parameters + fused AdamW, no host offload, SparseCore FSDP collectives.
+export USE_GRAPH_TRAINER_OPT="${USE_GRAPH_TRAINER_OPT:-True}"
 export PARAM_DTYPE="${PARAM_DTYPE:-float32}"
 export OPTIMIZER_HOST_OFFLOAD="${OPTIMIZER_HOST_OFFLOAD:-False}"
 export OPTIM_IMPL="${OPTIM_IMPL:-fused}"
 export SPARSECORE_OFFLOAD="${SPARSECORE_OFFLOAD:-False}"
 export TRAINER_SCOPED_VMEM_LIMIT_KIB="${TRAINER_SCOPED_VMEM_LIMIT_KIB-65472}"
-_DEFAULT_TRAINER_EXTRA_LIBTPU_INIT_ARGS="--xla_tpu_enable_latency_hiding_layer_scheduler=true --xla_enable_async_all_gather=true --xla_tpu_prefer_async_allgather_to_allreduce=true --xla_tpu_enable_sparse_core_collective_aggregator=true --xla_tpu_enable_sparse_core_offload_queuing_in_lhs=true --xla_tpu_enable_sparse_core_collective_offload_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_3d_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true --xla_tpu_enable_sparse_core_reduce_scatter_v2=true --xla_tpu_use_single_sparse_core_for_reduce_scatter_offload=false --xla_tpu_enable_layer_scheduler_for_dependent_collectives=true"
+_DEFAULT_TRAINER_EXTRA_LIBTPU_INIT_ARGS="--xla_tpu_dvfs_p_state=7 --xla_tpu_enable_latency_hiding_layer_scheduler=true --xla_enable_async_all_gather=true --xla_tpu_prefer_async_allgather_to_allreduce=true --xla_tpu_enable_sparse_core_collective_aggregator=true --xla_tpu_enable_sparse_core_offload_queuing_in_lhs=true --xla_tpu_enable_sparse_core_collective_offload_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_3d_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true --xla_tpu_enable_sparse_core_reduce_scatter_v2=true --xla_tpu_use_single_sparse_core_for_reduce_scatter_offload=false --xla_tpu_enable_layer_scheduler_for_dependent_collectives=true"
 export TRAINER_EXTRA_LIBTPU_INIT_ARGS="${TRAINER_EXTRA_LIBTPU_INIT_ARGS-${_DEFAULT_TRAINER_EXTRA_LIBTPU_INIT_ARGS}}"
 export AC_SAVE_SPLASH_AND_ROUTING="${AC_SAVE_SPLASH_AND_ROUTING:-True}"
-export USE_DYNAMIC_BSZ="${USE_DYNAMIC_BSZ:-False}"
+export USE_DYNAMIC_BSZ="${USE_DYNAMIC_BSZ:-True}"
 
 RAY_DATA_HOME="${RAY_DATA_HOME:-/data}"
 export MODEL_NAME="${MODEL_NAME:-Qwen3.5-35B-A3B}"
@@ -65,7 +66,7 @@ export MODEL_PATH="${MODEL_PATH:-${RAY_DATA_HOME}/assets/hf/${MODEL_NAME}}"
 export TRAIN_FILE="${TRAIN_FILE:-${RAY_DATA_HOME}/data/r2e_gym/train.parquet}"
 export TEST_FILE="${TEST_FILE:-${RAY_DATA_HOME}/data/r2e_gym/test.parquet}"
 export PROJECT_NAME="${PROJECT_NAME:-verl-tpu-deepswe}"
-export EXPERIMENT_NAME="${EXPERIMENT_NAME:-qwen3_5_35b_deepswe_r2e_gym}"
+export EXPERIMENT_NAME="${EXPERIMENT_NAME:-qwen3_5_35b_64k_deepswe_r2e_gym}"
 
 export TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-16}"
 export PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-${TRAIN_BATCH_SIZE}}"
@@ -78,14 +79,24 @@ export VAL_MAX_SAMPLES="${VAL_MAX_SAMPLES:-100}"
 export TEST_FREQ="${TEST_FREQ:-10}"
 export VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-True}"
 
-# 32k context; one 32768-token micro-batch per rank, padded to one compiled shape.
+# 64k context (8k prompt + 56k response); with USE_DYNAMIC_BSZ=True and CP=2, per-device budget is 32768
+# so each CP=2 pair packs up to one static 65536-token compiled shape.
 export MAX_PROMPT_LEN="${MAX_PROMPT_LEN:-8192}"
-export MAX_RESPONSE_LEN="${MAX_RESPONSE_LEN:-24576}"
-export MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
-export MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-1}"
-MAX_TOKEN_LEN_PER_DEVICE="${MAX_TOKEN_LEN_PER_DEVICE:-$((MICRO_BATCH_SIZE * MAX_MODEL_LEN))}"
+export MAX_RESPONSE_LEN="${MAX_RESPONSE_LEN:-57344}"
+export STATIC_MAX_RESPONSE_LEN="${STATIC_MAX_RESPONSE_LEN-${MAX_RESPONSE_LEN}}"
+export MAX_MODEL_LEN="${MAX_MODEL_LEN:-65536}"
+if [[ "${USE_GRAPH_TRAINER_OPT,,}" == "true" ]]; then
+  export MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-2}"
+else
+  export MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-1}"
+fi
+if [[ "${USE_DYNAMIC_BSZ,,}" == "true" ]]; then
+  MAX_TOKEN_LEN_PER_DEVICE="${MAX_TOKEN_LEN_PER_DEVICE:-$((MICRO_BATCH_SIZE * MAX_MODEL_LEN / (TENSOR_PARALLEL_SIZE * CONTEXT_PARALLEL_SIZE)))}"
+else
+  MAX_TOKEN_LEN_PER_DEVICE="${MAX_TOKEN_LEN_PER_DEVICE:-$((MICRO_BATCH_SIZE * MAX_MODEL_LEN))}"
+fi
 export MAX_TOKEN_LEN_PER_GPU="${MAX_TOKEN_LEN_PER_GPU:-${MAX_TOKEN_LEN_PER_DEVICE}}"
-export STATIC_MICRO_BATCH_LEN="${STATIC_MICRO_BATCH_LEN-${MAX_TOKEN_LEN_PER_DEVICE}}"
+export STATIC_MICRO_BATCH_LEN="${STATIC_MICRO_BATCH_LEN-$((MICRO_BATCH_SIZE * MAX_MODEL_LEN))}"
 export PAD_TO_LENGTH_BUCKET="${PAD_TO_LENGTH_BUCKET:-2048}"
 
 # Sampler, prefix caching, and overlap.
@@ -98,7 +109,7 @@ VLLM_BLOCK_SIZE="${VLLM_BLOCK_SIZE-512}"
 # the scheduler and model runner can desync and gpu_model_runner._update_states raises
 # KeyError(req_data.all_token_ids[req_id]) -> EngineDeadError. Keep it off by default here.
 VLLM_ASYNC_SCHEDULING="${VLLM_ASYNC_SCHEDULING:-False}"
-export NUM_WARMUP_BATCHES="${NUM_WARMUP_BATCHES:-2}"
+export NUM_WARMUP_BATCHES="${NUM_WARMUP_BATCHES:-3}"
 # A prompt group sampled at step s that was dispatched at step d has span s - d + 1. With
 # max_off_policy_strategy=drop, groups whose span exceeds MAX_OFF_POLICY_THRESHOLD are dropped instead of trained
 # on ("wait" blocks sampling for them instead). NUM_WARMUP_BATCHES prefetched batches give spans up to
@@ -127,37 +138,42 @@ FROZEN_PARAM_REGEX="${FROZEN_PARAM_REGEX-moe.router.gate}"
 GDN_ROW_SLOT_LEN="${GDN_ROW_SLOT_LEN:-}"
 TPU_SYNC_VERIFY_PARITY="${TPU_SYNC_VERIFY_PARITY:-off}"
 TPU_SYNC_RELEASE_BUFFERS="${TPU_SYNC_RELEASE_BUFFERS:-True}"
-# rloo: leave-one-out baseline, r_i - mean(r_-i), with no std scaling.
-export ADV_ESTIMATOR="${ADV_ESTIMATOR:-rloo}"
-# Rollout correction. The intended modes are the ones added by verl-project/verl#8677:
-#   ROLLOUT_IS=seq_mask_tis ROLLOUT_IS_THRESHOLD=0.998_1.002 ROLLOUT_RS=seq_mean_abs_exp ROLLOUT_RS_THRESHOLD=2.0
-# TODO: make those the defaults once verl#8677 is in verl main. Until then the defaults are what verl main has: no
-# IS weights, and sequence rejection with seq_mean_k1 (lower edge 0.998 for this stack's ~+0.0009 log-prob bias).
-ROLLOUT_IS="${ROLLOUT_IS:-null}"
-ROLLOUT_IS_THRESHOLD="${ROLLOUT_IS_THRESHOLD:-0.998_1.002}"
-ROLLOUT_RS="${ROLLOUT_RS:-seq_mean_k1}"
-ROLLOUT_RS_THRESHOLD="${ROLLOUT_RS_THRESHOLD:-0.998_1.002}"
+# Advantage estimator: rloo (LOO mean, unscaled) or grpo_loo (LOO mean + LOO std scale, registered in deepswe.py).
+export ADV_ESTIMATOR="${ADV_ESTIMATOR:-grpo_loo}"
+# Rollout correction: token-level TIS paired with geometric-mean (seq_mean_k1) and symmetric K2 (seq_mean_k2)
+# sequence rejection. Quote ROLLOUT_RS when non-null so comma-separated filters do not trigger Hydra multirun sweeps.
+ROLLOUT_IS="${ROLLOUT_IS:-token}"
+ROLLOUT_IS_THRESHOLD="${ROLLOUT_IS_THRESHOLD:-5.0}"
+ROLLOUT_RS="${ROLLOUT_RS:-seq_mean_k1,seq_mean_k2}"
+ROLLOUT_RS_THRESHOLD="${ROLLOUT_RS_THRESHOLD:-0.998_1.002,0.25}"
+if [[ "${USE_GRAPH_TRAINER_OPT,,}" == "true" ]]; then
+  BYPASS_MODE="${BYPASS_MODE:-True}"
+  BYPASS_LOSS_TYPE="${BYPASS_LOSS_TYPE:-reinforce}"
+else
+  BYPASS_MODE="${BYPASS_MODE:-False}"
+  BYPASS_LOSS_TYPE="${BYPASS_LOSS_TYPE:-reinforce}"
+fi
+STATIC_LOG_PROB_MICRO_BATCH_LEN="${STATIC_LOG_PROB_MICRO_BATCH_LEN:-}"
 ROLLOUT_CORRECTION_OVERRIDES=(
   "algorithm.rollout_correction.rollout_is=${ROLLOUT_IS}"
-  "algorithm.rollout_correction.rollout_rs=${ROLLOUT_RS}"
-  "algorithm.rollout_correction.rollout_rs_threshold='${ROLLOUT_RS_THRESHOLD}'"
 )
+if [[ "${ROLLOUT_RS}" == "null" ]]; then
+  ROLLOUT_CORRECTION_OVERRIDES+=("algorithm.rollout_correction.rollout_rs=null")
+else
+  ROLLOUT_CORRECTION_OVERRIDES+=(
+    "algorithm.rollout_correction.rollout_rs='${ROLLOUT_RS}'"
+    "algorithm.rollout_correction.rollout_rs_threshold='${ROLLOUT_RS_THRESHOLD}'"
+  )
+fi
 if [[ "${ROLLOUT_IS}" != "null" ]]; then
   ROLLOUT_CORRECTION_OVERRIDES+=("algorithm.rollout_correction.rollout_is_threshold='${ROLLOUT_IS_THRESHOLD}'")
 fi
-# seq_mask_tis / seq_mean_abs_exp come with verl-project/verl#8677; fail here rather than at step 1 without it.
-if [[ "${ROLLOUT_IS}" == "seq_mask_tis" || "${ROLLOUT_RS}" == "seq_mean_abs_exp" ]] &&
-  ! grep -q "seq_mask_tis" "${VERL_ROOT}/verl/trainer/ppo/rollout_corr_helper.py"; then
-  echo "ERROR: ${VERL_ROOT} has no seq_mask_tis / seq_mean_abs_exp rollout correction (verl-project/verl#8677)." \
-    "Use a verl main that includes it, or set ROLLOUT_IS / ROLLOUT_RS to modes this checkout supports." >&2
-  exit 1
-fi
 
 # Agent, tools, prompt and sandbox options (image mirror, network policy mode): see the file. Every Ray node reads it.
-TASK_CONFIG="${TASK_CONFIG:-${SCRIPT_DIR}/task_config.yaml}"
-GATEWAY_COUNT="${GATEWAY_COUNT:-8}"
-# One agent session per decode slot (3 replicas x 128).
-CONCURRENCY="${CONCURRENCY:-384}"
+TASK_CONFIG="${TASK_CONFIG:-${SCRIPT_DIR}/task_config_64k.yaml}"
+GATEWAY_COUNT="${GATEWAY_COUNT:-16}"
+# One agent session per decode slot (6 replicas x 128 = 768, or 1024 with lookahead).
+CONCURRENCY="${CONCURRENCY:-1024}"
 DISPATCH_MODE="${DISPATCH_MODE:-inline_async}"
 TRAJECTORY_SELECTION="${TRAJECTORY_SELECTION:-all}"
 AGENT_LOG_DIR="${AGENT_LOG_DIR:-/tmp/uni_agent_logs/${EXPERIMENT_NAME}}"
@@ -236,13 +252,117 @@ fi
 if [[ -n "${GDN_ROW_SLOT_LEN}" ]]; then
   OPTIMIZATION_OVERRIDES+=("++actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.gdn_row_slot_len=${GDN_ROW_SLOT_LEN}")
 fi
+if [[ "${USE_GRAPH_TRAINER_OPT,,}" == "true" ]]; then
+  export MIXED_PRECISION_REDUCE="${MIXED_PRECISION_REDUCE:-bfloat16}"
+  export CP_GDN_REDUCE_DTYPE="${CP_GDN_REDUCE_DTYPE:-bfloat16}"
+  export OPTIMIZER_COMPILE="${OPTIMIZER_COMPILE:-separate_graph}"
+  export SAVE_LAST_N_GDN="${SAVE_LAST_N_GDN:-3}"
+  export TT_SPLASH_USE_TOKAMAX="${TT_SPLASH_USE_TOKAMAX:-1}"
+  export TT_TOKAMAX_STACKED_Q="${TT_TOKAMAX_STACKED_Q:-4}"
+  export TT_TOKAMAX_FWD_EXP_SCHED="${TT_TOKAMAX_FWD_EXP_SCHED:-1}"
+  export TT_TOKAMAX_TBWD="${TT_TOKAMAX_TBWD:-0}"
+  export TT_SPLASH_BLOCK_Q="${TT_SPLASH_BLOCK_Q:-1024}"
+  export TT_SPLASH_BLOCK_KV="${TT_SPLASH_BLOCK_KV:-2048}"
+  export TT_SPLASH_MAX_COMPUTE_BLOCK="${TT_SPLASH_MAX_COMPUTE_BLOCK:-512}"
+  export TT_SPLASH_BLOCK_Q_DKV="${TT_SPLASH_BLOCK_Q_DKV:-2048}"
+  export TT_SPLASH_BLOCK_KV_DKV="${TT_SPLASH_BLOCK_KV_DKV:-2048}"
+  export TT_SPLASH_MAX_BLOCK="${TT_SPLASH_MAX_BLOCK:-2048}"
+  export TT_SPLASH_MAX_DOC_LEN="${TT_SPLASH_MAX_DOC_LEN:-0}"
+  export TT_SPLASH_FUSED_BWD_MAX_GIB="${TT_SPLASH_FUSED_BWD_MAX_GIB:-18.0}"
+  export TT_USE_MAXTEXT_GDN="${TT_USE_MAXTEXT_GDN:-1}"
+  export TT_MAXTEXT_GDN_BWD_LAYOUT="${TT_MAXTEXT_GDN_BWD_LAYOUT:-all}"
+  export TT_MAXTEXT_GDN_BF16_STATES="${TT_MAXTEXT_GDN_BF16_STATES:-1}"
+  export TT_GDN_SKIP_FINAL_CONV_STATE="${TT_GDN_SKIP_FINAL_CONV_STATE:-1}"
+  export TT_GDN_PALLAS_CONV_64K="${TT_GDN_PALLAS_CONV_64K:-1}"
+  export TT_GDN_PALLAS_CONV_FWD_64K="${TT_GDN_PALLAS_CONV_FWD_64K:-0}"
+  export TT_FOREACH_GRAD_ACCUM="${TT_FOREACH_GRAD_ACCUM:-1}"
+  export TT_MOE_VPU_GATHER_BWD="${TT_MOE_VPU_GATHER_BWD:-1}"
+  export TT_EXPERT_AG_UNDER_GDN="${TT_EXPERT_AG_UNDER_GDN:-1}"
+  export TT_PAIRED_DINPUT="${TT_PAIRED_DINPUT:-1}"
+  export TT_MOE_BF16_COMBINE="${TT_MOE_BF16_COMBINE:-1}"
+  export TT_MOE_REUSE_INVERSE_PERM="${TT_MOE_REUSE_INVERSE_PERM:-1}"
+  export VERL_TPU_MOE_TILE_M="${VERL_TPU_MOE_TILE_M:-512}"
+  export VERL_TPU_SCALE_BEFORE_W2="${VERL_TPU_SCALE_BEFORE_W2:-1}"
+  export VERL_TPU_LCE_BLOCKS="${VERL_TPU_LCE_BLOCKS:-1024,256,2560}"
+  export TT_LCE_FWD_BLOCKS="${TT_LCE_FWD_BLOCKS:-1024,2048,2560}"
+  export VERL_TPU_BIN_SLOT_LEN="${VERL_TPU_BIN_SLOT_LEN:-65536}"
+  export VERL_TPU_ASYNC_MB_ENQUEUE="${VERL_TPU_ASYNC_MB_ENQUEUE:-1}"
+  export VERL_TPU_COMPILED_OPT_STEP="${VERL_TPU_COMPILED_OPT_STEP:-1}"
+  export VERL_TPU_CPU_OPT_THREADS="${VERL_TPU_CPU_OPT_THREADS:-24}"
+  OPTIMIZATION_OVERRIDES+=(
+    "++actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.model_kernels=all"
+    "++actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.trainer_mode=graph_trainer"
+    "++actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.mixed_precision_reduce=${MIXED_PRECISION_REDUCE}"
+    "++actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.context_parallel_gdn_strategy=allgather_reducescatter"
+    "++actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.context_parallel_gdn_reduce_dtype=${CP_GDN_REDUCE_DTYPE}"
+    "++actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.kda_document_budget=32"
+    "++actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.graph_trainer.memory_policy=tpu_selective"
+    "++actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.graph_trainer.save_regions=['moe.routing','attention.inner_attention']"
+    "++actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.graph_trainer.save_last_n_layers.gated_delta=${SAVE_LAST_N_GDN}"
+    "++actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.graph_trainer.optimizer_compile=${OPTIMIZER_COMPILE}"
+    "++actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.graph_trainer.compile_grad_norm=True"
+    "++actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.graph_trainer.graph_split.enabled=True"
+    "++actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.graph_trainer.graph_split.forward_layers_per_executable=1"
+    "++actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.graph_trainer.graph_split.backward_layers_per_executable=1"
+    "++actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.graph_trainer.graph_split.backward_partition_mode=fsdp_pipeline"
+    "++actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.graph_trainer.graph_split.expert_all_gathers_under_splash=True"
+    "++actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.graph_trainer.graph_split.forward_isolate_prefix=True"
+    "++ray_kwargs.ray_init.runtime_env.env_vars.TT_SPLASH_USE_TOKAMAX='${TT_SPLASH_USE_TOKAMAX}'"
+    "++ray_kwargs.ray_init.runtime_env.env_vars.TT_TOKAMAX_STACKED_Q='${TT_TOKAMAX_STACKED_Q}'"
+    "++ray_kwargs.ray_init.runtime_env.env_vars.TT_TOKAMAX_FWD_EXP_SCHED='${TT_TOKAMAX_FWD_EXP_SCHED}'"
+    "++ray_kwargs.ray_init.runtime_env.env_vars.TT_TOKAMAX_TBWD='${TT_TOKAMAX_TBWD}'"
+    "++ray_kwargs.ray_init.runtime_env.env_vars.TT_SPLASH_BLOCK_Q='${TT_SPLASH_BLOCK_Q}'"
+    "++ray_kwargs.ray_init.runtime_env.env_vars.TT_SPLASH_BLOCK_KV='${TT_SPLASH_BLOCK_KV}'"
+    "++ray_kwargs.ray_init.runtime_env.env_vars.TT_SPLASH_MAX_COMPUTE_BLOCK='${TT_SPLASH_MAX_COMPUTE_BLOCK}'"
+    "++ray_kwargs.ray_init.runtime_env.env_vars.TT_SPLASH_BLOCK_Q_DKV='${TT_SPLASH_BLOCK_Q_DKV}'"
+    "++ray_kwargs.ray_init.runtime_env.env_vars.TT_SPLASH_BLOCK_KV_DKV='${TT_SPLASH_BLOCK_KV_DKV}'"
+    "++ray_kwargs.ray_init.runtime_env.env_vars.TT_SPLASH_MAX_BLOCK='${TT_SPLASH_MAX_BLOCK}'"
+    "++ray_kwargs.ray_init.runtime_env.env_vars.TT_SPLASH_MAX_DOC_LEN='${TT_SPLASH_MAX_DOC_LEN}'"
+    "++ray_kwargs.ray_init.runtime_env.env_vars.TT_SPLASH_FUSED_BWD_MAX_GIB='${TT_SPLASH_FUSED_BWD_MAX_GIB}'"
+    "++ray_kwargs.ray_init.runtime_env.env_vars.TT_USE_MAXTEXT_GDN='${TT_USE_MAXTEXT_GDN}'"
+    "++ray_kwargs.ray_init.runtime_env.env_vars.TT_MAXTEXT_GDN_BWD_LAYOUT='${TT_MAXTEXT_GDN_BWD_LAYOUT}'"
+    "++ray_kwargs.ray_init.runtime_env.env_vars.TT_MAXTEXT_GDN_BF16_STATES='${TT_MAXTEXT_GDN_BF16_STATES}'"
+    "++ray_kwargs.ray_init.runtime_env.env_vars.TT_GDN_SKIP_FINAL_CONV_STATE='${TT_GDN_SKIP_FINAL_CONV_STATE}'"
+    "++ray_kwargs.ray_init.runtime_env.env_vars.TT_GDN_PALLAS_CONV_64K='${TT_GDN_PALLAS_CONV_64K}'"
+    "++ray_kwargs.ray_init.runtime_env.env_vars.TT_GDN_PALLAS_CONV_FWD_64K='${TT_GDN_PALLAS_CONV_FWD_64K}'"
+    "++ray_kwargs.ray_init.runtime_env.env_vars.TT_FOREACH_GRAD_ACCUM='${TT_FOREACH_GRAD_ACCUM}'"
+    "++ray_kwargs.ray_init.runtime_env.env_vars.TT_MOE_VPU_GATHER_BWD='${TT_MOE_VPU_GATHER_BWD}'"
+    "++ray_kwargs.ray_init.runtime_env.env_vars.TT_EXPERT_AG_UNDER_GDN='${TT_EXPERT_AG_UNDER_GDN}'"
+    "++ray_kwargs.ray_init.runtime_env.env_vars.TT_PAIRED_DINPUT='${TT_PAIRED_DINPUT}'"
+    "++ray_kwargs.ray_init.runtime_env.env_vars.TT_MOE_BF16_COMBINE='${TT_MOE_BF16_COMBINE}'"
+    "++ray_kwargs.ray_init.runtime_env.env_vars.TT_MOE_REUSE_INVERSE_PERM='${TT_MOE_REUSE_INVERSE_PERM}'"
+    "++ray_kwargs.ray_init.runtime_env.env_vars.VERL_TPU_MOE_TILE_M='${VERL_TPU_MOE_TILE_M}'"
+    "++ray_kwargs.ray_init.runtime_env.env_vars.VERL_TPU_SCALE_BEFORE_W2='${VERL_TPU_SCALE_BEFORE_W2}'"
+    "++ray_kwargs.ray_init.runtime_env.env_vars.VERL_TPU_LCE_BLOCKS='${VERL_TPU_LCE_BLOCKS}'"
+    "++ray_kwargs.ray_init.runtime_env.env_vars.TT_LCE_FWD_BLOCKS='${TT_LCE_FWD_BLOCKS}'"
+    "++ray_kwargs.ray_init.runtime_env.env_vars.VERL_TPU_BIN_SLOT_LEN='${VERL_TPU_BIN_SLOT_LEN}'"
+    "++ray_kwargs.ray_init.runtime_env.env_vars.VERL_TPU_ASYNC_MB_ENQUEUE='${VERL_TPU_ASYNC_MB_ENQUEUE}'"
+    "++ray_kwargs.ray_init.runtime_env.env_vars.VERL_TPU_COMPILED_OPT_STEP='${VERL_TPU_COMPILED_OPT_STEP}'"
+    "++ray_kwargs.ray_init.runtime_env.env_vars.VERL_TPU_CPU_OPT_THREADS='${VERL_TPU_CPU_OPT_THREADS}'"
+  )
+fi
+
+MODE_OVERRIDES=(
+  "algorithm.rollout_correction.bypass_mode=False"
+  "actor_rollout_ref.actor.policy_loss.loss_mode=vanilla"
+)
+if [[ "${BYPASS_MODE,,}" == "true" ]]; then
+  MODE_OVERRIDES=(
+    "algorithm.rollout_correction.bypass_mode=True"
+    "algorithm.rollout_correction.loss_type=${BYPASS_LOSS_TYPE}"
+    "actor_rollout_ref.actor.policy_loss.loss_mode=bypass_mode"
+  )
+elif [[ -n "${STATIC_LOG_PROB_MICRO_BATCH_LEN}" ]]; then
+  MODE_OVERRIDES+=(
+    "++actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.static_log_prob_micro_batch_len=${STATIC_LOG_PROB_MICRO_BATCH_LEN}"
+  )
+fi
 
 exec bash "${VERL_ROOT}/examples/tpu/grpo/run_qwen3_5_torchtitan.sh" \
     algorithm.adv_estimator="${ADV_ESTIMATOR}" \
     algorithm.use_kl_in_reward=False \
-    algorithm.rollout_correction.bypass_mode=False \
+    "${MODE_OVERRIDES[@]}" \
     "${ROLLOUT_CORRECTION_OVERRIDES[@]}" \
-    actor_rollout_ref.actor.policy_loss.loss_mode=vanilla \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.kl_loss_coef=0.0 \
     actor_rollout_ref.actor.clip_ratio_low=0.2 \

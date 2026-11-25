@@ -30,6 +30,7 @@ export FUSE_QKV="${FUSE_QKV:-True}"
 export USE_KL_LOSS="${USE_KL_LOSS:-False}"
 
 # Trainer memory & EP compute
+export USE_GRAPH_TRAINER_OPT="${USE_GRAPH_TRAINER_OPT:-False}"
 export PARAM_DTYPE="${PARAM_DTYPE:-bfloat16}"
 export FP32_MASTER="${FP32_MASTER:-True}"
 # dtype of the FSDP gradient reduce-scatter. The parameters are bf16 already (the fp32 masters stay on the host), so
@@ -37,7 +38,9 @@ export FP32_MASTER="${FP32_MASTER:-True}"
 MIXED_PRECISION_REDUCE="${MIXED_PRECISION_REDUCE:-bfloat16}"
 export OPTIMIZER_HOST_OFFLOAD="${OPTIMIZER_HOST_OFFLOAD:-True}"
 export OPTIM_IMPL="${OPTIM_IMPL:-fused}"
-export EP_DISPATCHER="${EP_DISPATCHER:-static}"
+# verl-hardware-plugin#187 replaced ep_dispatcher with ep_transport (default "auto" -> Ring-of-Experts when EP <= top_k).
+export EP_DISPATCHER="${EP_DISPATCHER:-}"
+export EP_TRANSPORT="${EP_TRANSPORT:-auto}"
 export EP_TOKEN_CHUNKS="${EP_TOKEN_CHUNKS:-8}"
 export EP_PAIRED_GROUPED_MM="${EP_PAIRED_GROUPED_MM:-True}"
 export AC_SAVE_SPLASH_AND_ROUTING="${AC_SAVE_SPLASH_AND_ROUTING:-True}"
@@ -111,16 +114,18 @@ export TPU_SYNC_VERIFY_PARITY="${TPU_SYNC_VERIFY_PARITY:-norm}"
 export TPU_SYNC_RELEASE_BUFFERS="${TPU_SYNC_RELEASE_BUFFERS:-True}"
 
 # RL algorithm & rollout correction
-export ADV_ESTIMATOR="${ADV_ESTIMATOR:-rloo}"
-export ROLLOUT_IS="${ROLLOUT_IS:-null}"
-export ROLLOUT_RS="${ROLLOUT_RS:-seq_mean_k1}"
-export ROLLOUT_RS_THRESHOLD="${ROLLOUT_RS_THRESHOLD:-0.992_1.008}"
+export ADV_ESTIMATOR="${ADV_ESTIMATOR:-grpo_loo}"
+export ROLLOUT_IS="${ROLLOUT_IS:-token}"
+export ROLLOUT_IS_THRESHOLD="${ROLLOUT_IS_THRESHOLD:-5.0}"
+export ROLLOUT_RS="${ROLLOUT_RS:-seq_mean_k1,seq_mean_k2}"
+export ROLLOUT_RS_THRESHOLD="${ROLLOUT_RS_THRESHOLD:-0.98_1.02,0.80}"
 # BYPASS_MODE=False (default): decoupled PPO, the trainer recomputes old_log_prob with a forward-only pass.
-# BYPASS_MODE=True: the rollout's own log-probs are used as old_log_prob, which skips that pass.
-BYPASS_MODE="${BYPASS_MODE:-False}"
+# BYPASS_MODE=True: 2-policy bypass using rollout log-probs directly (with BYPASS_LOSS_TYPE=reinforce or ppo_clip).
+export BYPASS_MODE="${BYPASS_MODE:-False}"
+export BYPASS_LOSS_TYPE="${BYPASS_LOSS_TYPE:-reinforce}"
 # Optional, BYPASS_MODE=False only: static micro-batch length in tokens for the forward-only old_log_prob pass
 # (for example 131072, twice the training micro-batch). Empty uses STATIC_MICRO_BATCH_LEN.
-STATIC_LOG_PROB_MICRO_BATCH_LEN="${STATIC_LOG_PROB_MICRO_BATCH_LEN:-}"
+export STATIC_LOG_PROB_MICRO_BATCH_LEN="${STATIC_LOG_PROB_MICRO_BATCH_LEN:-}"
 
 # Agent & sandbox concurrency (1024 concurrent R2E-Gym trajectories = 64 x 16)
 export TASK_CONFIG="${TASK_CONFIG:-${SCRIPT_DIR}/task_config_64k.yaml}"
@@ -128,20 +133,8 @@ export GATEWAY_COUNT="${GATEWAY_COUNT:-16}"
 export CONCURRENCY="${CONCURRENCY:-1024}"
 export MASK_UNFINISHED_EPISODE="${MASK_UNFINISHED_EPISODE:-False}"
 
-# These come after the overrides of run_qwen3_5_35b_deepswe.sh on the command line, so they take precedence.
-MODE_OVERRIDES=()
-if [[ "${BYPASS_MODE,,}" == "true" ]]; then
-  MODE_OVERRIDES+=(
-    "algorithm.rollout_correction.bypass_mode=True"
-    "actor_rollout_ref.actor.policy_loss.loss_mode=bypass_mode"
-  )
-elif [[ -n "${STATIC_LOG_PROB_MICRO_BATCH_LEN}" ]]; then
-  MODE_OVERRIDES+=(
-    "++actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.static_log_prob_micro_batch_len=${STATIC_LOG_PROB_MICRO_BATCH_LEN}"
-  )
-fi
-
 exec bash "${SCRIPT_DIR}/run_qwen3_5_35b_deepswe.sh" \
+  "++actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.ep_transport=${EP_TRANSPORT}" \
   "++actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.rollout_fp8_moe=${ROLLOUT_FP8_MOE}" \
   "++actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.mixed_precision_reduce=${MIXED_PRECISION_REDUCE}" \
   "actor_rollout_ref.actor.optim.clip_grad=${CLIP_GRAD}" \
@@ -151,5 +144,4 @@ exec bash "${SCRIPT_DIR}/run_qwen3_5_35b_deepswe.sh" \
   "++ray_kwargs.ray_init.runtime_env.env_vars.QUANTIZE_ON_LOAD_PREFIXES='${QUANTIZE_ON_LOAD_PREFIXES}'" \
   "++ray_kwargs.ray_init.runtime_env.env_vars.TPU_MOE_REQUANT_CHUNK_BYTES='${TPU_MOE_REQUANT_CHUNK_BYTES}'" \
   "++ray_kwargs.ray_init.runtime_env.env_vars.VLLM_RAY_EXTRA_ENV_VARS_TO_COPY='${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY}'" \
-  ${MODE_OVERRIDES[@]+"${MODE_OVERRIDES[@]}"} \
   "$@"

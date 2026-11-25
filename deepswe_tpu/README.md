@@ -68,18 +68,18 @@ If `K` training runs share the same sandbox pool in parallel, both buckets scale
 
 **Simple sizing rule (for `n2-standard-32`, 32 vCPU / 128 GiB RAM):**
 1. **How many working sandboxes run at once per job?**
-   Each rollout batch has `TRAIN_BATCH_SIZE * ROLLOUT_N` trajectories, and with `NUM_WARMUP_BATCHES=2` up to three batches overlap, capped by `CONCURRENCY`:
+   Each rollout batch has `TRAIN_BATCH_SIZE * ROLLOUT_N` trajectories, and with `NUM_WARMUP_BATCHES=3` up to four batches overlap, capped by `CONCURRENCY`:
    ```text
    active_per_run = min(CONCURRENCY, (1 + NUM_WARMUP_BATCHES) * TRAIN_BATCH_SIZE * ROLLOUT_N)
    ```
-   *(Default TPU v7x: `min(384, 3 * 16 * 16) = 384` working sandboxes.)*
+   *(Default TPU v7x 64k: `min(1024, 4 * 16 * 16) = 1024` working sandboxes.)*
 2. **Convert working sandboxes to CPU nodes:**
    One `n2-standard-32` node comfortably handles about **`16–24` working sandboxes** (~20 as a rule of thumb) without CPU throttling or OOM kills during parallel `pytest` bursts. Multiply by the number of parallel runs `K`:
    ```text
    nodes = ceil(K * active_per_run / 20)   # conservative: divide by 16; tighter: divide by 24
    ```
 3. **Quick sanity checks for pod limit and disk:**
-   - **Pod cap (`110` pods/node on GKE, ~`100` usable):** Standby warm pools add roughly `2 * TRAIN_BATCH_SIZE * ROLLOUT_N` pods (plus `VAL_MAX_SAMPLES * SANDBOX_EVAL_REPLICAS` during validation) — around `~740` total pods at peak for one default v7x run (`VAL_MAX_SAMPLES=100`). Make sure `nodes >= ceil(K * peak_pods / 100)` (compute dominates on `n2-standard-32`, but the pod cap can bind on `n2-standard-64+`).
+   - **Pod cap (`110` pods/node on GKE, ~`100` usable):** Standby warm pools add roughly `2 * TRAIN_BATCH_SIZE * ROLLOUT_N` pods (plus `VAL_MAX_SAMPLES * SANDBOX_EVAL_REPLICAS` during validation) — around `~1,600` total pods at peak for one default 64k v7x run (`CONCURRENCY=1024`, `VAL_MAX_SAMPLES=100`). Make sure `nodes >= ceil(K * peak_pods / 100)` (compute dominates on `n2-standard-32`, but the pod cap can bind on `n2-standard-64+`).
    - **Boot disk (`200–300 GB`):** R2E-Gym images are ~`2–5 GB` uncompressed. Replicas of the same image co-locate onto one node where possible to reuse cached containerd layers; `200 GB+` disks keep ~`30–50` images cached per node.
 
 **Quick-reference examples (`n2-standard-32`):**
@@ -87,8 +87,8 @@ If `K` training runs share the same sandbox pool in parallel, both buckets scale
 | Workload | `TRAIN_BATCH_SIZE` x `ROLLOUT_N` | `CONCURRENCY` | Working sandboxes (`K * active`) | Recommended `n2-standard-32` nodes |
 | --- | --- | --- | --- | --- |
 | 1 small / dev run | 8 x 8 | 64 | 64 | **4–6** |
-| 1 default TPU v7x run | 16 x 16 | 384 | 384 | **16–24** (autoscale `4–32`) |
-| 2–3 parallel TPU v7x runs | 16 x 16 (x `K`) | 384 (x `K`) | 768–1,152 | **32–64+** |
+| 1 default TPU v7x 64k run | 16 x 16 | 1,024 | 1,024 | **48–64** (autoscale `8–64`) |
+| 2 parallel TPU v7x 64k runs | 16 x 16 (x `K`) | 1,024 (x `K`) | 2,048 | **96–128+** |
 
 ### Suggested command
 ```bash
@@ -115,8 +115,8 @@ gcloud container node-pools create sandbox-cpu-pool \
 `verl`'s `separate_async` trainer runs TorchTitan FSDP2 training on a dedicated trainer TPU slice while `vLLM` generates rollouts on separate rollout TPU slice(s), syncing weights between them after each step via `tpu-sync`. Keeping trainer and rollout on separate TPU slices prevents training and inference from competing for HBM on the same chips.
 
 ### How they should look
-- **Default optimized TPU v7x topology**: One `2x2x2` trainer slice (`tpu7x-standard-4t`, 2 hosts x 8 TensorCores = 16 TensorCores, `tpu-group-0`) plus three `2x2x1` rollout slices (1 host x 8 TensorCores each = 3 replicas of TP8/EP8, `tpu-group-1`..`tpu-group-3`).
-- Smaller topologies (such as one `2x2x1` trainer slice + one `2x2x1` rollout slice) also work by overriding `NNODES_TRAINER`, `NNODES_ROLLOUT`, and `PARAM_DTYPE`/`OPTIMIZER_HOST_OFFLOAD`.
+- **Default optimized TPU v7x topology (32 chips)**: One `2x2x2` trainer slice (`tpu7x-standard-4t`, 2 hosts x 8 TensorCores = 16 TensorCores, `tpu-group-0`) plus six `2x2x1` rollout slices (1 host x 8 TensorCores each = 6 replicas of TP8/EP8, `tpu-group-1`..`tpu-group-6`).
+- Smaller topologies (such as one `2x2x1` trainer slice + fewer `2x2x1` rollout slices) also work by overriding `NNODES_TRAINER`, `NNODES_ROLLOUT`, and `PARAM_DTYPE`/`OPTIMIZER_HOST_OFFLOAD`.
 
 ### Suggested commands
 ```bash
@@ -132,8 +132,8 @@ gcloud container node-pools create trainer-v7x-slice \
   --workload-metadata=GKE_METADATA \
   --scopes=cloud-platform
 
-# Three rollout slices (1 host x 8 TensorCores each, 2x2x1 topology)
-for i in 1 2 3; do
+# Six rollout slices (1 host x 8 TensorCores each, 2x2x1 topology)
+for i in 1 2 3 4 5 6; do
   gcloud container node-pools create "rollout-v7x-slice-${i}" \
     --cluster="${CLUSTER}" \
     --project="${PROJECT}" \
@@ -317,7 +317,7 @@ kubectl exec -n "${NAMESPACE}" "${HEAD_POD}" -- ray status
 ## 8. Running the Recipe in `verl`
 
 ### Required `verl` version
-This recipe targets upstream `verl` `main` together with `verl-hardware-plugin` `main` (for TPU support) and `uni-agent`. See [`REQUIRED_VERL.txt`](./REQUIRED_VERL.txt). Rollout correction defaults to `seq_mean_k1` sequence rejection with no IS weights; `ROLLOUT_IS=seq_mask_tis` / `ROLLOUT_RS=seq_mean_abs_exp` (`ROLLOUT_RS_THRESHOLD=2.0`) need verl-project/verl#8677 and will become the defaults once it is merged.
+This recipe targets upstream `verl` `main` together with `verl-hardware-plugin` `main` (for TPU support) and `uni-agent`. See [`REQUIRED_VERL.txt`](./REQUIRED_VERL.txt). Advantage estimation defaults to `ADV_ESTIMATOR=grpo_loo` (registered in [`deepswe.py`](./deepswe.py); set `ADV_ESTIMATOR=rloo` for unscaled LOO), and rollout correction defaults to `ROLLOUT_IS=token` (`ROLLOUT_IS_THRESHOLD=5.0`) paired with `ROLLOUT_RS=seq_mean_k1,seq_mean_k2`.
 
 ### What it is for
 [`run_qwen3_5_35b_deepswe.sh`](./run_qwen3_5_35b_deepswe.sh) wires `uni-agent`'s `AgentFrameworkRolloutAdapter` (`ReActAgent` + `r2e_gym` + `GKEAgentSandbox`) into `verl`'s V1 async PPO/RLOO trainer (`verl/examples/tpu/grpo/run_qwen3_5_torchtitan.sh`). [`run_qwen3_5_397b_deepswe.sh`](./run_qwen3_5_397b_deepswe.sh) sets the validated defaults for `Qwen3.5-397B-A17B` at 64k context (`128` trainer chips `TP=1/CP=4/EP=8/DP_shard=64` with `PARAM_DTYPE=bfloat16`, `FP32_MASTER=True`, `OPTIMIZER_HOST_OFFLOAD=True`, and `64 x 2x2x1` FP8 MoE rollout replicas paired with [`task_config_64k.yaml`](./task_config_64k.yaml) at `max_steps=60`) and delegates to `run_qwen3_5_35b_deepswe.sh`. It trains with decoupled PPO by default; set `BYPASS_MODE=True` to use the rollout's log-probs as `old_log_prob` and skip the trainer's forward-only pass, or keep the default and set `STATIC_LOG_PROB_MICRO_BATCH_LEN` (for example `131072`) to give that pass a larger static micro-batch.
@@ -326,12 +326,12 @@ This recipe targets upstream `verl` `main` together with `verl-hardware-plugin` 
 - Because `ray job submit` starts in `/app` with a clean environment on the head pod, pass your `export` statements inside `bash -c "..."` so both the shell script and `ray.init(runtime_env=...)` inherit them.
 - Mount or copy `verl-recipe` at `${VERL_ROOT}/recipe` (or set `VERL_ROOT` and include `verl-recipe` on `PYTHONPATH`).
 - Set `SANDBOX_NAMESPACE`, `NODE_SELECTOR_KEY=cloud.google.com/gke-nodepool`, and `NODE_SELECTOR_VAL=sandbox-cpu-pool` so `GKEAgentSandbox` starts the sandboxes in your namespace on the sandbox CPU pool.
-- Agent settings (`max_steps`, tools, prompt) and sandbox options (image mirror, network policy) come from [`task_config.yaml`](./task_config.yaml); set `TASK_CONFIG` to use another file.
-- Defaults are optimized for **TPU v7x**: `2x2x2` trainer (`NNODES_TRAINER=2`, `N_CHIPS_TRAINER=8`, FSDP16, on-device `PARAM_DTYPE=float32`, fused AdamW, SparseCore async FSDP collective offload, `TRAINER_SCOPED_VMEM_LIMIT_KIB=65472`, `AC_SAVE_SPLASH_AND_ROUTING=True`, `SPLASH_MAX_BLOCK_SIZE=1024`, `FROZEN_PARAM_REGEX=moe.router.gate`) and 3 rollout replicas of `2x2x1` (`NNODES_ROLLOUT=3`, `N_CHIPS_ROLLOUT=8`, TP8/EP8, `USE_MOE_FUSED_EP_KERNEL=1`, `TPU_MOE_SKIP_PADDED_TOKENS=1`, `TPU_ENABLE_GDN_DYNAMIC_TILING=1`, `ENABLE_PREFIX_CACHING=True`, `VLLM_BLOCK_SIZE=512`, `VLLM_ASYNC_SCHEDULING=False`, `MAX_NUM_SEQS=128`, `CONCURRENCY=384`), 32k context (`MAX_PROMPT_LEN=8192`, `MAX_RESPONSE_LEN=24576`, `STATIC_MICRO_BATCH_LEN=32768`), and `ROLLOUT_RS_THRESHOLD=0.998_1.002`.
-- **Optional `GDN_ROW_SLOT_LEN=32768` speedup**: For an image built from `verl/examples/tpu/grpo/Dockerfile` with `--build-arg TORCHTITAN_COMMIT=4e16e67aed8c1e702e6f440b1ff81619bb6873d4` (`google-pytorch/torchtitan#142`), export `GDN_ROW_SLOT_LEN=32768` to put one sequence per GatedDeltaNet row slot. It is left unset by default so the recipe runs out of the box on `verl main`'s default image.
-- **Image for `run_qwen3_5_397b_deepswe.sh`**: the 397B recipe needs more than `verl main`'s default image. The trainer's context parallelism (`CP=4`) needs a torchtitan with `google-pytorch/torchtitan#201` (GatedDeltaNet context parallelism, commit `36643b4c9` or later; it is stacked on `#142`), passed as `--build-arg TORCHTITAN_COMMIT=<commit>`. The FP8 rollout (`QUANTIZE_ON_LOAD_PREFIXES=experts`) needs a vllm-torchtpu with `vllm-project/vllm-torchtpu#2967` (`717a50d1dd`, on-load FP8 quantization of the MoE experts), passed as `--build-arg VLLM_TORCHTPU_COMMIT=<commit>`; vllm-torchtpu is developed against vLLM `v0.33.0` at that commit, while the Dockerfile installs `v0.32.0`. `TPU_MOE_REQUANT_CHUNK_BYTES` takes effect from `vllm-project/vllm-torchtpu#3511` (`72e9163d58`) and is ignored by older builds.
+- Agent settings (`max_steps`, tools, prompt) and sandbox options (image mirror, network policy) come from [`task_config_64k.yaml`](./task_config_64k.yaml) by default (`max_steps=60` for 64k context; [`task_config.yaml`](./task_config.yaml) is kept for shorter 32k runs); set `TASK_CONFIG` to use another file.
+- Defaults are optimized for **TPU v7x at 64k context**: `2x2x2` trainer (`NNODES_TRAINER=2`, `N_CHIPS_TRAINER=8`, `CONTEXT_PARALLEL_SIZE=2`, `CONTEXT_PARALLEL_STRATEGY=ulysses`, FSDP8 x CP2, on-device `PARAM_DTYPE=float32`, fused AdamW, SparseCore async FSDP collective offload, `TRAINER_SCOPED_VMEM_LIMIT_KIB=65472`, `AC_SAVE_SPLASH_AND_ROUTING=True`, `SPLASH_MAX_BLOCK_SIZE=1024`, `FROZEN_PARAM_REGEX=moe.router.gate`) and 6 rollout replicas of `2x2x1` (`NNODES_ROLLOUT=6`, `N_CHIPS_ROLLOUT=8`, TP8/EP8, `QUANTIZE_ON_LOAD_PREFIXES=experts` recommended for 64k KV headroom, `USE_MOE_FUSED_EP_KERNEL=1`, `TPU_MOE_SKIP_PADDED_TOKENS=1`, `TPU_ENABLE_GDN_DYNAMIC_TILING=1`, `ENABLE_PREFIX_CACHING=True`, `VLLM_BLOCK_SIZE=512`, `VLLM_ASYNC_SCHEDULING=False`, `MAX_NUM_SEQS=128`, `CONCURRENCY=1024`, `GATEWAY_COUNT=16`), 64k context (`MAX_PROMPT_LEN=8192`, `MAX_RESPONSE_LEN=57344`, `MAX_MODEL_LEN=65536`, `MAX_TOKEN_LEN_PER_DEVICE=32768`, `STATIC_MICRO_BATCH_LEN=65536`), and `ROLLOUT_RS_THRESHOLD=0.0001_10000.0,1000.0`.
+- **Optional `GDN_ROW_SLOT_LEN=32768` (only when `CONTEXT_PARALLEL_SIZE=1` at 32k)**: When running without context parallelism (`CONTEXT_PARALLEL_SIZE=1`), you can export `GDN_ROW_SLOT_LEN=32768` to put one sequence per GatedDeltaNet row slot. Leave `GDN_ROW_SLOT_LEN` unset for the default `64k` (`CONTEXT_PARALLEL_SIZE=2`) configuration.
+- **Image for `run_qwen3_5_35b_deepswe.sh` & `run_qwen3_5_397b_deepswe.sh` (64k context)**: Both 64k recipes use context parallelism (`CP=2` on 35B, `CP=4` on 397B), which requires a TorchTitan commit with Qwen3.5 GatedDeltaNet context parallelism (`google-pytorch/torchtitan#200`, e.g. `6037e897f8` or later in `verl#8803`) and `vllm-torchtpu` with on-load FP8 MoE quantization (`c241a7d3c9` or later) when `QUANTIZE_ON_LOAD_PREFIXES=experts` is enabled.
 
-### Suggested command (TPU v7x)
+### Suggested command (TPU v7x, 64k context)
 ```bash
 kubectl exec -n "${NAMESPACE}" "${HEAD_POD}" -- \
   ray job submit --address=http://127.0.0.1:8265 --no-wait -- \
@@ -341,15 +341,15 @@ kubectl exec -n "${NAMESPACE}" "${HEAD_POD}" -- \
     export VERL_ROOT='/tmp/deepswe_src/verl' &&
     export RAY_DATA_HOME='/data/${USER_DIR}' &&
     export PROJECT_NAME='verl-tpu-deepswe' &&
-    export EXPERIMENT_NAME='qwen3_5_35b_deepswe_r2e_gym_v7x_50steps' &&
-    export TOTAL_TRAINING_STEPS=50 &&
-    export TEST_FREQ=10 &&
-    export VAL_BEFORE_TRAIN=False &&
+    export EXPERIMENT_NAME='qwen3_5_35b_64k_deepswe_32c_epoch1' &&
+    export TOTAL_TRAINING_STEPS=44 &&
+    export TEST_FREQ=11 &&
+    export VAL_BEFORE_TRAIN=True &&
+    export BYPASS_MODE=True &&
+    export QUANTIZE_ON_LOAD_PREFIXES='experts' &&
     export SANDBOX_NAMESPACE='${NAMESPACE}' &&
     export NODE_SELECTOR_KEY='cloud.google.com/gke-nodepool' &&
     export NODE_SELECTOR_VAL='sandbox-cpu-pool' &&
-    # Optional (only when image was built with TORCHTITAN_COMMIT=4e16e67aed8c1e702e6f440b1ff81619bb6873d4):
-    # export GDN_ROW_SLOT_LEN=32768 &&
     exec bash /tmp/deepswe_src/verl/recipe/deepswe_tpu/run_qwen3_5_35b_deepswe.sh \
       \"trainer.logger=['console','wandb']\" \
       \"+ray_kwargs.ray_init.runtime_env.env_vars.PYTHONPATH='\${PYTHONPATH}'\"
