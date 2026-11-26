@@ -59,6 +59,6 @@ def reduce_timing_metrics(timing_metrics):
     timing_metrics[compute_time] = sum(timing_metrics[compute_time][:experience_step])
     e2e_tps = timing_metrics["total_num_tokens"] / timing_metrics[e2e_time]
     compute_tps = timing_metrics["total_num_tokens"] / timing_metrics[compute_time]
-    timing_metrics.update({"perf/throughtput": e2e_tps})
-    timing_metrics.update({"compute/throughtput": compute_tps})
+    timing_metrics.update({"perf/throughput": e2e_tps})
+    timing_metrics.update({"compute/throughput": compute_tps})
     return timing_metrics
