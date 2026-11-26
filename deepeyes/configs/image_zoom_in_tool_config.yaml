@@ -1,7 +1,6 @@
 tools:
-  - class_name: "verl.tools.image_zoom_in_tool.ImageZoomInTool"
+  - class_name: "recipe.deepeyes.tools.image_zoom_in_tool.ImageZoomInTool"
     config:
-      num_workers: 256
       rate_limit: 256
       timeout: 60
       type: native

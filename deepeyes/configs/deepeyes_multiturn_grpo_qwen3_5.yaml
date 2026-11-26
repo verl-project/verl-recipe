@@ -1,0 +1,43 @@
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+data:
+  custom_cls:
+    path: "pkg://recipe.deepeyes.deepeyes"
+    name: CustomRLHFDatasetQwen35
+  image_key: images
+  # Qwen3.5 injects the opening <think> in the generation prompt.
+  apply_chat_template_kwargs:
+    enable_thinking: true
+  # About 4096 vision tokens per image; raise for small details.
+  mm_processor_kwargs:
+    max_pixels: 4194304
+  max_prompt_length: 8192
+  max_response_length: 16384
+  train_batch_size: 128
+  return_raw_chat: True
+  filter_overlong_prompts: True
+
+actor_rollout_ref:
+  hybrid_engine: True
+  rollout:
+    name: vllm
+    mode: async
+    multi_turn:
+      enable: True
+      max_assistant_turns: 5
+      max_user_turns: 5
+      max_parallel_calls: 1
+      tool_config_path: "recipe/deepeyes/configs/image_zoom_in_tool_config.yaml"
+      # Qwen3.5 emits XML tool calls.
+      format: qwen3_coder
+
+reward:
+  custom_reward_function:
+    path: "pkg://recipe.deepeyes.deepeyes"
+    name: compute_score
