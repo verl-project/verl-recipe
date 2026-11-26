@@ -1168,3 +1168,95 @@ def test_thunderagent_sglang_workers_use_internal_model_name(monkeypatch) -> Non
     base_calls.clear()
     server._build_sglang_cmd("test-model", 1, kv_events_config_json="{}")
     assert base_calls == [("test-model", {"kv_events_config_json": "{}"})]
+
+
+# --------------------------------------------------------------------------- #
+# Frontend request identity: one X-Request-Id per request, one session key per
+# trajectory.
+# --------------------------------------------------------------------------- #
+
+
+def _make_posting_server(responses):
+    """A bare server whose frontend POST is captured instead of sent."""
+    server = _make_bare_server()
+    server.posts = []
+    replies = list(responses)
+
+    async def post(payload, request_id, http_request_id=None):
+        server.posts.append((payload.get("request_id"), request_id, http_request_id))
+        return replies.pop(0)
+
+    server._frontend_post = post
+    server._build_frontend_completion_payload = lambda prompt_ids, sampling_params, request_id: {
+        "request_id": request_id
+    }
+    server._completion_response_to_token_output = lambda body, include_log_probs=False: body
+    return server
+
+
+def _ok_body() -> str:
+    return json.dumps({"choices": [{"text": "", "finish_reason": "stop"}]})
+
+
+@pytest.mark.asyncio
+async def test_concurrent_turns_of_one_trajectory_get_distinct_frontend_request_ids() -> None:
+    # verl reuses one request_id for every turn of a trajectory; Claude Code
+    # subagents make those turns concurrent, so the frontend must still see a
+    # unique id per request while the session key stays the trajectory's.
+    server = _make_posting_server([(200, _ok_body()), (200, _ok_body())])
+
+    await asyncio.gather(
+        server.generate(prompt_ids=[1], sampling_params={}, request_id="traj-1"),
+        server.generate(prompt_ids=[2], sampling_params={}, request_id="traj-1"),
+    )
+
+    payload_ids, session_keys, http_ids = zip(*server.posts, strict=True)
+    assert session_keys == ("traj-1", "traj-1")
+    assert http_ids[0] != http_ids[1]
+    assert payload_ids == http_ids
+    assert all(http_id.startswith("traj-1-") for http_id in http_ids)
+
+
+@pytest.mark.asyncio
+async def test_extension_field_retry_is_the_same_frontend_request() -> None:
+    server = _make_posting_server([(400, "Unsupported parameter: nvext"), (200, _ok_body())])
+
+    await server.generate(prompt_ids=[1], sampling_params={}, request_id="traj-1")
+
+    assert len(server.posts) == 2
+    assert server.posts[0][2] == server.posts[1][2]
+
+
+@pytest.mark.asyncio
+async def test_frontend_post_keeps_the_session_key_and_overrides_the_request_id() -> None:
+    server = _make_bare_server()
+    server.config = SimpleNamespace(engine_kwargs={"dynamo": {"router_session_affinity_ttl_secs": 60}})
+    server._server_address, server._server_port = "127.0.0.1", 8000
+    sent = {}
+
+    class _Response:
+        status = 200
+
+        async def text(self):
+            return ""
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _Session:
+        def post(self, url, *, json, headers, timeout):
+            sent.update(headers)
+            return _Response()
+
+    async def get_session():
+        return _Session()
+
+    server._get_http_session = get_session
+
+    await server._frontend_post({}, "traj-1", "traj-1-0001")
+
+    assert sent["x-dynamo-session-id"] == "traj-1"
+    assert sent["X-Request-Id"] == "traj-1-0001"

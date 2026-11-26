@@ -26,9 +26,14 @@ from types import SimpleNamespace
 import pytest
 from recipe.dynamo.dynamo_async_server import DynamoHttpServer
 from recipe.dynamo.dynamo_sglang_engine import (
+    API_DYNAMO,
+    API_NATIVE,
+    LAUNCH_MODE_SIDECAR,
+    LAUNCH_MODE_WORKER,
     ROUTE_UPDATE_WEIGHTS_FROM_TENSOR,
     DynamoSGLangControlClient,
     DynamoSGLangControlError,
+    sglang_launch_mode,
 )
 
 
@@ -462,6 +467,282 @@ async def test_ready_probes_the_native_flush_route():
     client = _client(session)
     assert await client.wait_ready(timeout_s=1, poll_s=0)
     assert session.calls == [("http://worker:11000/engine/flush_cache", {})]
+
+
+# --------------------------------------------------------------------------- #
+# sidecar mode: stock SGLang + dynamo.sglang.sidecar, native SGLang control API
+# --------------------------------------------------------------------------- #
+
+
+class _RawResponse(_FakeResponse):
+    """A 200 whose body is not a JSON object, as SGLang's native routes answer."""
+
+    def __init__(self, status, body_text):
+        super().__init__(status, None)
+        self._body_text = body_text
+
+    async def text(self):
+        return self._body_text
+
+    async def json(self, content_type=None):
+        return json.loads(self._body_text)  # raises for plain text, None for "null"
+
+
+class _RawSession(_FakeSession):
+    def __init__(self, body_text, status=200):
+        super().__init__(status=status)
+        self.body_text = body_text
+
+    def post(self, url, json=None, timeout=None):
+        self.calls.append((url, json))
+        return _RawResponse(self.status, self.body_text)
+
+
+def _native_client(session):
+    client = DynamoSGLangControlClient("http://engine:2048", api=API_NATIVE)
+    client._session = session
+    return client
+
+
+def _sidecar_cfg(**sglang):
+    return {"engine": "sglang", "sglang": {"launch_mode": "sidecar", **sglang}}
+
+
+def test_launch_mode_defaults_to_worker_and_is_validated():
+    assert sglang_launch_mode(None) == LAUNCH_MODE_WORKER
+    assert sglang_launch_mode({}) == LAUNCH_MODE_WORKER
+    assert sglang_launch_mode({"launch_mode": " Sidecar "}) == LAUNCH_MODE_SIDECAR
+    with pytest.raises(ValueError, match="launch_mode"):
+        sglang_launch_mode({"launch_mode": "grpc"})
+    assert _make_server({"engine": "sglang"})._is_sglang_sidecar() is False
+    assert _make_server(_sidecar_cfg())._is_sglang_sidecar() is True
+    # launch_mode only means something for the sglang engine
+    assert _make_server({"engine": "vllm", "sglang": {"launch_mode": "sidecar"}})._is_sglang_sidecar() is False
+
+
+def _sidecar_engine_cmd(dynamo_cfg=None, **rollout_cfg):
+    server = _make_server(dynamo_cfg if dynamo_cfg is not None else _sidecar_cfg(), **rollout_cfg)
+    return server._build_sglang_cmd(
+        "test-model",
+        server.config.tensor_model_parallel_size,
+        nccl_port=5000,
+        kv_events_config_json=DynamoHttpServer._build_kv_events_config_json(5557),
+        sidecar_engine=("10.0.0.1", 2048, 2049),
+    )
+
+
+def test_sidecar_engine_cmd_is_stock_sglang_with_http_and_grpc():
+    cmd = _sidecar_engine_cmd(tensor_model_parallel_size=4, gpu_memory_utilization=0.7, enable_sleep_mode=True)
+    assert cmd[1:3] == ["-m", "sglang.launch_server"]
+    assert cmd[cmd.index("--host") + 1] == "10.0.0.1"
+    assert cmd[cmd.index("--port") + 1] == "2048"
+    assert cmd[cmd.index("--grpc-port") + 1] == "2049"
+    # without it the sidecar silently drops the native /generate passthrough
+    assert "--incremental-streaming-output" in cmd
+    # shared engine mapping is unchanged
+    assert cmd[cmd.index("--tp-size") + 1] == "4"
+    assert cmd[cmd.index("--mem-fraction-static") + 1] == "0.7"
+    assert cmd[cmd.index("--nccl-port") + 1] == "5000"
+    assert "--enable-memory-saver" in cmd
+    assert json.loads(cmd[cmd.index("--kv-events-config") + 1])["endpoint"] == "tcp://*:5557"
+    # dynamo.sglang-only flags would make sglang.launch_server exit at argparse
+    assert "--enable-rl" not in cmd
+    assert not any(arg.startswith("--engine-route") for arg in cmd)
+
+
+def test_sidecar_engine_rejects_engine_route_extra_args():
+    with pytest.raises(ValueError, match="engine-route"):
+        _sidecar_engine_cmd(_sidecar_cfg(extra_args=["--engine-route", "flush_cache:tm"]))
+    with pytest.raises(ValueError, match="engine-route"):
+        _sidecar_engine_cmd(_sidecar_cfg(extra_args=["--engine-route=flush_cache:tm"]))
+
+
+def test_sidecar_cmd_raises_the_startup_deadline():
+    server = _make_server(_sidecar_cfg())
+    cmd = server._build_sglang_sidecar_cmd("http://10.0.0.1:2049")
+    assert cmd[1:3] == ["-m", "dynamo.sglang.sidecar"]
+    assert cmd[cmd.index("--grpc-endpoint") + 1] == "http://10.0.0.1:2049"
+    # the sidecar's own default (300 s) is shorter than a large-model load
+    assert int(cmd[cmd.index("--grpc-startup-deadline-secs") + 1]) >= 300
+
+    server = _make_server(_sidecar_cfg(sidecar_startup_deadline_s=1800, sidecar_extra_args=["--grpc-connections", "8"]))
+    cmd = server._build_sglang_sidecar_cmd("http://10.0.0.1:2049")
+    assert cmd[cmd.index("--grpc-startup-deadline-secs") + 1] == "1800"
+    assert cmd[-2:] == ["--grpc-connections", "8"]
+
+
+def test_stable_kv_event_ports_avoid_ephemeral_range_and_are_unique():
+    # The engine binds its KV-event port minutes after it is picked; a port in
+    # Linux's ephemeral range (32768-60999) can be taken by an outgoing
+    # connection in between (seen: ZMQError Address already in use, port 42160).
+    seen = set()
+    for replica_rank in range(4):
+        for node_rank in range(16):
+            server = _make_server({"engine": "sglang", "stable_kv_event_ports": True})
+            server.replica_rank, server.node_rank = replica_rank, node_rank
+            server._server_address = "127.0.0.1"
+            server._allocated_tcp_ports = set()
+            server._can_bind_tcp_port = lambda port, bind_wildcard=False: True
+            for shard_idx in range(8):
+                port = server._allocate_kv_event_port(shard_idx)
+                assert 60999 < port <= 65535, (replica_rank, node_rank, shard_idx, port)
+                assert port not in seen
+                seen.add(port)
+
+
+def test_spawn_sidecar_shard_starts_sidecar_then_engine(tmp_path, monkeypatch):
+    server = _make_server(_sidecar_cfg(), tensor_model_parallel_size=2)
+    server.replica_rank = 0
+    server.node_rank = 0
+    server._server_address = "127.0.0.1"
+    server._allocated_tcp_ports = set()
+    server._engine_processes = []
+    server._engine_log_fps = []
+    server._engine_log_paths = []
+
+    launched = []
+
+    class _Proc:
+        def __init__(self, cmd, env=None, stdout=None, stderr=None):
+            launched.append((cmd, env))
+
+    monkeypatch.setattr("recipe.dynamo.dynamo_async_server.subprocess.Popen", _Proc)
+    spec = SimpleNamespace(replica_rank=0, rank_offset=2, cuda_visible_devices="2,3", label="replica0_shard1")
+    env = {"CUDA_VISIBLE_DEVICES": "2,3", "DYN_SYSTEM_PORT": "11008", "DYN_NAMESPACE": "ns"}
+    try:
+        server._spawn_sglang_sidecar_shard(
+            spec=spec,
+            spec_idx=1,
+            n_specs=2,
+            served_model_name="test-model",
+            tp=2,
+            env=env,
+            kv_events_config_json=None,
+            log_dir=str(tmp_path),
+        )
+    finally:
+        for fp in server._engine_log_fps:
+            fp.close()
+
+    (sidecar_cmd, sidecar_env), (engine_cmd, engine_env) = launched
+    assert sidecar_cmd[1:3] == ["-m", "dynamo.sglang.sidecar"]
+    assert engine_cmd[1:3] == ["-m", "sglang.launch_server"]
+    # sidecar dials exactly the engine's gRPC port; control goes to its HTTP port
+    grpc_port = engine_cmd[engine_cmd.index("--grpc-port") + 1]
+    http_port = engine_cmd[engine_cmd.index("--port") + 1]
+    assert grpc_port != http_port
+    assert sidecar_cmd[sidecar_cmd.index("--grpc-endpoint") + 1] == f"http://127.0.0.1:{grpc_port}"
+    assert server._engine_control_endpoints == [f"http://127.0.0.1:{http_port}"]
+    # GPUs belong to the engine; the Dynamo system port to the sidecar
+    assert engine_env["CUDA_VISIBLE_DEVICES"] == "2,3"
+    assert sidecar_env["CUDA_VISIBLE_DEVICES"] == ""
+    assert sidecar_env["DYN_SYSTEM_PORT"] == "11008"
+    assert "DYN_SYSTEM_PORT" not in engine_env
+    assert sidecar_env["DYN_NAMESPACE"] == "ns"
+    # the caller's env is not mutated
+    assert env["CUDA_VISIBLE_DEVICES"] == "2,3"
+    # both processes are watched, logs line up with processes, one shard counted
+    assert len(server._engine_processes) == 2
+    assert [p.rsplit("/", 1)[-1] for p in server._engine_log_paths] == [
+        "replica0_shard1_sidecar.log",
+        "replica0_shard1_engine.log",
+    ]
+    assert server.get_num_engine_workers() == 2
+
+
+def test_sidecar_mode_builds_native_control_clients():
+    server = _make_server(_sidecar_cfg())
+    server._engine_control_endpoints = ["http://h:2048", "http://h:2056"]
+    assert [c.api for c in server._sglang_control_clients()] == [API_NATIVE, API_NATIVE]
+    worker = _make_server({"engine": "sglang"})
+    worker._engine_control_endpoints = ["http://h:11000"]
+    assert [c.api for c in worker._sglang_control_clients()] == [API_DYNAMO]
+
+
+def test_native_route_url_has_no_engine_or_control_prefix():
+    client = DynamoSGLangControlClient("http://engine:2048/", api=API_NATIVE)
+    assert client.route_url("release_memory_occupation") == "http://engine:2048/release_memory_occupation"
+    assert client.route_url(ROUTE_UPDATE_WEIGHTS_FROM_TENSOR) == "http://engine:2048/update_weights_from_tensor"
+    assert client.route_url("control/update_weight_version") == "http://engine:2048/update_weight_version"
+    with pytest.raises(DynamoSGLangControlError, match="call_tokenizer_manager"):
+        client.route_url("call_tokenizer_manager")
+    with pytest.raises(ValueError, match="api"):
+        DynamoSGLangControlClient("http://engine:2048", api="grpc")
+
+
+@pytest.mark.asyncio
+async def test_native_plain_text_flush_is_success():
+    session = _RawSession("Cache flushed.\nPlease check backend logs for more details.\n")
+    client = _native_client(session)
+    result = await client.flush_cache()
+    assert result["status"] == "ok"
+    assert session.calls == [("http://engine:2048/flush_cache", {})]
+    assert await client.wait_ready(timeout_s=1, poll_s=0)
+
+
+@pytest.mark.asyncio
+async def test_native_plain_text_is_still_an_error_on_the_dynamo_dialect():
+    client = _client(_RawSession("Cache flushed.\n"))
+    with pytest.raises(DynamoSGLangControlError, match="non-JSON"):
+        await client.flush_cache()
+
+
+@pytest.mark.asyncio
+async def test_native_flush_failure_status_raises():
+    """SGLang answers 400 (plain text) when it refuses to flush with requests running."""
+    client = _native_client(_RawSession("Flush cache failed.\n", status=400))
+    with pytest.raises(DynamoSGLangControlError, match="HTTP 400"):
+        await client.flush_cache()
+
+
+@pytest.mark.asyncio
+async def test_native_null_memory_occupation_is_success_and_pauses_first():
+    session = _RawSession("null")
+    client = _native_client(session)
+    await client.release_memory_occupation(tags=["kv_cache"])
+    await client.resume_memory_occupation(tags=["kv_cache"])
+    assert session.calls == [
+        ("http://engine:2048/pause_generation", {"mode": "abort"}),
+        ("http://engine:2048/release_memory_occupation", {"tags": ["kv_cache"]}),
+        ("http://engine:2048/resume_memory_occupation", {"tags": ["kv_cache"]}),
+        ("http://engine:2048/continue_generation", {}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_native_weight_update_wire_format_is_unchanged():
+    session = _FakeSession(payload={"success": True, "message": "ok"})
+    client = _native_client(session)
+    blob = bytes(range(256))
+    req = SimpleNamespace(serialized_named_tensors=[blob], load_format=None, flush_cache=False)
+    await client.update_weights_from_tensor(req)
+    url, body = session.calls[0]
+    assert url == "http://engine:2048/update_weights_from_tensor"
+    assert base64.b64decode(body["serialized_named_tensors"][0]) == blob
+    # a {"success": false} body still fails on the native dialect
+    client = _native_client(_FakeSession(payload={"success": False, "message": "deserialize failed"}))
+    with pytest.raises(DynamoSGLangControlError, match="deserialize failed"):
+        await client.update_weights_from_tensor(req)
+
+
+@pytest.mark.asyncio
+async def test_native_weight_readback_uses_get_weights_by_name():
+    session = _FakeSession(payload=[0.5, -0.25])
+    client = _native_client(session)
+    assert await client.get_weights_by_name("model.embed_tokens.weight", truncate_size=2) == [0.5, -0.25]
+    assert session.calls == [
+        ("http://engine:2048/get_weights_by_name", {"name": "model.embed_tokens.weight", "truncate_size": 2})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_worker_weight_readback_keeps_the_legacy_passthrough():
+    session = _FakeSession(payload={"result": [0.5]})
+    client = _client(session)
+    await client.get_weights_by_name("w", truncate_size=1)
+    url, body = session.calls[0]
+    assert url == "http://worker:11000/engine/call_tokenizer_manager"
+    assert body["args"] == [{"io_struct.GetWeightsByNameReqInput": {"name": "w", "truncate_size": 1}}]
 
 
 # --------------------------------------------------------------------------- #
@@ -921,3 +1202,578 @@ def test_facade_imports_without_vllm(monkeypatch):
     # the vLLM subclass still exists, but instantiating it must say why it cannot work
     with pytest.raises(RuntimeError, match="needs the vLLM package"):
         mod.VllmDynamoServerAdapter()
+
+
+# --------------------------------------------------------------------------- #
+# native /generate data plane (engine_kwargs.dynamo.generate_api=generate)
+# --------------------------------------------------------------------------- #
+
+
+def _native_server(dynamo_cfg=None, **rollout_cfg):
+    cfg = {"engine": "sglang", "generate_api": "generate", "sglang": {"launch_mode": "sidecar"}}
+    cfg.update(dynamo_cfg or {})
+    rollout = {"prompt_length": 100, "response_length": 50}
+    rollout.update(rollout_cfg)
+    server = _make_server(cfg, **rollout)
+    server.global_steps = 3
+    server.model_config.tokenizer = SimpleNamespace(eos_token_id=2, pad_token_id=0)
+    return server
+
+
+def _sglang_response(output_ids, finish="stop", logprobs=True, **meta):
+    meta_info = {"finish_reason": finish if isinstance(finish, dict) else {"type": finish}}
+    meta_info["completion_tokens"] = len(output_ids)
+    if logprobs:
+        meta_info["output_token_logprobs"] = [[-0.5 - i, tok, None] for i, tok in enumerate(output_ids)]
+    meta_info.update(meta)
+    return {"output_ids": list(output_ids), "meta_info": meta_info}
+
+
+def test_generate_api_defaults_to_completions_and_is_validated():
+    assert _make_server({"engine": "sglang"})._generate_api() == "completions"
+    assert _native_server()._use_native_generate() is True
+    with pytest.raises(ValueError, match="generate_api"):
+        _make_server({"engine": "sglang", "generate_api": "chat"})._generate_api()
+    # vLLM's /inference/v1/generate is a different body; refuse rather than mis-speak it
+    with pytest.raises(ValueError, match="engine=sglang only"):
+        _make_server({"engine": "vllm", "generate_api": "generate"})._generate_api()
+
+
+def test_native_payload_mirrors_verl_sglang_request():
+    server = _native_server()
+    payload = server._build_frontend_generate_payload(
+        [1, 2, 3],
+        {
+            "temperature": 1.0,
+            "top_p": 0.9,
+            "top_k": -1,
+            "repetition_penalty": 1.0,
+            "logprobs": True,
+            "max_tokens": 20,
+            "prompt_logprobs": None,
+            "nvext": {"extra_fields": ["engine_data"]},
+            "stop_token_ids": [7],
+            "seed": None,
+        },
+        "traj-1-abc",
+    )
+    assert payload == {
+        "rid": "traj-1-abc",
+        "input_ids": [1, 2, 3],
+        "sampling_params": {
+            "max_new_tokens": 20,
+            "temperature": 1.0,
+            "top_p": 0.9,
+            "top_k": -1,
+            "repetition_penalty": 1.0,
+            "stop_token_ids": [7],
+        },
+        "return_logprob": True,
+        "stream": False,
+    }
+
+
+@pytest.mark.parametrize(
+    "prompt_len,sampling,expected",
+    [
+        (10, {}, 50),  # default: response_length
+        (120, {}, 30),  # default bounded by the remaining budget (100 + 50 - 120)
+        (120, {"max_tokens": 40}, 30),  # explicit budget bounded too
+        (10, {"max_new_tokens": 7, "max_tokens": 40}, 7),  # SGLang's own name wins
+        (200, {}, 1),  # never below 1, as on the completions path
+    ],
+)
+def test_native_max_new_tokens_matches_the_completions_budget(prompt_len, sampling, expected):
+    server = _native_server()
+    payload = server._build_frontend_generate_payload(list(range(prompt_len)), dict(sampling), "r")
+    assert payload["sampling_params"]["max_new_tokens"] == expected
+    assert "max_tokens" not in payload["sampling_params"]
+
+
+def test_native_response_keeps_engine_ids_and_checked_logprobs():
+    out = _native_server()._sglang_generate_response_to_token_output(_sglang_response([5, 6, 2]), True)
+    assert out.token_ids == [5, 6, 2]
+    assert out.log_probs == [-0.5, -1.5, -2.5]
+    assert out.stop_reason == "completed"
+    assert out.extra_fields == {"global_steps": 3}
+    length = _native_server()._sglang_generate_response_to_token_output(
+        _sglang_response([5, 6], finish={"type": "length", "length": 2}, logprobs=False), False
+    )
+    assert length.log_probs is None and length.stop_reason == "completed"
+
+
+def test_native_plain_abort_keeps_partial_tokens_for_resume():
+    """pause_generation(mode=abort) during a weight sync: keep what was sampled."""
+    server = _native_server()
+    out = server._sglang_generate_response_to_token_output(
+        _sglang_response([5, 6], finish={"type": "abort", "message": "Abort before"}), True
+    )
+    assert out.token_ids == [5, 6] and out.stop_reason == "aborted"
+    empty = server._sglang_generate_response_to_token_output(_sglang_response([], finish="abort"), True)
+    assert empty.token_ids == [] and empty.log_probs == [] and empty.stop_reason == "aborted"
+    assert empty.extra_fields == {}
+
+
+def test_native_error_abort_raises():
+    finish = {"type": "abort", "message": "input too long", "status_code": 400, "err_type": "BadRequest"}
+    with pytest.raises(RuntimeError, match="input too long"):
+        _native_server()._sglang_generate_response_to_token_output(_sglang_response([5], finish=finish), False)
+
+
+def test_native_empty_completion_is_loud_not_a_fake_eos():
+    with pytest.raises(RuntimeError, match="no output_ids"):
+        _native_server()._sglang_generate_response_to_token_output(_sglang_response([], finish="stop"), False)
+
+
+def test_native_truncated_sequence_is_refused():
+    data = _sglang_response([5, 6], finish="stop", completion_tokens=3)
+    with pytest.raises(RuntimeError, match="completion_tokens=3"):
+        _native_server()._sglang_generate_response_to_token_output(data, False)
+
+
+def test_native_logprobs_must_align_with_output_ids():
+    data = _sglang_response([5, 6], finish="stop")
+    data["meta_info"]["output_token_logprobs"][1][1] = 9
+    with pytest.raises(RuntimeError, match="does not match"):
+        _native_server()._sglang_generate_response_to_token_output(data, True)
+    short = _sglang_response([5, 6], finish="stop")
+    short["meta_info"]["output_token_logprobs"] = short["meta_info"]["output_token_logprobs"][:1]
+    with pytest.raises(RuntimeError, match="does not cover"):
+        _native_server()._sglang_generate_response_to_token_output(short, True)
+    # an aborted response with inconsistent logprobs is dropped for a retry, not trained on
+    short["meta_info"]["finish_reason"] = {"type": "abort"}
+    out = _native_server()._sglang_generate_response_to_token_output(short, True)
+    assert out.token_ids == [] and out.stop_reason == "aborted"
+
+
+@pytest.mark.parametrize("output_ids", [["5"], [5.0], [True], "56"])
+def test_native_non_integer_output_ids_are_rejected(output_ids):
+    data = _sglang_response([], finish="stop", logprobs=False)
+    data["output_ids"] = output_ids
+    with pytest.raises(RuntimeError, match="not a list of token ids"):
+        _native_server()._sglang_generate_response_to_token_output(data, False)
+
+
+def test_native_unknown_finish_reason_is_rejected():
+    with pytest.raises(RuntimeError, match="unknown finish_reason"):
+        _native_server()._sglang_generate_response_to_token_output(_sglang_response([5], finish=None), False)
+
+
+@pytest.mark.asyncio
+async def test_generate_dispatches_to_native_route_with_same_headers():
+    server = _native_server()
+    server._server_address = "10.0.0.1"
+    server._server_port = 8000
+    server._generation_resumed = asyncio.Event()
+    server._generation_resumed.set()
+    posts = []
+
+    async def fake_post(payload, request_id, http_request_id=None, url=None):
+        posts.append((payload, request_id, http_request_id, url))
+        return 200, json.dumps(_sglang_response([5, 2]))
+
+    server._frontend_post = fake_post
+    out = await server.generate([1, 2, 3], {"logprobs": True, "temperature": 1.0}, "traj-7")
+    assert out.token_ids == [5, 2] and out.log_probs == [-0.5, -1.5]
+    payload, request_id, http_request_id, url = posts[0]
+    assert url == "http://10.0.0.1:8000/generate"
+    # trajectory id stays the affinity/session key; each request gets a unique id
+    assert request_id == "traj-7" and http_request_id.startswith("traj-7-")
+    assert payload["rid"] == http_request_id and payload["input_ids"] == [1, 2, 3]
+
+
+@pytest.mark.asyncio
+async def test_generate_keys_affinity_on_session_id_not_per_turn_request_id():
+    # verl's LLMServerManager sends request_id=uuid4() per turn plus
+    # session_id=<trajectory key>; affinity must follow the trajectory.
+    server = _native_server()
+    server.config.engine_kwargs["dynamo"]["router_session_affinity_ttl_secs"] = 600
+    server._server_address = "10.0.0.1"
+    server._server_port = 8000
+    server._generation_resumed = asyncio.Event()
+    server._generation_resumed.set()
+    headers = []
+
+    async def fake_post(payload, request_id, http_request_id=None, url=None):
+        headers.append(server._frontend_headers(request_id))
+        return 200, json.dumps(_sglang_response([5]))
+
+    server._frontend_post = fake_post
+    for turn in ("turn-uuid-1", "turn-uuid-2"):
+        await server.generate([1, 2], {"logprobs": True}, turn, session_id="traj-9")
+    assert [h["x-dynamo-session-id"] for h in headers] == ["traj-9", "traj-9"]
+
+
+@pytest.mark.asyncio
+async def test_native_frontend_error_during_pause_is_reported_as_aborted():
+    server = _native_server()
+    server._server_address = "10.0.0.1"
+    server._server_port = 8000
+    server._generation_resumed = asyncio.Event()
+    server._generation_resumed.set()
+
+    async def failing_post(payload, request_id, http_request_id=None, url=None):
+        server._generation_resumed.clear()  # abort_all_requests ran while in flight
+        return 503, "engine paused"
+
+    server._frontend_post = failing_post
+    out = await server.generate([1], {"logprobs": True}, "traj-8")
+    assert out.token_ids == [] and out.stop_reason == "aborted"
+
+
+def test_frontend_mounts_native_generate_only_when_selected(monkeypatch, tmp_path):
+    started = []
+
+    class _Proc:
+        def __init__(self, cmd, env=None, stdout=None, stderr=None):
+            started.append(env)
+
+    monkeypatch.setattr("recipe.dynamo.dynamo_async_server.subprocess.Popen", _Proc)
+    monkeypatch.setenv("VERL_DYNAMO_LOG_DIR", str(tmp_path))
+    monkeypatch.delenv("DYN_SGLANG_ENABLE_GENERATE", raising=False)
+    for cfg, expected in (({}, None), ({"generate_api": "generate"}, "1")):
+        server = _make_server({"engine": "sglang", **cfg})
+        server.replica_rank = 0
+        server._frontend_process = None
+        server._frontend_port = 8000
+        server._router_mode = "round-robin"
+        server._namespace = "ns"
+        server._allocated_tcp_ports = set()
+        server._server_address = "127.0.0.1"
+        server._dynamo_env_vars = lambda: {}
+        server._frontend_router_args = lambda: []
+        server._start_frontend()
+        server._frontend_log_fp.close()
+        assert started[-1].get("DYN_SGLANG_ENABLE_GENERATE") == expected
+
+
+# --------------------------------------------------------------------------- #
+# rollout routing replay (R3) on the native /generate path
+# --------------------------------------------------------------------------- #
+
+_R3_LAYERS, _R3_TOPK = 3, 2
+
+
+def _r3_server(dynamo_cfg=None, **rollout_cfg):
+    server = _native_server(dynamo_cfg, enable_rollout_routing_replay=True, **rollout_cfg)
+    server.model_config.hf_config = SimpleNamespace(num_hidden_layers=_R3_LAYERS, num_experts_per_tok=_R3_TOPK)
+    return server
+
+
+def _routing(rows):
+    """Deterministic (rows, layers, topk) routing and its SGLang wire form (base64 int32)."""
+    import numpy as np
+
+    arr = np.arange(rows * _R3_LAYERS * _R3_TOPK, dtype=np.int32).reshape(rows, _R3_LAYERS, _R3_TOPK)
+    return arr, base64.b64encode(arr.tobytes()).decode("utf-8")
+
+
+def test_r3_requires_sidecar_and_native_generate():
+    _r3_server()._check_routing_replay_support()  # sidecar + /generate: accepted
+    _native_server()._check_routing_replay_support()  # R3 off: nothing to check
+    refused = (
+        {"generate_api": "completions"},  # /v1/completions cannot carry routed experts
+        {"sglang": {"launch_mode": "worker"}},  # dynamo.sglang worker passthrough unverified
+        {"direct_generate": True},  # bypasses the frontend
+    )
+    for cfg in refused:
+        with pytest.raises(ValueError, match="enable_rollout_routing_replay"):
+            _r3_server(cfg)._check_routing_replay_support()
+    with pytest.raises(ValueError, match="enable_rollout_routing_replay"):
+        _make_server({"engine": "vllm"}, enable_rollout_routing_replay=True)._check_routing_replay_support()
+
+
+def test_r3_engine_flag_and_request_field_follow_the_rollout_flag():
+    assert "--enable-return-routed-experts" in _sidecar_engine_cmd(enable_rollout_routing_replay=True)
+    assert "--enable-return-routed-experts" not in _sidecar_engine_cmd()
+    assert _r3_server()._build_frontend_generate_payload([1, 2], {}, "r")["return_routed_experts"] is True
+    assert "return_routed_experts" not in _native_server()._build_frontend_generate_payload([1, 2], {}, "r")
+
+
+def test_r3_full_sequence_routing_decodes_like_verl_native():
+    """prompt 4 + output 3 -> positions [0, 6): SGLang has not forwarded the last token."""
+    import numpy as np
+
+    expected, wire = _routing(4 + 3 - 1)
+    out = _r3_server()._sglang_generate_response_to_token_output(
+        _sglang_response([5, 6, 2], routed_experts=wire), True, prompt_len=4
+    )
+    assert out.token_ids == [5, 6, 2] and out.stop_reason == "completed"
+    assert out.routed_experts.shape == (6, _R3_LAYERS, _R3_TOPK)
+    assert out.routed_experts.dtype == np.int32
+    np.testing.assert_array_equal(out.routed_experts, expected)
+    # same bytes verl's native server gets from sglang's extract_routed_experts_from_meta_info
+    native = np.frombuffer(base64.b64decode(wire.encode("utf-8")), dtype=np.int32)
+    np.testing.assert_array_equal(out.routed_experts, native.reshape(-1, _R3_LAYERS, _R3_TOPK))
+
+
+def test_r3_off_ignores_routing_in_the_response():
+    _, wire = _routing(6)
+    out = _native_server()._sglang_generate_response_to_token_output(
+        _sglang_response([5, 6, 2], routed_experts=wire), True, prompt_len=4
+    )
+    assert out.routed_experts is None
+
+
+def test_r3_reads_text_config_for_multimodal_wrappers():
+    server = _r3_server()
+    server.model_config.hf_config = SimpleNamespace(
+        text_config=SimpleNamespace(num_hidden_layers=_R3_LAYERS, num_experts_per_tok=_R3_TOPK)
+    )
+    assert server._routed_experts_shape() == (_R3_LAYERS, _R3_TOPK)
+    server.model_config.hf_config = SimpleNamespace(num_hidden_layers=4)  # dense model
+    with pytest.raises(AttributeError, match="num_experts_per_tok"):
+        server._routed_experts_shape()
+
+
+@pytest.mark.parametrize(
+    "meta,match",
+    [
+        ({}, "no meta_info.routed_experts"),  # engine launched without the flag
+        ({"routed_experts": _routing(5)[1]}, "expected prompt\\+output-1"),  # one row short
+        ({"routed_experts": base64.b64encode(b"\x00" * 4 * 7).decode()}, "not a multiple"),
+    ],
+)
+def test_r3_completed_turn_without_exact_routing_raises(meta, match):
+    with pytest.raises(RuntimeError, match=match):
+        _r3_server()._sglang_generate_response_to_token_output(_sglang_response([5, 6, 2], **meta), True, prompt_len=4)
+
+
+def test_r3_aborted_partial_keeps_tokens_only_with_routing():
+    """A kept partial must carry its rows, or the client's next append lands after a gap."""
+    server = _r3_server()
+    abort = {"type": "abort", "message": "Abort before"}
+    _, wire = _routing(4 + 2 - 1)
+    kept = server._sglang_generate_response_to_token_output(
+        _sglang_response([5, 6], finish=abort, routed_experts=wire), True, prompt_len=4
+    )
+    assert kept.token_ids == [5, 6] and kept.stop_reason == "aborted"
+    assert kept.routed_experts.shape == (5, _R3_LAYERS, _R3_TOPK)
+    dropped = server._sglang_generate_response_to_token_output(
+        _sglang_response([5, 6], finish=abort), True, prompt_len=4
+    )
+    assert dropped.token_ids == [] and dropped.stop_reason == "aborted" and dropped.routed_experts is None
+
+
+@pytest.mark.asyncio
+async def test_r3_generate_checks_rows_against_the_sent_prompt():
+    import numpy as np
+
+    server = _r3_server()
+    server._server_address = "10.0.0.1"
+    server._server_port = 8000
+    server._generation_resumed = asyncio.Event()
+    server._generation_resumed.set()
+    expected, wire = _routing(3 + 2 - 1)
+    sent = []
+
+    async def fake_post(payload, request_id, http_request_id=None, url=None):
+        sent.append(payload)
+        return 200, json.dumps(_sglang_response([5, 2], routed_experts=wire))
+
+    server._frontend_post = fake_post
+    out = await server.generate([1, 2, 3], {"logprobs": True}, "traj-r3")
+    assert sent[0]["return_routed_experts"] is True
+    np.testing.assert_array_equal(out.routed_experts, expected)
+
+
+# --------------------------------------------------------------------------- #
+# frontend readiness on ai-dynamo 1.7 (/health without an instance list)
+# --------------------------------------------------------------------------- #
+
+_WORKER_STATE = (
+    'dynamo_frontend_router_worker_state{{model="m",reason="none",router_worker_id="{wid}",'
+    'state="{state}",target_component="backend",target_endpoint="{ep}",target_namespace="ns",'
+    'worker_type="decode"}} {value}'
+)
+
+
+def test_available_generate_workers_are_counted_from_router_metrics():
+    text = "\n".join(
+        [
+            "# HELP dynamo_frontend_router_worker_state worker state",
+            _WORKER_STATE.format(wid="1", state="available", ep="generate", value=1),
+            _WORKER_STATE.format(wid="1", state="available", ep="generate", value=1),  # same worker twice
+            _WORKER_STATE.format(wid="2", state="available", ep="generate", value=1),
+            _WORKER_STATE.format(wid="3", state="busy", ep="generate", value=1),
+            _WORKER_STATE.format(wid="4", state="available", ep="clear_kv_blocks", value=1),
+            _WORKER_STATE.format(wid="5", state="available", ep="generate", value=0),
+            'dynamo_component_router_ttft_seconds_count{worker_id="6"} 3',
+        ]
+    )
+    assert DynamoHttpServer._count_available_generate_workers(text) == 2
+    assert DynamoHttpServer._count_available_generate_workers("") == 0
+
+
+@pytest.mark.asyncio
+async def test_healthcheck_reads_router_metrics_when_health_has_no_instances(monkeypatch):
+    server = _make_server({"engine": "sglang"})
+    server._frontend_port = 8000
+    server._raise_if_subprocess_died = lambda: None
+    metrics = "\n".join(_WORKER_STATE.format(wid=w, state="available", ep="generate", value=1) for w in "12")
+    seen = []
+
+    def fake_get(url, timeout):
+        seen.append(url)
+        if url.endswith("/health"):
+            return SimpleNamespace(status_code=200, json=lambda: {"status": "healthy", "stage": "ready"})
+        return SimpleNamespace(status_code=200, text=metrics)
+
+    monkeypatch.setattr("recipe.dynamo.dynamo_async_server.requests.get", fake_get)
+    await server._healthcheck_frontend(expected_workers=2)
+    assert seen == ["http://localhost:8000/health", "http://localhost:8000/metrics"]
+
+
+def _flush_server(failures: list):
+    server = DynamoHttpServer.__new__(DynamoHttpServer)
+    calls = []
+
+    async def control_all(method, *args, **kwargs):
+        calls.append(method)
+        if failures:
+            raise failures.pop(0)
+        return []
+
+    server._sglang_control_all = control_all
+    return server, calls
+
+
+def test_flush_cache_retries_while_aborted_requests_drain():
+    busy = RuntimeError("dynamo.sglang control call 'flush_cache' failed on [(url, 'HTTP 400: Flush cache failed.')]")
+    server, calls = _flush_server([busy, busy])
+    asyncio.run(server._sglang_flush_cache_all(timeout_s=5, poll_s=0))
+    assert calls == ["flush_cache"] * 3
+
+
+def test_flush_cache_raises_other_errors_and_gives_up_at_deadline():
+    server, calls = _flush_server([RuntimeError("HTTP 500: boom")])
+    with pytest.raises(RuntimeError, match="HTTP 500"):
+        asyncio.run(server._sglang_flush_cache_all(timeout_s=5, poll_s=0))
+    assert calls == ["flush_cache"]
+    server, calls = _flush_server([RuntimeError("HTTP 400: busy")] * 50)
+    with pytest.raises(RuntimeError, match="HTTP 400"):
+        asyncio.run(server._sglang_flush_cache_all(timeout_s=0, poll_s=0))
+    assert calls == ["flush_cache"]
+
+
+# --------------------------------------------------------------------------- #
+# prefill/decode disaggregation
+# --------------------------------------------------------------------------- #
+
+
+def _pd_server(**disagg):
+    return _make_server({"engine": "sglang", "sglang": {"disaggregation": disagg}})
+
+
+def test_disaggregation_off_by_default():
+    assert _make_server({"engine": "sglang"})._sglang_disagg_roles(2) is None
+    assert _pd_server(prefill_shards=0)._sglang_disagg_roles(2) is None
+
+
+def test_disaggregation_splits_shards_prefill_first():
+    assert _pd_server(prefill_shards=1)._sglang_disagg_roles(2) == ["prefill", "decode"]
+    assert _pd_server(prefill_shards=3)._sglang_disagg_roles(8) == ["prefill"] * 3 + ["decode"] * 5
+
+
+@pytest.mark.parametrize("k", [2, 3])
+def test_disaggregation_needs_a_decode_shard(k):
+    with pytest.raises(ValueError, match="at least one decode shard"):
+        _pd_server(prefill_shards=k)._sglang_disagg_roles(2)
+
+
+def _pd_sidecar_server(**rollout_cfg):
+    return _make_server(
+        {"engine": "sglang", "sglang": {"launch_mode": "sidecar", "disaggregation": {"prefill_shards": 1}}},
+        **rollout_cfg,
+    )
+
+
+def test_disaggregation_works_in_sidecar_mode():
+    assert _pd_sidecar_server()._sglang_disagg_roles(2) == ["prefill", "decode"]
+
+
+def test_disaggregation_rejects_routing_replay():
+    with pytest.raises(ValueError, match="routing replay"):
+        _pd_sidecar_server(enable_rollout_routing_replay=True)._sglang_disagg_roles(2)
+
+
+@pytest.mark.parametrize("role", ["prefill", "decode"])
+def test_spawn_sidecar_pd_shard_matches_engine_and_sidecar_roles(tmp_path, monkeypatch, role):
+    server = _pd_sidecar_server()
+    server.replica_rank = 0
+    server.node_rank = 0
+    server._server_address = "127.0.0.1"
+    server._allocated_tcp_ports = set()
+    server._engine_processes = []
+    server._engine_log_fps = []
+    server._engine_log_paths = []
+    server._can_bind_tcp_port = lambda port, bind_wildcard=False: True
+    launched = []
+
+    class _Proc:
+        def __init__(self, cmd, env=None, stdout=None, stderr=None):
+            launched.append(cmd)
+
+    monkeypatch.setattr("recipe.dynamo.dynamo_async_server.subprocess.Popen", _Proc)
+    spec = SimpleNamespace(replica_rank=0, rank_offset=0, cuda_visible_devices="0", label="replica0_shard0")
+    try:
+        server._spawn_sglang_sidecar_shard(
+            spec=spec,
+            spec_idx=0,
+            n_specs=2,
+            served_model_name="m",
+            tp=1,
+            env={"CUDA_VISIBLE_DEVICES": "0"},
+            kv_events_config_json=None,
+            log_dir=str(tmp_path),
+            disagg_role=role,
+        )
+    finally:
+        for fp in server._engine_log_fps:
+            fp.close()
+
+    sidecar_cmd, engine_cmd = launched
+    assert sidecar_cmd[sidecar_cmd.index("--disaggregation-mode") + 1] == role
+    assert engine_cmd[engine_cmd.index("--disaggregation-mode") + 1] == role
+    # the engine binds the node address itself; no 0.0.0.0 rebind as in worker mode
+    assert engine_cmd.count("--host") == 1 and engine_cmd[engine_cmd.index("--host") + 1] == "127.0.0.1"
+    if role == "prefill":
+        assert sidecar_cmd[sidecar_cmd.index("--bootstrap-host") + 1] == "127.0.0.1"
+        ports = {
+            engine_cmd[engine_cmd.index(f) + 1] for f in ("--port", "--grpc-port", "--disaggregation-bootstrap-port")
+        }
+        assert len(ports) == 3
+    else:
+        assert "--bootstrap-host" not in sidecar_cmd
+        assert "--disaggregation-bootstrap-port" not in engine_cmd
+
+
+def test_disaggregation_cmd_flags():
+    server = _pd_server(prefill_shards=1, transfer_backend="nixl")
+    pre = server._build_sglang_cmd("m", 1, disagg_role="prefill", bootstrap_port=31000)
+    dec = server._build_sglang_cmd("m", 1, disagg_role="decode")
+    assert pre[pre.index("--disaggregation-mode") + 1] == "prefill"
+    assert pre[pre.index("--disaggregation-bootstrap-port") + 1] == "31000"
+    assert pre[pre.index("--disaggregation-transfer-backend") + 1] == "nixl"
+    assert "--disable-radix-cache" not in pre
+    # decode reaches the bootstrap server at the node address, not loopback
+    assert pre[pre.index("--host") + 1] == "0.0.0.0"
+    assert "--host" not in dec
+    assert dec[dec.index("--disaggregation-mode") + 1] == "decode"
+    assert "--disaggregation-bootstrap-port" not in dec
+    assert "--disable-radix-cache" in dec
+    agg = server._build_sglang_cmd("m", 1)
+    assert "--disaggregation-mode" not in agg
+
+
+def test_disaggregation_prefill_needs_bootstrap_port():
+    with pytest.raises(ValueError, match="bootstrap port"):
+        _pd_server(prefill_shards=1)._build_sglang_cmd("m", 1, disagg_role="prefill")
+
+
+def test_disaggregation_keeps_an_explicit_host():
+    server = _make_server(
+        {"engine": "sglang", "sglang": {"disaggregation": {"prefill_shards": 1}, "extra_args": ["--host", "10.0.0.5"]}}
+    )
+    cmd = server._build_sglang_cmd("m", 1, disagg_role="prefill", bootstrap_port=31000)
+    assert cmd.count("--host") == 1 and cmd[cmd.index("--host") + 1] == "10.0.0.5"

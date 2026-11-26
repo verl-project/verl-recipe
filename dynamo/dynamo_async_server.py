@@ -36,6 +36,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -91,22 +92,48 @@ _ETCD_READY_TIMEOUT_S = 30.0
 _NATS_READY_TIMEOUT_S = 30.0
 _WATCHDOG_INTERVAL_S = 5.0
 _VLLM_TCPSTORE_PORT_BASE = int(os.getenv("VERL_DYNAMO_VLLM_PORT_BASE", "20000"))
-_KV_EVENT_PORT_BASE = int(os.getenv("VERL_DYNAMO_KV_EVENT_PORT_BASE", "42000"))
+# Above Linux's default ephemeral range (32768-60999): the engine binds this port
+# only after loading weights (and allocating HiCache), minutes after it was
+# picked, and an outgoing connection's ephemeral port can take it meanwhile.
+# The KV-event layout below spans at most 4096 ports, so 61000 stays <= 65535.
+_KV_EVENT_PORT_BASE = int(os.getenv("VERL_DYNAMO_KV_EVENT_PORT_BASE", "61000"))
 # Opt-in per-worker system-status/metrics port base. Kept well below 32768 so
 # Dynamo's Rust runtime (which parses DYN_SYSTEM_PORT as i16) accepts it, and
 # below the 20000 vLLM-TCPStore window to avoid overlap. Only used when
 # rollout.engine_kwargs.dynamo.enable_worker_system_metrics=true.
 _SYSTEM_METRICS_PORT_BASE = int(os.getenv("VERL_DYNAMO_SYSTEM_METRICS_PORT_BASE", "11000"))
+# sglang sidecar mode: per-shard window holding the stock engine's HTTP and gRPC
+# ports. 2048..10239 spans every replica/node/shard slot and stays clear of the
+# system-metrics (11000+) and vLLM TCPStore (20000+) windows.
+_SGLANG_ENGINE_PORT_BASE = int(os.getenv("VERL_DYNAMO_SGLANG_ENGINE_PORT_BASE", "2048"))
 
 # Inference engine behind Dynamo. "vllm" keeps the historical path (thin
 # _dynamo_vllm_with_control wrapper + ZMQ control sidecar + worker_extension_cls);
 # "sglang" launches bare `python -m dynamo.sglang` and drives it entirely through
 # the /engine/control/* HTTP routes dynamo.sglang registers natively, so it needs
 # no sidecar and no worker extension. Selected via
-# rollout.engine_kwargs.dynamo.engine.
+# rollout.engine_kwargs.dynamo.engine. With engine_kwargs.dynamo.sglang.launch_mode
+# =sidecar, sglang instead runs stock sglang.launch_server plus Dynamo's Rust
+# dynamo.sglang.sidecar per shard, controlled over SGLang's own HTTP API (a Dynamo
+# sidecar, unrelated to the verl-private vLLM ZMQ control sidecar).
 ENGINE_VLLM = "vllm"
 ENGINE_SGLANG = "sglang"
 _SUPPORTED_ENGINES = (ENGINE_VLLM, ENGINE_SGLANG)
+
+# Frontend data-plane API for token generation (engine_kwargs.dynamo.generate_api).
+# "completions": OpenAI /v1/completions with token-id prompts and nvext token-id
+# extensions (default). "generate": the engine-native /generate route, which takes
+# input_ids and returns the engine's own output_ids/meta_info -- SGLang's format
+# today. The frontend mounts it only with DYN_SGLANG_ENABLE_GENERATE set.
+GENERATE_API_COMPLETIONS = "completions"
+GENERATE_API_NATIVE = "generate"
+_GENERATE_APIS = (GENERATE_API_COMPLETIONS, GENERATE_API_NATIVE)
+_SGLANG_ENABLE_GENERATE_ENV = "DYN_SGLANG_ENABLE_GENERATE"
+_SGLANG_GENERATE_PATH = "/generate"
+# Rollout routing replay (R3): SGLang records the routed experts of every
+# position when launched with this flag and the request sets
+# return_routed_experts; verl's native SGLang server does the same.
+_SGLANG_ROUTED_EXPERTS_FLAG = "--enable-return-routed-experts"
 
 
 @dataclass(frozen=True)
@@ -325,10 +352,108 @@ class DynamoHttpServer:
         """Return ``rollout.engine_kwargs.dynamo.sglang`` dict (or empty)."""
         return self._dynamo_cfg().get("sglang", {}) or {}
 
-    def get_engine_control_endpoints(self) -> list[str]:
-        """Base URLs of this node's per-shard ``/engine/*`` control planes.
+    def _generate_api(self) -> str:
+        """``engine_kwargs.dynamo.generate_api``: ``completions`` (default) or ``generate``.
 
-        Ordered by shard index, so a trainer rank can index with
+        ``generate`` speaks SGLang's native request/response body, so it is refused
+        for vLLM, whose ``/inference/v1/generate`` is a different format.
+        """
+        api = str(self._dynamo_cfg().get("generate_api") or GENERATE_API_COMPLETIONS).strip().lower()
+        if api not in _GENERATE_APIS:
+            raise ValueError(f"rollout.engine_kwargs.dynamo.generate_api must be one of {_GENERATE_APIS}, got {api!r}")
+        if api == GENERATE_API_NATIVE and not self._is_sglang():
+            raise ValueError(
+                "rollout.engine_kwargs.dynamo.generate_api=generate is implemented for engine=sglang only; "
+                "vLLM's native /inference/v1/generate has a different request/response format."
+            )
+        return api
+
+    def _use_native_generate(self) -> bool:
+        return self._generate_api() == GENERATE_API_NATIVE
+
+    def _routing_replay_enabled(self) -> bool:
+        return bool(getattr(self.config, "enable_rollout_routing_replay", False))
+
+    def _check_routing_replay_support(self) -> None:
+        """R3 is wired for one path only: SGLang sidecar + native ``/generate``.
+
+        ``/v1/completions`` has no field for routed experts, the direct path goes
+        around the frontend, and the ``dynamo.sglang`` worker's handling of
+        ``return_routed_experts`` is unverified. Training on a run that silently
+        lost its routing would replay nothing while every metric looks normal, so
+        refuse the other combinations at launch.
+        """
+        if not self._routing_replay_enabled():
+            return
+        if not (self._is_sglang_sidecar() and self._use_native_generate()) or self._use_direct_generate():
+            raise ValueError(
+                "rollout.enable_rollout_routing_replay=True needs engine_kwargs.dynamo.engine=sglang, "
+                "dynamo.sglang.launch_mode=sidecar and dynamo.generate_api=generate (and direct_generate "
+                "off): only SGLang's native /generate response carries meta_info.routed_experts."
+            )
+
+    def _routed_experts_shape(self) -> tuple[int, int]:
+        """``(num_hidden_layers, num_experts_per_tok)`` from the HF config, as verl's SGLang server reads it."""
+        hf_config = getattr(self.model_config, "hf_config", None)
+        text_config = getattr(hf_config, "text_config", None) or hf_config
+        layers = getattr(text_config, "num_hidden_layers", None)
+        topk = getattr(text_config, "num_experts_per_tok", None)
+        if not layers or not topk:
+            raise AttributeError(
+                "enable_rollout_routing_replay requires an MoE model config with "
+                "`num_hidden_layers` and `num_experts_per_tok`"
+            )
+        return int(layers), int(topk)
+
+    def _sglang_launch_mode(self) -> str:
+        """``worker`` (dynamo.sglang, default) or ``sidecar`` (stock SGLang + dynamo.sglang.sidecar)."""
+        from recipe.dynamo.dynamo_sglang_engine import sglang_launch_mode
+
+        return sglang_launch_mode(self._sglang_cfg())
+
+    def _is_sglang_sidecar(self) -> bool:
+        from recipe.dynamo.dynamo_sglang_engine import LAUNCH_MODE_SIDECAR
+
+        return self._is_sglang() and self._sglang_launch_mode() == LAUNCH_MODE_SIDECAR
+
+    def _sglang_disagg_roles(self, n_shards: int) -> Optional[list[str]]:
+        """Per-shard PD role from ``engine_kwargs.dynamo.sglang.disaggregation``.
+
+        ``{prefill_shards: k, transfer_backend: nixl}``: the first ``k`` shards of
+        the pool run ``--disaggregation-mode prefill`` and the rest ``decode``.
+        In worker mode dynamo.sglang registers prefill shards under the ``prefill``
+        component; in sidecar mode the sidecar gets the same
+        ``--disaggregation-mode`` and registers as a prefill or decode worker. The
+        frontend activates its prefill router on its own either way, so generate
+        traffic and the control plane are unchanged: every shard, P or D, is still
+        one engine with one control surface and one TP slice of trainer ranks, and
+        weight refit, pause and memory release fan out to all of them.
+        Returns None when PD is off.
+        """
+        cfg = self._sglang_cfg().get("disaggregation") or {}
+        k = int(cfg.get("prefill_shards", 0) or 0)
+        if k <= 0:
+            return None
+        if self._routing_replay_enabled():
+            # Prefill runs the prompt's forward pass on another engine; whether the
+            # decode response still carries routing for the full sequence is unverified.
+            raise ValueError("dynamo.sglang.disaggregation does not support rollout routing replay (R3) yet.")
+        if self._use_direct_generate():
+            raise ValueError(
+                "dynamo.sglang.disaggregation needs generation through the frontend; disable direct_generate."
+            )
+        if not 0 < k < n_shards:
+            raise ValueError(
+                f"dynamo.sglang.disaggregation.prefill_shards={k} must leave at least one decode shard "
+                f"(this pool has {n_shards} shards)"
+            )
+        return ["prefill"] * k + ["decode"] * (n_shards - k)
+
+    def get_engine_control_endpoints(self) -> list[str]:
+        """Base URLs of this node's per-shard sglang control planes.
+
+        ``/engine/*`` on DYN_SYSTEM_PORT in worker mode; SGLang's own HTTP server in
+        sidecar mode. Ordered by shard index, so a trainer rank can index with
         ``local_rank // tensor_model_parallel_size`` and reach the engine that owns
         its GPUs. sglang only — the vLLM path uses ``_control_endpoints`` (ZMQ).
         """
@@ -337,11 +462,12 @@ class DynamoHttpServer:
     def _sglang_control_clients(self) -> list:
         """Lazily build one control client per local sglang shard."""
         if self._sglang_clients is None:
-            from recipe.dynamo.dynamo_sglang_engine import DynamoSGLangControlClient
+            from recipe.dynamo.dynamo_sglang_engine import DynamoSGLangControlClient, control_api_for_launch_mode
 
             timeout_s = float(self._dynamo_cfg().get("request_timeout_s", 600))
+            api = control_api_for_launch_mode(self._sglang_launch_mode())
             self._sglang_clients = [
-                DynamoSGLangControlClient(url, timeout_s=timeout_s) for url in self._engine_control_endpoints
+                DynamoSGLangControlClient(url, timeout_s=timeout_s, api=api) for url in self._engine_control_endpoints
             ]
         return self._sglang_clients
 
@@ -518,6 +644,24 @@ class DynamoHttpServer:
         if errors:
             raise RuntimeError(f"dynamo.sglang control call {method!r} failed on {errors}")
         return results
+
+    async def _sglang_flush_cache_all(self, timeout_s: float = 60.0, poll_s: float = 0.5) -> None:
+        """``flush_cache`` on every shard, retried until the shards are idle.
+
+        SGLang refuses a flush (HTTP 400) while any request is running or queued,
+        and ``pause_generation(mode="abort")`` returns before the scheduler has
+        retired the aborted requests: a flush right after it fails with
+        ``#running-req`` > 0 for a few scheduler steps. Retry until ``timeout_s``.
+        """
+        deadline = time.monotonic() + timeout_s
+        while True:
+            try:
+                await self._sglang_control_all("flush_cache")
+                return
+            except RuntimeError as exc:
+                if "HTTP 400" not in str(exc) or time.monotonic() >= deadline:
+                    raise
+            await asyncio.sleep(poll_s)
 
     def _dynamo_cfg_bool(self, key: str, default: bool) -> bool:
         value = self._dynamo_cfg().get(key, default)
@@ -893,9 +1037,12 @@ class DynamoHttpServer:
             ]
 
         is_sglang = self._is_sglang()
+        sglang_sidecar = self._is_sglang_sidecar()
+        disagg_roles = self._sglang_disagg_roles(len(worker_specs)) if is_sglang else None
 
         for spec_idx, spec in enumerate(worker_specs):
             worker_cvd = spec.cuda_visible_devices
+            disagg_role = disagg_roles[spec_idx] if disagg_roles else None
             # sglang needs no verl-private ZMQ sidecar: dynamo.sglang registers
             # control/* engine routes itself, reached over DYN_SYSTEM_PORT below.
             control_endpoint = None
@@ -912,11 +1059,13 @@ class DynamoHttpServer:
             # we use a fixed low port via _allocate_stable_node_port for the same
             # reason). Set enable_worker_system_metrics=false to restore the legacy
             # no-DYN_SYSTEM_PORT behaviour.
-            # For sglang this port is NOT optional: /engine/control/* is the only
-            # control plane there (weight refit, memory occupation, cache flush),
-            # so refuse to honour enable_worker_system_metrics=false.
+            # For a dynamo.sglang worker this port is NOT optional: /engine/control/*
+            # is the only control plane there (weight refit, memory occupation, cache
+            # flush), so refuse to honour enable_worker_system_metrics=false. In
+            # sidecar mode control goes to SGLang's own HTTP server instead, and the
+            # port only carries the sidecar's /metrics.
             enable_worker_metrics = self._dynamo_cfg_bool("enable_worker_system_metrics", True)
-            if is_sglang and not enable_worker_metrics:
+            if is_sglang and not sglang_sidecar and not enable_worker_metrics:
                 raise ValueError(
                     "engine=sglang requires enable_worker_system_metrics=true: the "
                     "dynamo.sglang control plane (/engine/control/*) is served on "
@@ -932,7 +1081,12 @@ class DynamoHttpServer:
             # values. A launch-time refusal is the only place it can be caught, which
             # is why an explicit `false` is still honoured (opt out knowingly) while
             # the *unset* default is rejected.
-            if is_sglang and self._dynamo_cfg().get("request_completion_token_ids") is None:
+            # The native /generate path reads output_ids directly and never needs it.
+            if (
+                is_sglang
+                and not self._use_native_generate()
+                and self._dynamo_cfg().get("request_completion_token_ids") is None
+            ):
                 raise ValueError(
                     "engine=sglang requires request_completion_token_ids to be set "
                     "explicitly. Add\n"
@@ -942,6 +1096,7 @@ class DynamoHttpServer:
                     "a vLLM-only channel, so generation silently trains on re-encoded "
                     "text). Set it to false explicitly if you really intend that."
                 )
+            self._check_routing_replay_support()
             # Re-checked here (not only in __init__) so a server constructed without
             # __init__ -- the CPU unit tests -- still refuses the split.
             self._check_sleep_mode_pairing()
@@ -958,7 +1113,9 @@ class DynamoHttpServer:
             # Placed after the config validations so a bad sglang config fails
             # before any port is allocated. Opt out with engine_kwargs.dynamo.enable_kv_events=false (e.g. for
             # round-robin, where the events are pure overhead).
-            publish_kv_events = self._kv_events_enabled()
+            # A decode shard holds no reusable prefix (its radix cache is off), so only
+            # prefill shards feed the router's KV index.
+            publish_kv_events = self._kv_events_enabled() and disagg_role != "decode"
             kv_event_port = self._allocate_kv_event_port(spec_idx) if publish_kv_events else None
             kv_events_config_json = self._build_kv_events_config_json(kv_event_port) if publish_kv_events else None
             system_metrics_port = (
@@ -1015,7 +1172,7 @@ class DynamoHttpServer:
                 worker_metrics_endpoint = f"{self._server_address}:{system_metrics_port}"
                 self._worker_metrics_endpoints.append(worker_metrics_endpoint)
                 self._record_worker_metrics_endpoint(worker_metrics_endpoint)
-                if is_sglang:
+                if is_sglang and not sglang_sidecar:
                     host = (
                         f"[{self._server_address}]"
                         if is_valid_ipv6_address(self._server_address)
@@ -1033,12 +1190,28 @@ class DynamoHttpServer:
             # "block_hash mismatch" and prefix-cache hits collapse.
             env.setdefault("PYTHONHASHSEED", "0")
 
+            if sglang_sidecar:
+                self._spawn_sglang_sidecar_shard(
+                    spec=spec,
+                    spec_idx=spec_idx,
+                    n_specs=len(worker_specs),
+                    served_model_name=served_model_name,
+                    tp=tp,
+                    env=env,
+                    kv_events_config_json=kv_events_config_json,
+                    log_dir=log_dir,
+                    disagg_role=disagg_role,
+                )
+                continue
+
             if is_sglang:
                 cmd = self._build_sglang_cmd(
                     served_model_name,
                     tp,
                     nccl_port=self._allocate_tcp_port(),
                     kv_events_config_json=kv_events_config_json,
+                    disagg_role=disagg_role,
+                    bootstrap_port=self._allocate_tcp_port(bind_wildcard=True) if disagg_role == "prefill" else None,
                 )
             else:
                 cmd = self._build_vllm_cmd(
@@ -1077,6 +1250,130 @@ class DynamoHttpServer:
                 stderr=subprocess.STDOUT,
             )
             self._engine_processes.append(proc)
+
+    def _spawn_sglang_sidecar_shard(
+        self,
+        *,
+        spec: _DynamoWorkerSpec,
+        spec_idx: int,
+        n_specs: int,
+        served_model_name: str,
+        tp: int,
+        env: dict[str, str],
+        kv_events_config_json: Optional[str],
+        log_dir: str,
+        disagg_role: Optional[str] = None,
+    ) -> None:
+        """Start one sidecar-mode shard: stock SGLang plus ``dynamo.sglang.sidecar``.
+
+        The engine serves HTTP (control plane and the native ``/generate`` the
+        sidecar proxies) and gRPC (what the sidecar registers with Dynamo). Both
+        ports are bound by SGLang only after the model loads, so they come from the
+        stable per-shard window, like every other late-bound engine port here.
+
+        The sidecar is appended to ``_engine_processes`` before the engine so
+        teardown (registry order) deregisters it before its engine goes away; the
+        watchdog covers both either way.
+        """
+        host = self._server_address
+        url_host = f"[{host}]" if is_valid_ipv6_address(host) else host
+        http_port = self._allocate_stable_node_port(_SGLANG_ENGINE_PORT_BASE, spec_idx, window=8)
+        grpc_port = self._allocate_stable_node_port(_SGLANG_ENGINE_PORT_BASE, spec_idx, window=8)
+        # A prefill engine's bootstrap server is bound after the model loads too.
+        bootstrap_port = (
+            self._allocate_stable_node_port(_SGLANG_ENGINE_PORT_BASE, spec_idx, window=8)
+            if disagg_role == "prefill"
+            else None
+        )
+
+        engine_cmd = self._build_sglang_cmd(
+            served_model_name,
+            tp,
+            nccl_port=self._allocate_tcp_port(),
+            kv_events_config_json=kv_events_config_json,
+            sidecar_engine=(host, http_port, grpc_port),
+            disagg_role=disagg_role,
+            bootstrap_port=bootstrap_port,
+        )
+        # The engine binds --host (this node's address), bootstrap server included;
+        # pass it explicitly so decode never gets a loopback or wildcard address.
+        sidecar_cmd = self._build_sglang_sidecar_cmd(
+            f"http://{url_host}:{grpc_port}",
+            disagg_role=disagg_role,
+            bootstrap_host=host if disagg_role == "prefill" else None,
+        )
+
+        # The engine runs no Dynamo runtime; DYN_SYSTEM_PORT belongs to the sidecar.
+        engine_env = {k: v for k, v in env.items() if not k.startswith("DYN_SYSTEM_")}
+        # The sidecar is CPU-only. Hiding the GPUs keeps any CUDA-probing import
+        # in its process from creating a context on the engine's devices.
+        sidecar_env = dict(env)
+        sidecar_env["CUDA_VISIBLE_DEVICES"] = ""
+
+        self._engine_control_endpoints.append(f"http://{url_host}:{http_port}")
+
+        for role, cmd, proc_env in (
+            ("sidecar", sidecar_cmd, sidecar_env),
+            ("engine", engine_cmd, engine_env),
+        ):
+            stdout_path = os.path.join(log_dir, f"{spec.label}_{role}.log")
+            stdout_fp = open(stdout_path, "w")
+            self._engine_log_fps.append(stdout_fp)
+            self._engine_log_paths.append(stdout_path)
+            logger.info(
+                "[DynamoHttpServer] starting sglang %s shard %s/%s (replica=%s, GPUs=%s, "
+                "sglang_http=%s, sglang_grpc=%s, DYN_SYSTEM_PORT=%s, log=%s): %s",
+                role,
+                spec_idx,
+                n_specs,
+                spec.replica_rank,
+                proc_env.get("CUDA_VISIBLE_DEVICES"),
+                http_port,
+                grpc_port,
+                proc_env.get(_DYN_SYSTEM_PORT_ENV),
+                stdout_path,
+                " ".join(cmd),
+            )
+            proc = subprocess.Popen(cmd, env=proc_env, stdout=stdout_fp, stderr=subprocess.STDOUT)
+            self._engine_processes.append(proc)
+
+    def _build_sglang_sidecar_cmd(
+        self,
+        grpc_endpoint: str,
+        disagg_role: Optional[str] = None,
+        bootstrap_host: Optional[str] = None,
+    ) -> list[str]:
+        """``dynamo.sglang.sidecar`` CLI for one shard.
+
+        The sidecar's gRPC startup deadline defaults to 300 s, which a large model
+        (load + CUDA graph capture) can exceed; past it the sidecar exits and the
+        watchdog reports the shard dead. Default it to the frontend readiness
+        budget, which bounds startup anyway.
+
+        For PD, ``--disaggregation-mode`` must match the engine's (a prefill sidecar
+        registers as a prefill worker, a decode sidecar advertises no KV indexer),
+        and ``--bootstrap-host`` is the address decode dials for prefill's bootstrap
+        server.
+        """
+        cfg = self._sglang_cfg()
+        deadline_s = cfg.get("sidecar_startup_deadline_s", _FRONTEND_READY_TIMEOUT_S)
+        cmd = [
+            sys.executable,
+            "-m",
+            "dynamo.sglang.sidecar",
+            "--grpc-endpoint",
+            grpc_endpoint,
+            "--grpc-startup-deadline-secs",
+            str(max(1, int(float(deadline_s)))),
+        ]
+        if disagg_role is not None:
+            cmd += ["--disaggregation-mode", disagg_role]
+        if bootstrap_host is not None:
+            cmd += ["--bootstrap-host", bootstrap_host]
+        extra = cfg.get("sidecar_extra_args") or []
+        if isinstance(extra, list):
+            cmd += [str(x) for x in extra]
+        return cmd
 
     def _record_worker_metrics_endpoint(self, endpoint: str) -> None:
         """Append a worker /metrics endpoint to a per-(replica,node) file so an
@@ -1138,7 +1435,14 @@ class DynamoHttpServer:
         finally:
             sock.close()
 
-    def _allocate_stable_node_port(self, base: int, shard_idx: int, window: int = 8) -> int:
+    def _allocate_stable_node_port(
+        self,
+        base: int,
+        shard_idx: int,
+        window: int = 8,
+        replica_stride: int = 2048,
+        node_stride: int = 128,
+    ) -> int:
         """Pick a stable node-local port for concurrently launched shards.
 
         Engine ports get bound in child processes, well after the parent picked
@@ -1150,7 +1454,7 @@ class DynamoHttpServer:
         """
         replica_slot = self.replica_rank % 4
         node_slot = self.node_rank % 16
-        start = base + replica_slot * 2048 + node_slot * 128 + shard_idx * window
+        start = base + replica_slot * replica_stride + node_slot * node_stride + shard_idx * window
         for port in range(start, start + window):
             if port in self._allocated_tcp_ports:
                 continue
@@ -1177,7 +1481,10 @@ class DynamoHttpServer:
         previous failed job, so use a random currently-free port by default.
         """
         if self._dynamo_cfg_bool("stable_kv_event_ports", False):
-            return self._allocate_stable_node_port(_KV_EVENT_PORT_BASE, shard_idx, window=16)
+            # 4 replica slots x 16 node slots x 8 shards x 8 ports = 4096 ports.
+            return self._allocate_stable_node_port(
+                _KV_EVENT_PORT_BASE, shard_idx, window=8, replica_stride=1024, node_stride=64
+            )
         return self._allocate_tcp_port(bind_wildcard=True)
 
     def _configured_or_allocated_port(self, key: str, bind_wildcard: bool = False) -> int:
@@ -1275,21 +1582,47 @@ class DynamoHttpServer:
         tp: int,
         nccl_port: Optional[int] = None,
         kv_events_config_json: Optional[str] = None,
+        sidecar_engine: Optional[tuple[str, int, int]] = None,
+        disagg_role: Optional[str] = None,
+        bootstrap_port: Optional[int] = None,
     ) -> list[str]:
-        """Construct the ``dynamo.sglang`` CLI for one DP shard.
+        """Construct the engine CLI for one DP shard.
 
-        Unlike the vLLM path this launches the stock entrypoint — no verl wrapper —
-        because the control plane we need is already registered by
+        Worker mode (``sidecar_engine`` is None) launches ``dynamo.sglang`` — no verl
+        wrapper — because the control plane we need is already registered by
         ``handler_base.register_engine_routes`` and reachable over DYN_SYSTEM_PORT.
-
         ``dynamo.sglang.args`` forwards the full ``ServerArgs.add_cli_args`` surface,
         so anything not mapped below can still be passed through
         ``engine_kwargs.dynamo.extra_args``.
+
+        Sidecar mode (``sidecar_engine=(host, http_port, grpc_port)``) launches stock
+        ``sglang.launch_server`` with the same engine flags, minus the two that only
+        ``dynamo.sglang`` understands (``--enable-rl``, ``--engine-route``), plus:
+
+        * ``--host/--port``: SGLang's HTTP server, the RL control plane and the
+          target of the sidecar's native ``/generate`` passthrough;
+        * ``--grpc-port``: the native gRPC server the sidecar registers;
+        * ``--incremental-streaming-output``: without it the sidecar disables the
+          native ``/generate`` passthrough (it logs a warning and keeps serving the
+          OpenAI routes only).
         """
-        cmd = [
-            sys.executable,
-            "-m",
-            "dynamo.sglang",
+        if sidecar_engine is None:
+            cmd = [sys.executable, "-m", "dynamo.sglang"]
+        else:
+            host, http_port, grpc_port = sidecar_engine
+            cmd = [
+                sys.executable,
+                "-m",
+                "sglang.launch_server",
+                "--host",
+                host,
+                "--port",
+                str(http_port),
+                "--grpc-port",
+                str(grpc_port),
+                "--incremental-streaming-output",
+            ]
+        cmd += [
             "--model-path",
             self.model_config.local_path,
             "--served-model-name",
@@ -1322,17 +1655,37 @@ class DynamoHttpServer:
         if self.config.enforce_eager:
             # SGLang's inverse of vLLM's --enforce-eager.
             cmd += ["--disable-cuda-graph"]
-        if not self.config.enable_prefix_caching:
+        if not self.config.enable_prefix_caching or disagg_role == "decode":
             # SGLang's radix cache is on by default; vLLM's prefix cache is not.
+            # A PD decode shard receives every prompt's KV from prefill and keeps no
+            # radix tree of its own.
             cmd += ["--disable-radix-cache"]
+        if disagg_role is not None:
+            backend = str((self._sglang_cfg().get("disaggregation") or {}).get("transfer_backend", "nixl"))
+            cmd += ["--disaggregation-mode", disagg_role, "--disaggregation-transfer-backend", backend]
+            if disagg_role == "prefill":
+                if bootstrap_port is None:
+                    raise ValueError("a prefill shard needs a bootstrap port")
+                cmd += ["--disaggregation-bootstrap-port", str(bootstrap_port)]
+                # The bootstrap server binds ServerArgs.host (127.0.0.1 by default) but
+                # decode reaches it at this node's routable address: without a wildcard
+                # bind every handshake is refused and requests hang. A sidecar engine
+                # already binds --host to that address.
+                user_args = self._sglang_cfg().get("extra_args") or self._dynamo_cfg().get("extra_args") or []
+                if sidecar_engine is None and not any(
+                    str(x) == "--host" or str(x).startswith("--host=") for x in user_args
+                ):
+                    cmd += ["--host", "0.0.0.0"]
         if self.config.enable_sleep_mode:
             # Without this SGLang's torch_memory_saver never arms, and
             # release_memory_occupation silently frees nothing.
             cmd += ["--enable-memory-saver"]
+        if self._routing_replay_enabled():
+            cmd += [_SGLANG_ROUTED_EXPERTS_FLAG]
 
         # Preserve the worker's RL flag. After Dynamo PR #13951 it no longer
         # registers call_tokenizer_manager; cache flush is configured below.
-        if self._sglang_cfg().get("enable_rl", True):
+        if sidecar_engine is None and self._sglang_cfg().get("enable_rl", True):
             cmd += ["--enable-rl"]
 
         # KV-router page size. ThunderAgent's router_block_size must match, same
@@ -1362,10 +1715,17 @@ class DynamoHttpServer:
 
         # Readiness and weight refit both need a native cache-flush endpoint.
         # Honor an explicit public-path override without registering it twice.
-        routes = [extra[i + 1] for i, arg in enumerate(extra[:-1]) if arg == "--engine-route"]
-        routes += [arg.split("=", 1)[1] for arg in extra if arg.startswith("--engine-route=")]
-        if not any(route.split(":", 1)[0].split("=", 1)[0] == "flush_cache" for route in routes):
-            cmd += ["--engine-route", "flush_cache:tm"]
+        # Sidecar mode needs no registration: SGLang serves /flush_cache itself.
+        if sidecar_engine is None:
+            routes = [extra[i + 1] for i, arg in enumerate(extra[:-1]) if arg == "--engine-route"]
+            routes += [arg.split("=", 1)[1] for arg in extra if arg.startswith("--engine-route=")]
+            if not any(route.split(":", 1)[0].split("=", 1)[0] == "flush_cache" for route in routes):
+                cmd += ["--engine-route", "flush_cache:tm"]
+        elif any(arg == "--engine-route" or arg.startswith("--engine-route=") for arg in extra):
+            raise ValueError(
+                "--engine-route is a dynamo.sglang worker flag; sglang.launch_server (sidecar "
+                "mode) rejects it. Remove it from engine_kwargs.dynamo.extra_args."
+            )
 
         # Attention backend: default to flashinfer, mirroring verl's native sglang
         # server (async_sglang_server.py). SGLang's own default on Hopper is fa3,
@@ -1397,6 +1757,9 @@ class DynamoHttpServer:
         # exits rc=1 — allocate a free port per pool.
         if "DYN_RL_PORT" not in env:
             env["DYN_RL_PORT"] = str(self._allocate_tcp_port(bind_wildcard=True))
+        # The frontend mounts SGLang's native /generate only on request.
+        if self._use_native_generate():
+            env[_SGLANG_ENABLE_GENERATE_ENV] = "1"
 
         cmd = [
             sys.executable,
@@ -1612,6 +1975,31 @@ class DynamoHttpServer:
             f"rollout.engine_kwargs.dynamo.frontend_extra_args must be a list or string, got {type(extra).__name__}"
         )
 
+    @staticmethod
+    def _count_available_generate_workers(metrics_text: str) -> int:
+        """Distinct ``router_worker_id`` with ``target_endpoint="generate"``, ``state="available"``, value 1.
+
+        Source: ``dynamo_frontend_router_worker_state`` on the frontend's ``/metrics``.
+        """
+        workers = set()
+        for line in metrics_text.splitlines():
+            if not line.startswith("dynamo_frontend_router_worker_state{"):
+                continue
+            labels, _, value = line.rpartition("} ")
+            if 'target_endpoint="generate"' not in labels or 'state="available"' not in labels:
+                continue
+            try:
+                if float(value) < 1:
+                    continue
+            except ValueError:
+                continue
+            marker = 'router_worker_id="'
+            start = labels.find(marker)
+            if start >= 0:
+                start += len(marker)
+                workers.add(labels[start : labels.find('"', start)])
+        return len(workers)
+
     async def _healthcheck_frontend(self, expected_workers: int):
         url = f"http://localhost:{self._frontend_port}/health"
         deadline = time.monotonic() + _FRONTEND_READY_TIMEOUT_S
@@ -1623,8 +2011,17 @@ class DynamoHttpServer:
                 resp = await asyncio.to_thread(requests.get, url, timeout=5)
                 if resp.status_code == 200:
                     data = resp.json()
-                    instances = data.get("instances") or []
-                    n_gen = sum(1 for i in instances if i.get("endpoint") == "generate")
+                    if "instances" in data:
+                        instances = data.get("instances") or []
+                        n_gen = sum(1 for i in instances if i.get("endpoint") == "generate")
+                    else:
+                        # ai-dynamo 1.7 dropped the instance list from /health
+                        # ({"status","stage"} only); its router exports one
+                        # worker_state series per registered worker instead.
+                        metrics = await asyncio.to_thread(
+                            requests.get, f"http://localhost:{self._frontend_port}/metrics", timeout=5
+                        )
+                        n_gen = self._count_available_generate_workers(metrics.text)
                     if n_gen >= expected_workers:
                         logger.info(
                             "[DynamoHttpServer] frontend healthy: %s/%s workers registered",
@@ -1721,9 +2118,20 @@ class DynamoHttpServer:
             return await self._generate_direct(prompt_ids, sampling_params, request_id)
 
         try:
-            request_id = request_id or f"dynamo-{time.time_ns()}"
-            payload = self._build_frontend_completion_payload(prompt_ids, sampling_params, request_id)
-            status, body_text = await self._frontend_post(payload, request_id)
+            # verl's LLMServerManager.generate mints a fresh request_id for every
+            # turn and passes the trajectory's stable key as session_id; key
+            # session affinity (and the request-id prefix) on the latter, else
+            # every turn would carry a new x-dynamo-session-id and never stick.
+            session_id = kwargs.get("session_id")
+            request_id = str(session_id) if session_id else (request_id or f"dynamo-{time.time_ns()}")
+            # The frontend needs a unique id per request (subagent turns run concurrently).
+            http_request_id = f"{request_id}-{uuid.uuid4().hex}"
+            if self._use_native_generate():
+                return await self._generate_native(
+                    prompt_ids, sampling_params, request_id, http_request_id, include_log_probs
+                )
+            payload = self._build_frontend_completion_payload(prompt_ids, sampling_params, http_request_id)
+            status, body_text = await self._frontend_post(payload, request_id, http_request_id)
             if status == 400 and "Unsupported parameter" in body_text:
                 fallback_payload = self._drop_frontend_extension_fields(payload)
                 if fallback_payload is not payload:
@@ -1734,7 +2142,7 @@ class DynamoHttpServer:
                         sorted(set(payload) - set(fallback_payload)),
                     )
                     payload = fallback_payload
-                    status, body_text = await self._frontend_post(payload, request_id)
+                    status, body_text = await self._frontend_post(payload, request_id, http_request_id)
             if status != 200:
                 raise RuntimeError(
                     "Dynamo frontend /v1/completions failed "
@@ -1763,6 +2171,251 @@ class DynamoHttpServer:
         host = f"[{self._server_address}]" if is_valid_ipv6_address(self._server_address) else self._server_address
         return f"http://{host}:{self._server_port}/v1/completions"
 
+    # ------------------------------------------------------------------ #
+    # native /generate (engine_kwargs.dynamo.generate_api=generate; SGLang format)
+    # ------------------------------------------------------------------ #
+
+    def _frontend_generate_url(self) -> str:
+        assert self._server_port is not None, "frontend server not ready"
+        host = f"[{self._server_address}]" if is_valid_ipv6_address(self._server_address) else self._server_address
+        return f"http://{host}:{self._server_port}{_SGLANG_GENERATE_PATH}"
+
+    async def _generate_native(
+        self,
+        prompt_ids,
+        sampling_params: dict[str, Any],
+        request_id: str,
+        http_request_id: str,
+        include_log_probs: bool,
+    ):
+        """One SGLang-native ``/generate`` round trip through the Dynamo frontend.
+
+        Same headers as the completions path (``X-Request-Id`` plus the session
+        headers ThunderAgent/affinity add via ``_frontend_headers``), so routing and
+        admission see the request exactly as before. Errors propagate to
+        ``generate()``, which maps a failure during an engine pause to "aborted".
+        """
+        payload = self._build_frontend_generate_payload(prompt_ids, sampling_params, http_request_id)
+        status, body_text = await self._frontend_post(
+            payload, request_id, http_request_id, url=self._frontend_generate_url()
+        )
+        if status != 200:
+            raise RuntimeError(
+                f"Dynamo frontend {_SGLANG_GENERATE_PATH} failed status={status} body={body_text[:2000]!r} "
+                f"payload_summary={self._native_payload_debug_summary(payload)}"
+            )
+        return self._sglang_generate_response_to_token_output(
+            json.loads(body_text), include_log_probs, prompt_len=len(payload["input_ids"])
+        )
+
+    def _native_max_new_tokens(self, sampling_params: dict[str, Any], prompt_len: int) -> int:
+        """Remaining-budget clamp shared with the completions path's rule.
+
+        An explicit ``max_tokens``/``max_new_tokens`` is honoured but bounded by
+        ``prompt_length + response_length - len(prompt)`` (tool observations grow
+        the prompt between turns); the default is ``response_length`` under the
+        same bound. Never below 1, as on the completions path.
+        """
+        max_tokens = sampling_params.pop("max_new_tokens", None)
+        if max_tokens is None:
+            max_tokens = sampling_params.pop("max_tokens", None)
+        else:
+            sampling_params.pop("max_tokens", None)
+        budget = self.config.prompt_length + self.config.response_length - prompt_len
+        if max_tokens is None:
+            max_tokens = min(self.config.response_length, budget)
+        return int(max(1, min(int(max_tokens), max(1, budget))))
+
+    def _build_frontend_generate_payload(
+        self, prompt_ids, sampling_params: dict[str, Any], request_id: str
+    ) -> dict[str, Any]:
+        """SGLang ``GenerateReqInput`` for a token prompt, as verl's native server builds it.
+
+        Sampling keys pass through unchanged (verl's names -- temperature, top_p,
+        top_k, repetition_penalty, stop_token_ids... -- are SGLang's). Only the
+        budget is renamed to ``max_new_tokens``, ``logprobs`` becomes the top-level
+        ``return_logprob``, and the recipe/OpenAI-only keys are dropped. The client
+        ``rid`` is correlation only: the frontend mints its own engine request ID.
+        """
+        from verl.utils.tokenizer import normalize_token_ids
+
+        input_ids = normalize_token_ids(prompt_ids)
+        sp = dict(sampling_params)
+        native_sp: dict[str, Any] = {"max_new_tokens": self._native_max_new_tokens(sp, len(input_ids))}
+        return_logprob = bool(sp.pop("logprobs", False))
+        for key in ("prompt_logprobs", "nvext"):
+            sp.pop(key, None)
+        native_sp.update({key: value for key, value in sp.items() if value is not None})
+        payload = {
+            "rid": str(request_id),
+            "input_ids": input_ids,
+            "sampling_params": native_sp,
+            "return_logprob": return_logprob,
+            "stream": False,
+        }
+        if self._routing_replay_enabled():
+            # Full sequence (routed_experts_start_len=0), as verl's native server
+            # asks; FullyAsyncLLMServerClient keeps only the new rows on a resume.
+            payload["return_routed_experts"] = True
+        return payload
+
+    @staticmethod
+    def _native_payload_debug_summary(payload: dict[str, Any]) -> dict[str, Any]:
+        input_ids = payload.get("input_ids") or []
+        return {
+            "keys": sorted(payload.keys()),
+            "input_ids": {"len": len(input_ids), "head": list(input_ids[:8])},
+            "sampling_params": payload.get("sampling_params"),
+            "return_logprob": payload.get("return_logprob"),
+        }
+
+    def _sglang_generate_response_to_token_output(
+        self, data: dict[str, Any], include_log_probs: bool = False, prompt_len: Optional[int] = None
+    ):
+        """SGLang ``/generate`` unary response -> verl ``TokenOutput``.
+
+        The frontend joins the engine's incremental chunks (``output_ids`` and
+        ``meta_info.output_token_logprobs`` appended, ``finish_reason`` and
+        ``completion_tokens`` from the last chunk), so this is the engine's own
+        response. Token ids are the engine's sampled ids; there is no text path and
+        no re-encode fallback.
+
+        ``finish_reason.type``: ``stop``/``length`` complete the turn. A plain
+        ``abort`` (pause_generation(mode=abort) during a weight sync, client
+        cancellation) keeps its partial tokens so partial rollout resumes after the
+        sync; an ``abort`` carrying ``status_code``/``err_type`` is an engine error
+        and raises.
+        """
+        if not isinstance(data, dict):
+            raise RuntimeError(f"SGLang /generate response is not an object: {str(data)[:500]}")
+        meta = data.get("meta_info") or {}
+        finish = meta.get("finish_reason")
+        kind = finish.get("type") if isinstance(finish, dict) else finish
+        if kind == "abort" and isinstance(finish, dict) and (finish.get("status_code") or finish.get("err_type")):
+            raise RuntimeError(
+                f"SGLang aborted the request with an error: {finish.get('message')!r} "
+                f"(status_code={finish.get('status_code')}, err_type={finish.get('err_type')})"
+            )
+        if kind not in ("stop", "length", "abort"):
+            raise RuntimeError(f"SGLang /generate returned unknown finish_reason {finish!r}: {str(data)[:500]}")
+        is_aborted = kind == "abort"
+
+        raw_ids = data.get("output_ids")
+        if raw_ids is None:
+            raw_ids = []
+        if not isinstance(raw_ids, list) or not all(isinstance(t, int) and not isinstance(t, bool) for t in raw_ids):
+            raise RuntimeError(f"SGLang /generate output_ids is not a list of token ids: {str(raw_ids)[:300]}")
+        token_ids = list(raw_ids)
+        if not token_ids:
+            if is_aborted:
+                return self._aborted_output(include_log_probs)
+            raise RuntimeError(f"SGLang /generate returned no output_ids for finish_reason={kind!r}")
+
+        # Same guard as the completions path (ai-dynamo/dynamo#14302): the token
+        # array must be the whole sampled sequence. Partial (aborted) arrays exempt.
+        completion_tokens = meta.get("completion_tokens")
+        if not is_aborted and isinstance(completion_tokens, int) and completion_tokens != len(token_ids):
+            raise RuntimeError(
+                f"SGLang /generate returned {len(token_ids)} output_ids but completion_tokens="
+                f"{completion_tokens} (finish_reason={kind!r}); refusing to train on a truncated sequence."
+            )
+
+        log_probs = None
+        if include_log_probs:
+            try:
+                log_probs = self._sglang_output_logprobs(meta, token_ids)
+            except RuntimeError:
+                if is_aborted:
+                    # Partial data from an aborted request is untrusted; let the client retry.
+                    return self._aborted_output(include_log_probs)
+                raise
+
+        routed_experts = None
+        if self._routing_replay_enabled():
+            try:
+                routed_experts = self._sglang_routed_experts(meta, prompt_len, len(token_ids))
+            except RuntimeError:
+                if is_aborted:
+                    # An aborted attempt without (complete) routing cannot keep its
+                    # tokens: the client would append the next attempt's rows after a
+                    # gap and misalign every later position. Drop it and retry.
+                    return self._aborted_output(include_log_probs)
+                raise
+        return self._build_token_output(
+            token_ids=token_ids,
+            log_probs=log_probs,
+            stop_reason="aborted" if is_aborted else "completed",
+            routed_experts=routed_experts,
+        )
+
+    def _sglang_routed_experts(self, meta: dict[str, Any], prompt_len: Optional[int], num_output: int):
+        """``meta_info.routed_experts`` -> ``(seq, num_hidden_layers, num_experts_per_tok)`` int32 array.
+
+        SGLang sends the raw int32 buffer base64-encoded (decoded exactly as
+        ``sglang.srt.state_capturer.routed_experts.extract_routed_experts_from_meta_info``
+        does, without importing sglang into the actor). With
+        ``routed_experts_start_len=0`` it covers positions ``[0, seqlen - 1)``: the
+        last sampled token has not been forwarded yet. The row count is checked when
+        the prompt length is known, since a short array would shift every routing.
+        """
+        import base64
+
+        import numpy as np
+
+        encoded = meta.get("routed_experts")
+        if not isinstance(encoded, str) or not encoded:
+            raise RuntimeError(
+                "SGLang /generate response has no meta_info.routed_experts although "
+                "enable_rollout_routing_replay is on (engine launched without "
+                f"{_SGLANG_ROUTED_EXPERTS_FLAG}, or the frontend dropped the field)"
+            )
+        layers, topk = self._routed_experts_shape()
+        flat = np.frombuffer(base64.b64decode(encoded), dtype=np.int32)
+        if flat.size % (layers * topk):
+            raise RuntimeError(
+                f"SGLang routed_experts has {flat.size} entries, not a multiple of "
+                f"num_hidden_layers*num_experts_per_tok={layers}*{topk}"
+            )
+        routed = flat.reshape(-1, layers, topk)
+        if prompt_len is not None:
+            expected = prompt_len + num_output - 1
+            if routed.shape[0] != expected:
+                raise RuntimeError(
+                    f"SGLang routed_experts covers {routed.shape[0]} positions, expected "
+                    f"prompt+output-1={prompt_len}+{num_output}-1={expected}"
+                )
+        return routed
+
+    @staticmethod
+    def _sglang_output_logprobs(meta: dict[str, Any], token_ids: list[int]) -> list[float]:
+        """``meta_info.output_token_logprobs`` -> per-token logprobs, checked against ``output_ids``.
+
+        Entries are ``[logprob, token_id, text]``. Length and every token id must
+        match the sampled ids: a shifted or short array would assign each logprob
+        to the wrong token and still look plausible in every metric.
+        """
+        entries = meta.get("output_token_logprobs")
+        if not isinstance(entries, list) or len(entries) != len(token_ids):
+            raise RuntimeError(
+                "SGLang /generate output_token_logprobs does not cover the output: "
+                f"{len(entries) if isinstance(entries, list) else entries!r} entries for {len(token_ids)} tokens. "
+                "return_logprob must be true on the request."
+            )
+        log_probs: list[float] = []
+        for position, (entry, token_id) in enumerate(zip(entries, token_ids, strict=True)):
+            if not isinstance(entry, (list, tuple)) or len(entry) < 2:
+                raise RuntimeError(f"malformed output_token_logprobs entry at {position}: {entry!r}")
+            logprob, entry_token = entry[0], entry[1]
+            if entry_token != token_id:
+                raise RuntimeError(
+                    f"output_token_logprobs token {entry_token!r} at position {position} does not match "
+                    f"output_ids token {token_id}"
+                )
+            if logprob is None:
+                raise RuntimeError(f"output_token_logprobs has no logprob at position {position}")
+            log_probs.append(float(logprob))
+        return log_probs
+
     async def _get_http_session(self):
         """Lazily create one keep-alive aiohttp session on the actor loop.
 
@@ -1790,16 +2443,26 @@ class DynamoHttpServer:
             self._http_session = aiohttp.ClientSession(connector=connector)
             return self._http_session
 
-    async def _frontend_post(self, payload: dict[str, Any], request_id: str) -> tuple[int, str]:
-        """POST one completion to the frontend; return ``(status, body_text)``."""
+    async def _frontend_post(
+        self,
+        payload: dict[str, Any],
+        request_id: str,
+        http_request_id: Optional[str] = None,
+        url: Optional[str] = None,
+    ) -> tuple[int, str]:
+        """POST one request (``/v1/completions`` unless ``url`` is given); return
+        ``(status, body_text)``. ``http_request_id`` is this request's unique id."""
         import aiohttp
 
+        headers = self._frontend_headers(request_id)
+        if http_request_id is not None:
+            headers["X-Request-Id"] = http_request_id
         session = await self._get_http_session()
         timeout = aiohttp.ClientTimeout(total=self._frontend_request_timeout_s())
         async with session.post(
-            self._frontend_completions_url(),
+            url or self._frontend_completions_url(),
             json=payload,
-            headers=self._frontend_headers(request_id),
+            headers=headers,
             timeout=timeout,
         ) as resp:
             return resp.status, await resp.text()
@@ -2226,6 +2889,7 @@ class DynamoHttpServer:
         log_probs: Optional[list[float]] = None,
         stop_reason: Optional[str] = None,
         allow_empty: bool = False,
+        routed_experts: Optional[Any] = None,
     ):
         """Build a verl TokenOutput while preserving AgentLoop shape invariants."""
         from verl.workers.rollout.replica import TokenOutput
@@ -2248,6 +2912,7 @@ class DynamoHttpServer:
         return TokenOutput(
             token_ids=token_ids,
             log_probs=log_probs,
+            routed_experts=routed_experts,
             stop_reason=stop_reason,
             extra_fields=extra_fields,
         )
@@ -2702,7 +3367,7 @@ class DynamoHttpServer:
 
     async def clear_kv_cache(self):
         if self._is_sglang():
-            await self._sglang_control_all("flush_cache")
+            await self._sglang_flush_cache_all()
             return
         if not self._control_endpoints:
             return
@@ -2756,12 +3421,15 @@ class DynamoHttpServer:
         clients = self._sglang_control_clients()
         if not clients:
             raise RuntimeError(
-                "engine=sglang but no /engine control endpoints were recorded; "
-                "check that DYN_SYSTEM_PORT was set for each dynamo.sglang shard."
+                "engine=sglang but no control endpoints were recorded; check that "
+                "DYN_SYSTEM_PORT was set for each dynamo.sglang shard (worker mode) or "
+                "that each sidecar shard recorded its SGLang HTTP port (sidecar mode)."
             )
+        # wait_ready already requires a 200 from flush_cache, so in sidecar mode
+        # (SGLang serves /flush_cache natively) there is nothing left to probe.
         await asyncio.gather(*[c.wait_ready(timeout_s=_FRONTEND_READY_TIMEOUT_S) for c in clients])
 
-        if self._sglang_cfg().get("enable_rl", True):
+        if not self._is_sglang_sidecar() and self._sglang_cfg().get("enable_rl", True):
             probe = await asyncio.gather(
                 *[c.flush_cache() for c in clients],
                 return_exceptions=True,
@@ -2856,7 +3524,7 @@ class DynamoHttpServer:
             self._generation_resumed.clear()
             await self._sglang_control_all("pause_generation", mode="abort")
             if reset_prefix_cache:
-                await self._sglang_control_all("flush_cache")
+                await self._sglang_flush_cache_all()
             return {"aborted_count": -1, "request_ids": [], "paused": True}
         # vLLM: bridge AsyncLLM.pause_generation (vLLM >= 0.12) through each shard's
         # control sidecar -- aborts in-flight requests (the frontend returns their
@@ -3208,6 +3876,13 @@ class DynamoReplica(RolloutReplica):
 
     def _get_server_name_prefix(self) -> str:
         return "dynamo_"
+
+    @property
+    def max_concurrency(self) -> int:
+        # verl 0.10 moved the server actor limit from RolloutReplica to config.
+        if hasattr(self.config, "ray_actor_max_concurrency"):
+            return self.config.ray_actor_max_concurrency
+        return super().max_concurrency
 
     async def sleep(self):
         """Drain in-flight requests before the weight-offloading sleep.
