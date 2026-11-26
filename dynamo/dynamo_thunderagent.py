@@ -27,16 +27,26 @@ from typing import Any, Optional
 from uuid import uuid4
 
 import ray
+import yaml
 
 from .dynamo_async_server import DynamoHttpServer, DynamoReplica
 
 logger = logging.getLogger(__file__)
 
-_REQUEST_PROGRAM: ContextVar[tuple[str, bool] | None] = ContextVar(
+# (program_id, parent_program_id, is_final) of the request being dispatched.
+_REQUEST_PROGRAM: ContextVar[tuple[str, Optional[str], bool] | None] = ContextVar(
     "dynamo_thunderagent_request_program",
     default=None,
 )
 _THUNDERAGENT_BACKEND_MODEL_SUFFIX = "--verl-thunderagent-backend"
+
+
+class FinalRequestError(RuntimeError):
+    """The frontend answered a ThunderAgent session-final request with a non-2xx status."""
+
+    def __init__(self, status: int, body: str):
+        super().__init__(f"ThunderAgent final request failed status={status} body={body[:2000]!r}")
+        self.status = status
 
 
 class DynamoThunderAgentHttpServer(DynamoHttpServer):
@@ -51,8 +61,9 @@ class DynamoThunderAgentHttpServer(DynamoHttpServer):
         super().__init__(*args, **kwargs)
         self._thunderagent_process: Optional[subprocess.Popen] = None
         self._thunderagent_log_fp = None
-        if self._thunderagent_enabled():
+        if self._thunderagent_enabled() and not self._thunderagent_native():
             self._router_mode = "round-robin"
+        self._validate_thunderagent_router_mode()
 
     def _thunderagent_config(self) -> dict[str, Any]:
         config = self._dynamo_cfg().get("thunderagent", {}) or {}
@@ -65,6 +76,59 @@ class DynamoThunderAgentHttpServer(DynamoHttpServer):
         if not isinstance(value, bool):
             raise TypeError("rollout.engine_kwargs.dynamo.thunderagent.enabled must be a boolean")
         return value
+
+    def _thunderagent_native(self) -> bool:
+        """Schedule programs with Dynamo's builtin ThunderAgent plugin (inside the KV router) instead of
+        launching the Python prototype as a separate router process."""
+        if not self._thunderagent_enabled():
+            return False
+        value = self._thunderagent_config().get("native", False)
+        if not isinstance(value, bool):
+            raise TypeError("rollout.engine_kwargs.dynamo.thunderagent.native must be a boolean")
+        return value
+
+    def _thunderagent_native_parameters(self) -> dict[str, Any]:
+        value = self._thunderagent_config().get("native_parameters", {}) or {}
+        if not isinstance(value, dict):
+            raise TypeError("rollout.engine_kwargs.dynamo.thunderagent.native_parameters must be a mapping")
+        return dict(value)
+
+    def _validate_thunderagent_router_mode(self) -> None:
+        if self._thunderagent_native() and self._router_mode != "kv":
+            raise ValueError(
+                "thunderagent.native=true runs inside the KV router; set rollout.engine_kwargs.dynamo.router_mode=kv "
+                f"(got {self._router_mode!r})"
+            )
+
+    def _thunderagent_policy(self) -> dict[str, Any]:
+        """The frontend policy file selecting the plugin's classifier and worker selector."""
+        classifier: dict[str, Any] = {"type": "thunderagent"}
+        parameters = self._thunderagent_native_parameters()
+        if parameters:
+            classifier["parameters"] = parameters
+        return {
+            "request_classifier": classifier,
+            "worker_selection": {
+                "aggregated": "thunderagent",
+                "instances": [{"name": "thunderagent", "type": "thunderagent"}],
+            },
+        }
+
+    def _write_thunderagent_policy(self) -> str:
+        log_root = os.environ.get("VERL_DYNAMO_LOG_DIR", "/tmp")
+        os.makedirs(log_root, exist_ok=True)
+        path = os.path.join(log_root, f"verl_dynamo_replica{self.replica_rank}_thunderagent_policy.yaml")
+        with open(path, "w") as fp:
+            yaml.safe_dump(self._thunderagent_policy(), fp, sort_keys=False)
+        return path
+
+    def _frontend_router_args(self) -> list[str]:
+        args = super()._frontend_router_args()
+        if not self._thunderagent_native():
+            return args
+        # soft affinity lets the plugin repack a session between turns
+        policy = self._write_thunderagent_policy()
+        return [*args, "--router-policy-config", policy, "--router-session-affinity-mode", "soft"]
 
     def _thunderagent_router_block_size(self) -> int:
         value = int(self._thunderagent_config().get("router_block_size", 16))
@@ -103,7 +167,9 @@ class DynamoThunderAgentHttpServer(DynamoHttpServer):
     ) -> list[str]:
         thunderagent_enabled = self._thunderagent_enabled()
         worker_model_name = (
-            f"{served_model_name}{_THUNDERAGENT_BACKEND_MODEL_SUFFIX}" if thunderagent_enabled else served_model_name
+            f"{served_model_name}{_THUNDERAGENT_BACKEND_MODEL_SUFFIX}"
+            if thunderagent_enabled and not self._thunderagent_native()
+            else served_model_name
         )
         command = super()._build_vllm_cmd(worker_model_name, tp, kv_events_config_json=kv_events_config_json)
         if not thunderagent_enabled:
@@ -139,7 +205,7 @@ class DynamoThunderAgentHttpServer(DynamoHttpServer):
         contradicts the router block size fails fast here, same as the vLLM
         --block-size check.
         """
-        if not self._thunderagent_enabled():
+        if not self._thunderagent_enabled() or self._thunderagent_native():
             return super()._build_sglang_cmd(served_model_name, tp, nccl_port=nccl_port, **kwargs)
         explicit_page_size = self._sglang_cfg().get("page_size")
         router_block_size = self._thunderagent_router_block_size()
@@ -152,7 +218,7 @@ class DynamoThunderAgentHttpServer(DynamoHttpServer):
         return super()._build_sglang_cmd(worker_model_name, tp, nccl_port=nccl_port, **kwargs)
 
     def _start_thunderagent(self) -> None:
-        if not self._thunderagent_enabled() or self._thunderagent_process is not None:
+        if not self._thunderagent_enabled() or self._thunderagent_native() or self._thunderagent_process is not None:
             return
         env = os.environ.copy()
         env.update(self._dynamo_env_vars())
@@ -189,22 +255,34 @@ class DynamoThunderAgentHttpServer(DynamoHttpServer):
         headers = super()._frontend_headers(request_id)
         request_program = _REQUEST_PROGRAM.get()
         if request_program is not None:
-            session_id, is_final = request_program
+            session_id, parent_session_id, is_final = request_program
             headers.pop("x-dynamo-session-id", None)
             headers["X-Dynamo-Session-ID"] = session_id
+            if parent_session_id:
+                # The frontend normalizes this into agent_context.parent_session_id,
+                # which lets a subagent-aware scheduler rebuild the program tree.
+                headers["X-Dynamo-Parent-Session-ID"] = parent_session_id
             if is_final:
                 headers["X-Dynamo-Session-Final"] = "true"
         return headers
 
-    async def generate(self, *args, thunderagent_session_id: Optional[str] = None, **kwargs):
+    async def generate(
+        self,
+        *args,
+        thunderagent_session_id: Optional[str] = None,
+        thunderagent_parent_session_id: Optional[str] = None,
+        **kwargs,
+    ):
         if not self._thunderagent_enabled():
             return await super().generate(*args, **kwargs)
         if not thunderagent_session_id:
             raise RuntimeError("ThunderAgent generation requires a non-empty session ID")
+        if thunderagent_parent_session_id == thunderagent_session_id:
+            raise ValueError("ThunderAgent parent session ID must differ from the session ID")
         if self._use_direct_generate():
             raise RuntimeError("direct_generate bypasses ThunderAgent and cannot be enabled")
 
-        token = _REQUEST_PROGRAM.set((thunderagent_session_id, False))
+        token = _REQUEST_PROGRAM.set((thunderagent_session_id, thunderagent_parent_session_id, False))
         try:
             return await super().generate(*args, **kwargs)
         finally:
@@ -222,21 +300,28 @@ class DynamoThunderAgentHttpServer(DynamoHttpServer):
             raise ValueError("thunderagent.finalize_retry_delay_s must be non-negative")
         return delay
 
-    @staticmethod
-    def _validate_final_response(status: int, body: str) -> None:
+    def _validate_final_response(self, status: int, body: str) -> None:
         if not 200 <= status < 300:
-            raise RuntimeError(f"ThunderAgent final request failed status={status} body={body[:2000]!r}")
-        if not body.strip():
+            raise FinalRequestError(status, body)
+        if not body.strip() or self._thunderagent_native():
+            # the native plugin lets the one-token final request complete on a worker
             return
         data = json.loads(body)
         if data.get("choices"):
             raise RuntimeError("ThunderAgent final request was bypassed and reached a model worker")
 
-    async def finalize_program(self, session_id: str) -> None:
+    async def finalize_program(self, session_id: str) -> bool:
+        """Release a ThunderAgent program with the session-final request.
+
+        Returns False without posting while the engines are paused in native mode: the request
+        would park on a worker until resume_generation (the Python prototype answers it itself).
+        """
         if not self._thunderagent_enabled():
-            return
+            return True
         if not session_id:
             raise ValueError("session_id must be non-empty")
+        if self._thunderagent_native() and not self._generation_resumed.is_set():
+            return False
 
         request_id = f"thunderagent-final-{uuid4().hex}"
         payload = {
@@ -245,7 +330,7 @@ class DynamoThunderAgentHttpServer(DynamoHttpServer):
             "max_tokens": 1,
             "stream": False,
         }
-        token = _REQUEST_PROGRAM.set((session_id, True))
+        token = _REQUEST_PROGRAM.set((session_id, None, True))
         try:
             last_error = None
             attempts = self._finalize_max_attempts()
@@ -257,18 +342,39 @@ class DynamoThunderAgentHttpServer(DynamoHttpServer):
                 else:
                     if status not in {408, 429} and status < 500:
                         self._validate_final_response(status, body)
-                        return
-                    last_error = RuntimeError(f"ThunderAgent final request failed status={status} body={body[:2000]!r}")
+                        return True
+                    last_error = FinalRequestError(status, body)
                 if attempt < attempts:
                     await asyncio.sleep(self._finalize_retry_delay())
             raise RuntimeError(f"ThunderAgent final request failed after {attempts} attempts") from last_error
         finally:
             _REQUEST_PROGRAM.reset(token)
 
+    def _health_probe_timeout(self) -> float:
+        timeout = float(self._thunderagent_config().get("health_probe_timeout_s", 60.0))
+        if timeout <= 0:
+            raise ValueError("thunderagent.health_probe_timeout_s must be positive")
+        return timeout
+
+    async def _probe_final_request(self) -> None:
+        """Release a throwaway program to prove the session-final path works; the completions
+        route may answer 404 for a moment after /health passes, so a 404 is waited out."""
+        deadline = time.monotonic() + self._health_probe_timeout()
+        while True:
+            try:
+                await self.finalize_program(f"thunderagent-health-{time.time_ns()}")
+                return
+            except FinalRequestError as error:
+                if error.status != 404 or time.monotonic() >= deadline:
+                    raise
+            await asyncio.sleep(1.0)
+
     async def _healthcheck_frontend(self, expected_workers: int) -> None:
-        await super()._healthcheck_frontend(expected_workers + int(self._thunderagent_enabled()))
+        await super()._healthcheck_frontend(
+            expected_workers + int(self._thunderagent_enabled() and not self._thunderagent_native())
+        )
         if self._thunderagent_enabled():
-            await self.finalize_program(f"thunderagent-health-{time.time_ns()}")
+            await self._probe_final_request()
 
     async def shutdown(self) -> None:
         frontend = self._frontend_process

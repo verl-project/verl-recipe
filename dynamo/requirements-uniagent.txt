@@ -1,0 +1,3 @@
+# Uni-Agent PR #270: agent context propagation, including Python 3.10 and C1 fixes.
+# Immutable source archive; install verl separately.
+uni-agent @ https://codeload.github.com/sophiayyya/uni-agent/tar.gz/4f3cd3451295ad38269e466d037714d1ebead9f7

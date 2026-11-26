@@ -1,0 +1,24 @@
+# @package _global_
+# One 8-GPU training node + one 8-GPU rollout node. Start Ray on both first.
+trainer:
+  v1:
+    trainer_mode: separate_async
+    separate_async:
+      hybrid_rollout:
+        enable_switch: false
+      num_warmup_batches: 1
+      parameter_sync_step: 1
+
+actor_rollout_ref:
+  hybrid_engine: false
+  rollout:
+    nnodes: 1
+    n_gpus_per_node: 8
+    checkpoint_engine:
+      backend: nccl
+      update_weights_bucket_megabytes: 512
+
+ray_kwargs:
+  ray_init:
+    address: ${oc.env:RAY_CLUSTER_ADDRESS}
+    num_cpus: null
