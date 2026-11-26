@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(bash example/run_simple_test.sh)",
+      "Bash(nvidia-smi:*)",
+      "Bash(fuser /dev/nvidia0 /dev/nvidia1 /dev/nvidia2 /dev/nvidia3 /dev/nvidia4 /dev/nvidia5)",
+      "Bash(xargs -I{} ps -p {} -o pid,user,cmd --no-headers)",
+      "Bash(who)",
+      "Bash(w)",
+      "Bash(ls /proc/*/maps)",
+      "Bash(xargs -I{} sh -c 'grep -l nvidia {} 2>/dev/null')",
+      "Bash(cat /proc/driver/nvidia/gpus/*/clients)",
+      "Bash(pip show:*)",
+      "Bash(python3 -c \"import sweagent\")",
+      "Read(//data1/lmy/agentic-rl/SWE-agent/sweagent/**)",
+      "Read(//data1/lmy/agentic-rl/**)",
+      "Bash(grep -ri \"sweagent\\\\|swe-agent\\\\|swe_agent\" /home/wtc/git/verl-recipe/swe_agent/README* /home/wtc/git/verl-recipe/swe_agent/requirements*)",
+      "Bash(pip install:*)",
+      "Bash(python3:*)",
+      "Read(//usr/local/lib/python3.12/dist-packages/**)",
+      "Bash(docker run:*)",
+      "Bash(bash:*)"
+    ]
+  }
+}
