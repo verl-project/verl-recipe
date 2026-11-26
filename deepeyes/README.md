@@ -38,6 +38,35 @@ Next, you can start the training:
 bash recipe/deepeyes/run_deepeyes_grpo.sh
 ```
 
+## Normalized bounding boxes
+
+The default zoom tool uses pixel coordinates. For models and prompts that use a
+0–1000 coordinate grid, select `configs/image_zoom_in_rel_tool_config.yaml`:
+
+```bash
+TOOL_CONFIG_PATH=/absolute/path/to/recipe/deepeyes/configs/image_zoom_in_rel_tool_config.yaml \
+    bash recipe/deepeyes/run_deepeyes_grpo.sh
+```
+
+Fill in the example launcher's model/data paths and training settings as usual.
+For a custom launcher, set `actor_rollout_ref.rollout.multi_turn.tool_config_path`
+to this config, and use the same config for dataset-side tool schemas, if configured.
+The public function name remains `image_zoom_in_tool`.
+
+The tool scales x coordinates by width/1000 and y coordinates by height/1000,
+using the image dimensions **after the base tool loads and resizes the image**.
+For a loaded image of 2000×1000, `[250, 250, 750, 750]` selects pixels
+`[500, 250, 1500, 750]`, giving a 1000×500 crop instead of the 500×500 pixel crop.
+Coordinates are clamped to `[0, 1000]`; crop validation, minimum-size handling,
+and responses follow the existing `ImageZoomInTool`.
+
+CPU tests require the [declared verl version](REQUIRED_VERL.txt), `pytest`, and
+`pytest-asyncio`, with this repository available as `recipe`:
+
+```bash
+python -m pytest -q recipe/deepeyes/tests/test_relative_zoom_tool.py
+```
+
 ## Performance
 
 See [Comment](https://github.com/volcengine/verl/pull/2398#issuecomment-3157142856) for more details.

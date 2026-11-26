@@ -1,0 +1,30 @@
+tools:
+  - class_name: "recipe.deepeyes.tools.image_zoom_in_tool_rel.ImageZoomInToolRelative"
+    config:
+      num_workers: 256
+      rate_limit: 256
+      timeout: 60
+      type: native
+    tool_schema:
+      type: "function"
+      function:
+        # Match the existing dataset prompts and tools_kwargs key.
+        name: "image_zoom_in_tool"
+        description: "Crop and zoom into an image region using coordinates normalized to 0-1000."
+        parameters:
+          type: "object"
+          properties:
+            bbox_2d:
+              type: "array"
+              items:
+                type: "number"
+              minItems: 4
+              maxItems: 4
+              description: >-
+                [x1, y1, x2, y2] on a 0-1000 grid over the full input image,
+                with (x1, y1) at the top-left and (x2, y2) at the bottom-right.
+                x scales with image width and y with height.
+            label:
+              type: "string"
+              description: "An optional label for the region."
+          required: ["bbox_2d"]
