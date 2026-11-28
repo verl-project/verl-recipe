@@ -1,11 +1,18 @@
 #!/usr/bin/env bash
 # DeepSWE | Qwen3.5-397B-A17B | R2E-Gym + ReAct (uni-agent) | TorchTitan trainer + FP8 vLLM rollout | TPU v7x
 #
-# Defaults match our validated 384-chip TPU v7x run (32 hosts / 128 chips / 256 TensorCores trainer with
-# TP=1, CP=4 Ulysses, DP_shard=64, EP=8, static RoE dispatcher, 8 token chunks, paired grouped MM, bf16 params +
-# fp32 masters + CPU optimizer offload, bf16 gradient reduce-scatter; 64 x 2x2x1 rollout replicas = 256 chips / 512 TensorCores with on-load
-# online FP8 MoE quantization and dummy weight load), 64k context (8k prompt + 56k response), RLOO, wait off-policy,
-# lookahead sandbox warming, and 0.992_1.008 rollout correction band.
+# Trainer defaults follow the no-drop 64K configuration measured on the standalone trainer benchmark (128 TPU v7x
+# chips / 256 TensorCores, graph_trainer, TP=1, CP=2 Ulysses, DP_shard=128, EP=8 Ring-of-Experts with chunked no-drop
+# overflow at capacity factor 3.0 and 2 token chunks, global FFD packing into 65536-token rows, Gated DeltaNet CP
+# all_to_all, bf16 params + fp32 masters + CPU optimizer offload, bf16 gradient reduce-scatter): 118.9 s/step versus
+# 181.9 s for the previous CP=4 / capacity-bounded / per-rank-packing defaults. Rollout: 64 x 2x2x1 replicas = 256 chips
+# / 512 TensorCores with on-load online FP8 MoE quantization and dummy weight load. 64k context (8k prompt + 56k
+# response), GRPO-LOO, wait off-policy, lookahead sandbox warming.
+#
+# Companion changes (older images ignore the new knobs, see the notes next to each one):
+#   - VERL_TPU_EP_OVERFLOW_MODE=chunked needs the torchtitan RoE no-drop overflow-chunks change.
+#   - VERL_TPU_GLOBAL_PACK=1 needs the verl global-pack planner (verl/utils/global_pack.py) and the
+#     verl-hardware-plugin change that packs each rank with the same aligned FFD.
 #
 # Delegates launcher wiring and Hydra overrides to run_qwen3_5_35b_deepswe.sh.
 
@@ -22,7 +29,10 @@ export TPU_ACCELERATOR_TYPE="${TPU_ACCELERATOR_TYPE:-tpu7x}"
 export NNODES_TRAINER="${NNODES_TRAINER:-32}"
 export N_CHIPS_TRAINER="${N_CHIPS_TRAINER:-8}"
 export TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-1}"
-export CONTEXT_PARALLEL_SIZE="${CONTEXT_PARALLEL_SIZE:-4}"
+# CP=2 halves the per-rank micro-batch count of CP=4 at 64K and keeps attention/GDN CP traffic inside one chip pair.
+# With CP>=4 set TT_TOKAMAX_STACKED_Q=8 (CP=4) or 4 (CP=8) below: the stacked-Q splash heads must divide the
+# per-rank head count.
+export CONTEXT_PARALLEL_SIZE="${CONTEXT_PARALLEL_SIZE:-2}"
 export CONTEXT_PARALLEL_STRATEGY="${CONTEXT_PARALLEL_STRATEGY:-ulysses}"
 export DATA_PARALLEL_SHARD_SIZE="${DATA_PARALLEL_SHARD_SIZE:-$((NNODES_TRAINER * N_CHIPS_TRAINER / TENSOR_PARALLEL_SIZE / CONTEXT_PARALLEL_SIZE))}"
 export EXPERT_PARALLEL_SIZE="${EXPERT_PARALLEL_SIZE:-8}"
@@ -30,7 +40,9 @@ export FUSE_QKV="${FUSE_QKV:-True}"
 export USE_KL_LOSS="${USE_KL_LOSS:-False}"
 
 # Trainer memory & EP compute
-export USE_GRAPH_TRAINER_OPT="${USE_GRAPH_TRAINER_OPT:-False}"
+# graph_trainer: every result above was measured with it, and the TT_*/VERL_TPU_* trainer knobs below are only
+# forwarded to the workers on this path (run_qwen3_5_35b_deepswe.sh).
+export USE_GRAPH_TRAINER_OPT="${USE_GRAPH_TRAINER_OPT:-True}"
 export PARAM_DTYPE="${PARAM_DTYPE:-bfloat16}"
 export FP32_MASTER="${FP32_MASTER:-True}"
 # dtype of the FSDP gradient reduce-scatter. The parameters are bf16 already (the fp32 masters stay on the host), so
@@ -38,21 +50,51 @@ export FP32_MASTER="${FP32_MASTER:-True}"
 MIXED_PRECISION_REDUCE="${MIXED_PRECISION_REDUCE:-bfloat16}"
 export OPTIMIZER_HOST_OFFLOAD="${OPTIMIZER_HOST_OFFLOAD:-True}"
 export OPTIM_IMPL="${OPTIM_IMPL:-fused}"
+# 0 keeps the FP32_MASTER + OPTIMIZER_HOST_OFFLOAD step above (fp32 masters, host AdamW). 1 (the 35B graph_trainer
+# default) takes the compiled on-device step, which returns before the fp32-master path: it runs AdamW on the bf16
+# params with bf16 moments and ignores FP32_MASTER / OPTIMIZER_HOST_OFFLOAD, so ~1e-6 updates can round to zero.
+export VERL_TPU_COMPILED_OPT_STEP="${VERL_TPU_COMPILED_OPT_STEP:-0}"
 # verl-hardware-plugin#187 replaced ep_dispatcher with ep_transport (default "auto" -> Ring-of-Experts when EP <= top_k).
 export EP_DISPATCHER="${EP_DISPATCHER:-}"
 export EP_TRANSPORT="${EP_TRANSPORT:-auto}"
-export EP_TOKEN_CHUNKS="${EP_TOKEN_CHUNKS:-8}"
+# No-drop chunked overflow: chunk-0 buffers hold EP_CAPACITY_FACTOR x the balanced rows and a while-loop tail runs the
+# overflow, so no token is dropped. Needs the torchtitan RoE overflow-chunks change; an image without it ignores
+# VERL_TPU_EP_OVERFLOW_MODE and DROPS the tokens above capacity, so there set EP_CAPACITY_FACTOR=8.0 EP_TOKEN_CHUNKS=8
+# (the previous worst-case-buffer defaults) instead.
+export VERL_TPU_EP_OVERFLOW_MODE="${VERL_TPU_EP_OVERFLOW_MODE:-chunked}"
+export EP_CAPACITY_FACTOR="${EP_CAPACITY_FACTOR:-3.0}"
+export EP_TOKEN_CHUNKS="${EP_TOKEN_CHUNKS:-2}"
+# Keep the chunked expert weight-gradient accumulation in bf16.
+export VERL_TPU_EP_CHUNK_DW_FP32="${VERL_TPU_EP_CHUNK_DW_FP32:-0}"
 export EP_PAIRED_GROUPED_MM="${EP_PAIRED_GROUPED_MM:-True}"
 export AC_SAVE_SPLASH_AND_ROUTING="${AC_SAVE_SPLASH_AND_ROUTING:-True}"
 export SPARSECORE_OFFLOAD="${SPARSECORE_OFFLOAD:-True}"
 export TRAINER_SCOPED_VMEM_LIMIT_KIB="${TRAINER_SCOPED_VMEM_LIMIT_KIB-65472}"
-# SPARSECORE_OFFLOAD=True appends the SparseCore + HLO sharding v3=false flags in run_qwen3_5_torchtitan.sh;
-# keeping TRAINER_EXTRA_LIBTPU_INIT_ARGS empty avoids duplicating them.
-export TRAINER_EXTRA_LIBTPU_INIT_ARGS="${TRAINER_EXTRA_LIBTPU_INIT_ARGS-}"
+# SPARSECORE_OFFLOAD=True appends the SparseCore + HLO sharding v3=false flags in run_qwen3_5_torchtitan.sh, so only
+# the extra DVFS and latency-hiding-scheduler flags go here.
+export TRAINER_EXTRA_LIBTPU_INIT_ARGS="${TRAINER_EXTRA_LIBTPU_INIT_ARGS---xla_tpu_dvfs_p_state=7 --xla_latency_hiding_scheduler_rerun=2}"
+# Enqueue the next micro-batch while the current one runs.
+export VERL_TPU_ASYNC_MB_ENQUEUE="${VERL_TPU_ASYNC_MB_ENQUEUE:-1}"
+# Gated DeltaNet CP: all_to_all (head relayout) instead of allgather+reducescatter; all_to_all takes no reduce dtype.
+export CP_GDN_STRATEGY="${CP_GDN_STRATEGY:-all_to_all}"
+# Tokamax splash tiles for CP=2 (google-pytorch/torchtitan#232). TT_TOKAMAX_STACKED_Q must be 8 at CP=4, 4 at CP=8.
+export TT_TOKAMAX_STACKED_Q="${TT_TOKAMAX_STACKED_Q:-16}"
+export TT_SPLASH_BLOCK_Q="${TT_SPLASH_BLOCK_Q:-128}"
+export TT_SPLASH_BLOCK_KV="${TT_SPLASH_BLOCK_KV:-1024}"
+export TT_SPLASH_BLOCK_KV_DKV="${TT_SPLASH_BLOCK_KV_DKV:-1024}"
+export TT_SPLASH_BLOCK_Q_DKV="${TT_SPLASH_BLOCK_Q_DKV:-1024}"
+export TT_SPLASH_MAX_COMPUTE_BLOCK="${TT_SPLASH_MAX_COMPUTE_BLOCK:-1024}"
 export SPLASH_MAX_BLOCK_SIZE="${SPLASH_MAX_BLOCK_SIZE-1024}"
 export FROZEN_PARAM_REGEX="${FROZEN_PARAM_REGEX-moe.router.gate}"
 export GDN_ROW_SLOT_LEN="${GDN_ROW_SLOT_LEN:-}"
-export USE_DYNAMIC_BSZ="${USE_DYNAMIC_BSZ:-False}"
+# Global FFD packing: the controller assigns trajectories to DP ranks so that each rank's FFD packing into
+# VERL_TPU_BIN_SLOT_LEN-token rows needs as few micro-batches as possible (7 -> 5 per rank, row fill 0.58 -> 0.81 on
+# the benchmark). Needs the verl global-pack planner and the matching verl-hardware-plugin change; older verl ignores
+# VERL_TPU_GLOBAL_PACK and keeps the default seqlen balancing. With PPO_MINI_BATCH_SIZE < TRAIN_BATCH_SIZE the plan
+# holds per mini-batch only with actor.shuffle=False.
+export USE_DYNAMIC_BSZ="${USE_DYNAMIC_BSZ:-True}"
+export VERL_TPU_BIN_SLOT_LEN="${VERL_TPU_BIN_SLOT_LEN:-65536}"
+export VERL_TPU_GLOBAL_PACK="${VERL_TPU_GLOBAL_PACK:-1}"
 
 # Sampler topology & online FP8 MoE quantization: 64 x 2x2x1 replicas (512 TensorCores = 256 TPU v7x chips).
 export NNODES_ROLLOUT="${NNODES_ROLLOUT:-64}"
@@ -79,6 +121,7 @@ if [[ "${USE_DYNAMIC_BSZ,,}" == "true" ]]; then
 else
   export MAX_TOKEN_LEN_PER_DEVICE="${MAX_TOKEN_LEN_PER_DEVICE:-$((MICRO_BATCH_SIZE * MAX_MODEL_LEN))}"
 fi
+export MAX_TOKEN_LEN_PER_GPU="${MAX_TOKEN_LEN_PER_GPU:-${VERL_TPU_BIN_SLOT_LEN}}"
 export STATIC_MICRO_BATCH_LEN="${STATIC_MICRO_BATCH_LEN-$((MICRO_BATCH_SIZE * MAX_MODEL_LEN))}"
 export STATIC_MAX_RESPONSE_LEN="${STATIC_MAX_RESPONSE_LEN-${MAX_RESPONSE_LEN}}"
 export PAD_TO_LENGTH_BUCKET="${PAD_TO_LENGTH_BUCKET:-4096}"
@@ -144,4 +187,7 @@ exec bash "${SCRIPT_DIR}/run_qwen3_5_35b_deepswe.sh" \
   "++ray_kwargs.ray_init.runtime_env.env_vars.QUANTIZE_ON_LOAD_PREFIXES='${QUANTIZE_ON_LOAD_PREFIXES}'" \
   "++ray_kwargs.ray_init.runtime_env.env_vars.TPU_MOE_REQUANT_CHUNK_BYTES='${TPU_MOE_REQUANT_CHUNK_BYTES}'" \
   "++ray_kwargs.ray_init.runtime_env.env_vars.VLLM_RAY_EXTRA_ENV_VARS_TO_COPY='${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY}'" \
+  "++ray_kwargs.ray_init.runtime_env.env_vars.VERL_TPU_EP_OVERFLOW_MODE='${VERL_TPU_EP_OVERFLOW_MODE}'" \
+  "++ray_kwargs.ray_init.runtime_env.env_vars.VERL_TPU_EP_CHUNK_DW_FP32='${VERL_TPU_EP_CHUNK_DW_FP32}'" \
+  "++ray_kwargs.ray_init.runtime_env.env_vars.VERL_TPU_GLOBAL_PACK='${VERL_TPU_GLOBAL_PACK}'" \
   "$@"

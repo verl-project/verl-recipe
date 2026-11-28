@@ -254,6 +254,9 @@ if [[ -n "${GDN_ROW_SLOT_LEN}" ]]; then
 fi
 if [[ "${USE_GRAPH_TRAINER_OPT,,}" == "true" ]]; then
   export MIXED_PRECISION_REDUCE="${MIXED_PRECISION_REDUCE:-bfloat16}"
+  # Gated DeltaNet CP strategy: allgather_reducescatter (with CP_GDN_REDUCE_DTYPE) or all_to_all, which rejects a
+  # reduce dtype, so none is passed for it.
+  export CP_GDN_STRATEGY="${CP_GDN_STRATEGY:-allgather_reducescatter}"
   export CP_GDN_REDUCE_DTYPE="${CP_GDN_REDUCE_DTYPE:-bfloat16}"
   export OPTIMIZER_COMPILE="${OPTIMIZER_COMPILE:-separate_graph}"
   export SAVE_LAST_N_GDN="${SAVE_LAST_N_GDN:-3}"
@@ -287,14 +290,16 @@ if [[ "${USE_GRAPH_TRAINER_OPT,,}" == "true" ]]; then
   export TT_LCE_FWD_BLOCKS="${TT_LCE_FWD_BLOCKS:-1024,2048,2560}"
   export VERL_TPU_BIN_SLOT_LEN="${VERL_TPU_BIN_SLOT_LEN:-65536}"
   export VERL_TPU_ASYNC_MB_ENQUEUE="${VERL_TPU_ASYNC_MB_ENQUEUE:-1}"
+  # NOTE: 1 takes the compiled on-device optimizer step, which bypasses fp32 masters and CPU optimizer offload (AdamW
+  # on the params' dtype with moments in that dtype). This 35B recipe keeps fp32 params (PARAM_DTYPE=float32), so the
+  # step stays fp32 here; recipes with bf16 params + FP32_MASTER (397B) must set 0.
   export VERL_TPU_COMPILED_OPT_STEP="${VERL_TPU_COMPILED_OPT_STEP:-1}"
   export VERL_TPU_CPU_OPT_THREADS="${VERL_TPU_CPU_OPT_THREADS:-24}"
   OPTIMIZATION_OVERRIDES+=(
     "++actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.model_kernels=all"
     "++actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.trainer_mode=graph_trainer"
     "++actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.mixed_precision_reduce=${MIXED_PRECISION_REDUCE}"
-    "++actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.context_parallel_gdn_strategy=allgather_reducescatter"
-    "++actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.context_parallel_gdn_reduce_dtype=${CP_GDN_REDUCE_DTYPE}"
+    "++actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.context_parallel_gdn_strategy=${CP_GDN_STRATEGY}"
     "++actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.kda_document_budget=32"
     "++actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.graph_trainer.memory_policy=tpu_selective"
     "++actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.graph_trainer.save_regions=['moe.routing','attention.inner_attention']"
@@ -340,6 +345,11 @@ if [[ "${USE_GRAPH_TRAINER_OPT,,}" == "true" ]]; then
     "++ray_kwargs.ray_init.runtime_env.env_vars.VERL_TPU_COMPILED_OPT_STEP='${VERL_TPU_COMPILED_OPT_STEP}'"
     "++ray_kwargs.ray_init.runtime_env.env_vars.VERL_TPU_CPU_OPT_THREADS='${VERL_TPU_CPU_OPT_THREADS}'"
   )
+  if [[ "${CP_GDN_STRATEGY}" != "all_to_all" ]]; then
+    OPTIMIZATION_OVERRIDES+=(
+      "++actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.context_parallel_gdn_reduce_dtype=${CP_GDN_REDUCE_DTYPE}"
+    )
+  fi
 fi
 
 MODE_OVERRIDES=(
